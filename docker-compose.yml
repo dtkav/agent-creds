@@ -1,0 +1,20 @@
+services:
+  envoy:
+    build: .
+    ports:
+      - "443:443"
+    depends_on:
+      - authz
+    networks:
+      - agent-creds
+
+  authz:
+    build: ./authz
+    environment:
+      - MACAROON_SIGNING_KEY=${MACAROON_SIGNING_KEY}
+      - STRIPE_API_KEY=${STRIPE_API_KEY}
+    networks:
+      - agent-creds
+
+networks:
+  agent-creds:

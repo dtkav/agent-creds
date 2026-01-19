@@ -1,0 +1,8 @@
+# Example mintfs configuration
+# Mount point - bin/arun looks for ./creds
+mount_point = "./creds"
+
+[credentials.stripe]
+# Can use base_token directly or base_token_file to read from file
+base_token_file = "./.base-token"
+expiry = "1h"  # 1 hour for interactive dev; use shorter (e.g., "5m") for agents

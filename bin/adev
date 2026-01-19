@@ -1,0 +1,38 @@
+#!/bin/bash
+set -e
+
+# Start an interactive dev session with the agent-creds proxy
+# Usage: bin/adev
+
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$SCRIPT_DIR"
+
+# Build sandbox if needed
+make build
+
+# Prepare overlay directory
+mkdir -p claude-dev/overlay-changes
+
+# Mount creds directory if mintfs is running
+CREDS_MOUNT=""
+if [ -d "creds" ]; then
+  CREDS_MOUNT="-v $SCRIPT_DIR/creds:/creds:ro"
+fi
+
+docker run -it --rm \
+  --cap-add=SYS_ADMIN \
+  --network=envoy_agent-creds \
+  -v "$SCRIPT_DIR:/src-ro:ro" \
+  -v "$SCRIPT_DIR/claude-dev/overlay-changes:/src-upper" \
+  -v "$HOME/.claude:/home/devuser/.claude" \
+  $CREDS_MOUNT \
+  sandbox
+
+echo ""
+echo "=== Changes made in container ==="
+echo ""
+if [ -d claude-dev/overlay-changes ] && [ "$(ls -A claude-dev/overlay-changes 2>/dev/null)" ]; then
+  find claude-dev/overlay-changes -type f | sed 's|claude-dev/overlay-changes/||'
+else
+  echo "No changes"
+fi

@@ -1,0 +1,37 @@
+# Environment files
+.env
+*.env
+.auth.env
+
+# mitmproxy certs (persisted locally)
+.mitmproxy/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+
+# Docker volumes
+claude-dev/workspace/
+claude-dev/overlay-changes/
+
+# Go binaries
+authz/authz
+authz/mint
+mint
+authz/.signing-key
+authz/.token
+mintfs/mintfs
+
+# mintfs mount point and base token
+creds/
+.base-token
+
+# Fly.io config (contains private app names)
+fly.toml
+authz/fly.toml
+
+# Generated files (run `make generate` to create)
+generated/

@@ -7,11 +7,60 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$SCRIPT_DIR"
 
-# Build sandbox if needed
-make build
+# Status file for spinner message
+STATUS_FILE=$(mktemp)
+echo "starting" > "$STATUS_FILE"
 
-# Prepare overlay directory
-mkdir -p claude-dev/overlay-changes
+# Spinner function - reads status from file
+spinner() {
+  local chars="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+  while true; do
+    local msg=$(cat "$STATUS_FILE" 2>/dev/null || echo "starting")
+    for (( i=0; i<${#chars}; i++ )); do
+      printf "\r\033[36m%s\033[0m %s" "${chars:$i:1}" "$msg"
+      sleep 0.1
+    done
+  done
+}
+
+status() { echo "$1" > "$STATUS_FILE"; }
+
+# Start spinner
+spinner &
+SPINNER_PID=$!
+trap "kill $SPINNER_PID 2>/dev/null; printf '\r\033[K'; rm -f $STATUS_FILE" EXIT
+
+# Ensure proxy is running
+if ! docker compose ps --status running 2>/dev/null | grep -q envoy; then
+  status "starting proxy..."
+  python3 scripts/generate.py >/dev/null
+  docker compose up -d --build --quiet-pull 2>&1 | grep -v "^Network\|^Container" || true
+fi
+
+# Build aenv if needed
+if [ ! -f generated/aenv ] || [ cmd/aenv/main.go -nt generated/aenv ]; then
+  status "building aenv..."
+  (cd cmd/aenv && go build -o ../../generated/aenv .)
+fi
+
+# Build sandbox only if needed
+NEEDS_BUILD=false
+if ! docker image inspect sandbox >/dev/null 2>&1; then
+  NEEDS_BUILD=true
+elif [ claude-dev/Dockerfile -nt generated/.sandbox-built ] || \
+     [ claude-dev/entrypoint.sh -nt generated/.sandbox-built ] || \
+     [ generated/aenv -nt generated/.sandbox-built ] || \
+     [ generated/certs/ca.crt -nt generated/.sandbox-built ] || \
+     [ generated/hosts -nt generated/.sandbox-built ]; then
+  NEEDS_BUILD=true
+fi
+
+if [ "$NEEDS_BUILD" = true ]; then
+  status "building sandbox..."
+  docker build -q -t sandbox --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) \
+    -f claude-dev/Dockerfile . >/dev/null
+  touch generated/.sandbox-built
+fi
 
 # Mount creds directory if mintfs is running
 CREDS_MOUNT=""
@@ -19,20 +68,14 @@ if [ -d "creds" ]; then
   CREDS_MOUNT="-v $SCRIPT_DIR/creds:/creds:ro"
 fi
 
+# Stop spinner and clear line
+kill $SPINNER_PID 2>/dev/null
+trap - EXIT
+printf '\r\033[K'
+
 docker run -it --rm \
-  --cap-add=SYS_ADMIN \
-  --network=envoy_agent-creds \
-  -v "$SCRIPT_DIR:/src-ro:ro" \
-  -v "$SCRIPT_DIR/claude-dev/overlay-changes:/src-upper" \
+  --network=agent-creds_agent-creds \
+  -v "$SCRIPT_DIR:/workspace" \
   -v "$HOME/.claude:/home/devuser/.claude" \
   $CREDS_MOUNT \
   sandbox
-
-echo ""
-echo "=== Changes made in container ==="
-echo ""
-if [ -d claude-dev/overlay-changes ] && [ "$(ls -A claude-dev/overlay-changes 2>/dev/null)" ]; then
-  find claude-dev/overlay-changes -type f | sed 's|claude-dev/overlay-changes/||'
-else
-  echo "No changes"
-fi

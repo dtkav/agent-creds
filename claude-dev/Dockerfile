@@ -36,6 +36,9 @@ RUN update-ca-certificates
 # Copy hosts file for runtime
 COPY generated/hosts /etc/proxy-hosts
 
+# Copy aenv binary (pre-built on host)
+COPY generated/aenv /usr/local/bin/aenv
+
 # Copy entrypoint
 COPY claude-dev/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

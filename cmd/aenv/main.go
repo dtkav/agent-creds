@@ -26,7 +26,7 @@ type Domain struct {
 
 func main() {
 	// Read domains.json
-	data, err := os.ReadFile("/workspace/generated/domains.json")
+	data, err := os.ReadFile("/etc/aenv/domains.json")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error reading domains.json: %v\n", err)
 		os.Exit(1)

@@ -36,8 +36,9 @@ RUN update-ca-certificates
 # Copy hosts file for runtime
 COPY generated/hosts /etc/proxy-hosts
 
-# Copy aenv binary (pre-built on host)
+# Copy aenv binary and config
 COPY generated/aenv /usr/local/bin/aenv
+COPY generated/domains.json /etc/aenv/domains.json
 
 # Copy entrypoint
 COPY claude-dev/entrypoint.sh /entrypoint.sh
@@ -49,6 +50,7 @@ RUN mkdir -p /src-ro /src-upper /src-work /workspace \
 
 # Switch to user
 USER devuser
+ENV HOME=/home/devuser
 WORKDIR /workspace
 
 # Node.js also needs to trust the CA

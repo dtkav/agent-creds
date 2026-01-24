@@ -4,6 +4,7 @@ set -e
 # Start an interactive dev session with the agent-creds proxy
 # Usage: bin/adev
 
+WORK_DIR="$(pwd)"
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$SCRIPT_DIR"
 
@@ -51,7 +52,8 @@ elif [ claude-dev/Dockerfile -nt generated/.sandbox-built ] || \
      [ claude-dev/entrypoint.sh -nt generated/.sandbox-built ] || \
      [ generated/aenv -nt generated/.sandbox-built ] || \
      [ generated/certs/ca.crt -nt generated/.sandbox-built ] || \
-     [ generated/hosts -nt generated/.sandbox-built ]; then
+     [ generated/hosts -nt generated/.sandbox-built ] || \
+     [ generated/domains.json -nt generated/.sandbox-built ]; then
   NEEDS_BUILD=true
 fi
 
@@ -75,7 +77,7 @@ printf '\r\033[K'
 
 docker run -it --rm \
   --network=agent-creds_agent-creds \
-  -v "$SCRIPT_DIR:/workspace" \
+  -v "$WORK_DIR:/workspace" \
   -v "$HOME/.claude:/home/devuser/.claude" \
   $CREDS_MOUNT \
   sandbox

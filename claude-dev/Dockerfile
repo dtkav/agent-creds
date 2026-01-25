@@ -14,11 +14,27 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     python3 \
     python3-pip \
+    python3-venv \
     nodejs \
     npm \
     sudo \
     dnsutils \
-    && rm -rf /var/lib/apt/lists/*
+    neovim \
+    file \
+    kitty \
+    kitty-terminfo \
+    socat \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -f /usr/lib/python*/EXTERNALLY-MANAGED
+
+# Build abduco from source
+RUN cd /tmp && \
+    git clone https://github.com/martanne/abduco.git && \
+    cd abduco && \
+    make && \
+    make install && \
+    cd / && rm -rf /tmp/abduco
 
 # Create user with matching UID/GID
 RUN groupadd --gid $USER_GID --force devuser || true \
@@ -26,7 +42,7 @@ RUN groupadd --gid $USER_GID --force devuser || true \
     || usermod -l devuser -d /home/devuser -m ubuntu 2>/dev/null || true \
     && echo "devuser ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
-# Install Claude Code
+# Install Claude Code (bootstrap via npm for global availability)
 RUN npm install -g @anthropic-ai/claude-code
 
 # Copy CA cert and add to system trust store
@@ -53,8 +69,17 @@ USER devuser
 ENV HOME=/home/devuser
 WORKDIR /workspace
 
+# Suppress Ubuntu sudo hint
+RUN touch ~/.hushlogin
+
+# Install auto-updating version of Claude Code
+RUN yes | claude install
+
 # Node.js also needs to trust the CA
 ENV NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/agent-creds-ca.crt
 
+# Terminal settings
+ENV TERMINFO=/usr/share/terminfo
+
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["bash"]
+CMD ["claude"]

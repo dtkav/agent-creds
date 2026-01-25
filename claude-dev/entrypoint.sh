@@ -1,47 +1,51 @@
 #!/bin/bash
 set -e
 
+export PATH="$HOME/.local/bin:$PATH"
+export TERM=xterm-256color
+
 # Set up overlay filesystem if source is mounted
 if [ -d /src-ro ] && [ "$(ls -A /src-ro 2>/dev/null)" ]; then
     sudo mount -t overlay overlay \
         -o lowerdir=/src-ro,upperdir=/src-upper,workdir=/src-work \
         /workspace
-    echo "Overlay mounted: changes will be written to /src-upper"
 fi
 
-# Add hosts entries for proxied domains
-if [ -f /etc/proxy-hosts ]; then
-    # Get the proxy hostname from the first non-comment line
-    PROXY_HOST=$(grep -v '^#' /etc/proxy-hosts | head -1 | awk '{print $1}')
+# Session name
+SESSION="${ABDUCO_SESSION:-claude}"
 
-    if [ -z "$PROXY_HOST" ]; then
-        echo "WARNING: No proxy host found in /etc/proxy-hosts"
-    elif echo "$PROXY_HOST" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
-        # Already an IPv4 address, use directly
-        sudo sh -c "cat /etc/proxy-hosts >> /etc/hosts"
-    elif echo "$PROXY_HOST" | grep -qE '^[0-9a-fA-F:]+$'; then
-        # Already an IPv6 address, use directly
-        sudo sh -c "cat /etc/proxy-hosts >> /etc/hosts"
-    else
-        # Hostname - need to resolve it first
-        PROXY_IP=$(getent hosts "$PROXY_HOST" 2>/dev/null | head -1 | awk '{print $1}')
-        if [ -z "$PROXY_IP" ]; then
-            PROXY_IP=$(dig +short "$PROXY_HOST" A 2>/dev/null | head -1)
-        fi
-        if [ -z "$PROXY_IP" ]; then
-            PROXY_IP=$(dig +short "$PROXY_HOST" AAAA 2>/dev/null | head -1)
-        fi
+# Create bash init that launches claude
+cat > /tmp/claude-init.sh << 'EOF'
+# Prevent terminal escape sequence queries
+export TERM=xterm-256color
+export COLORTERM=truecolor
+export TERM_PROGRAM=""
 
-        if [ -n "$PROXY_IP" ]; then
-            sudo sh -c "sed 's/^${PROXY_HOST}/${PROXY_IP}/g' /etc/proxy-hosts >> /etc/hosts"
-        else
-            echo "WARNING: Could not resolve $PROXY_HOST"
-        fi
-    fi
-fi
+# Source normal bashrc for prompt, aliases, etc (but not in login mode to skip some queries)
+[ -f ~/.bashrc ] && source ~/.bashrc
+
+export PATH="$HOME/.local/bin:$PATH"
+cd /workspace
 
 # Show MOTD
 aenv
 
-# Execute the main command
-exec "$@"
+# Launch claude
+claude
+EOF
+
+# Session runs interactive bash with our init
+cat > /tmp/claude-session << 'EOF'
+#!/bin/bash
+exec bash --init-file /tmp/claude-init.sh
+EOF
+chmod +x /tmp/claude-session
+
+# Interactive: use abduco for session management
+# Detach with Ctrl-\ (keeps Ctrl-A/Ctrl-Q for claude)
+if [ -t 0 ]; then
+    exec abduco -A -e '^\' "$SESSION" /tmp/claude-session
+else
+    # Non-interactive: run command directly
+    exec "$@"
+fi

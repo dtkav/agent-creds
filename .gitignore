@@ -24,6 +24,7 @@ mint
 authz/.signing-key
 authz/.token
 mintfs/mintfs
+bin/adev
 
 # mintfs mount point and base token
 creds/
@@ -35,3 +36,4 @@ authz/fly.toml
 
 # Generated files (run `make generate` to create)
 generated/
+claude-dev/claude-config/

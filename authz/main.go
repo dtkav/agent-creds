@@ -2,10 +2,14 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"log"
 	"net"
+	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -15,14 +19,30 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 
+	"authz/api"
+	"authz/db"
 	"authz/macaroon"
+	"authz/oauth2"
 )
+
+type domainCredential struct {
+	// Static API key (for auth_type="static")
+	apiKey       string
+	headerName   string
+	headerPrefix string
+
+	// OAuth2 config (for auth_type="oauth2")
+	authType     string
+	oauth2Config *oauth2.OAuth2Config
+}
 
 type authServer struct {
 	authv3.UnimplementedAuthorizationServer
 	verifier *macaroon.Verifier
-	// Map of host -> API key
-	apiKeys map[string]string
+	// Map of host -> credential config
+	credentials map[string]domainCredential
+	// OAuth2 token manager for handling token refresh
+	tokenManager *oauth2.TokenManager
 }
 
 func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*authv3.CheckResponse, error) {
@@ -46,8 +66,18 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 		Timestamp: time.Now(),
 	}
 
-	// Verify macaroon token
+	// Check for authorization header
 	authHeader := headers["authorization"]
+
+	// No auth header = pass through without credential injection
+	if authHeader == "" {
+		log.Printf("No auth header, passing through: %s %s", access.Method, access.Path)
+		return &authv3.CheckResponse{
+			Status: &status.Status{Code: int32(codes.OK)},
+		}, nil
+	}
+
+	// Verify macaroon token
 	result := s.verifier.VerifyRequest(authHeader, access)
 
 	if !result.Valid {
@@ -63,8 +93,8 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 		}, nil
 	}
 
-	// Look up API key for this host
-	apiKey, ok := s.apiKeys[host]
+	// Look up credential config for this host
+	cred, ok := s.credentials[host]
 	if !ok {
 		log.Printf("Auth failed: unknown host %s", host)
 		return &authv3.CheckResponse{
@@ -78,6 +108,29 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 		}, nil
 	}
 
+	// Get the API key/token to inject
+	var apiToken string
+	if cred.authType == "oauth2" {
+		// OAuth2: get fresh access token
+		token, err := s.tokenManager.GetAccessToken(host, cred.oauth2Config)
+		if err != nil {
+			log.Printf("OAuth2 token refresh failed for %s: %v", host, err)
+			return &authv3.CheckResponse{
+				Status: &status.Status{Code: int32(codes.Internal)},
+				HttpResponse: &authv3.CheckResponse_DeniedResponse{
+					DeniedResponse: &authv3.DeniedHttpResponse{
+						Status: &typev3.HttpStatus{Code: typev3.StatusCode_InternalServerError},
+						Body:   "Failed to refresh OAuth2 token",
+					},
+				},
+			}, nil
+		}
+		apiToken = token
+	} else {
+		// Static: use configured API key
+		apiToken = cred.apiKey
+	}
+
 	log.Printf("Auth successful for %s %s %s", access.Method, host, access.Path)
 	return &authv3.CheckResponse{
 		Status: &status.Status{Code: int32(codes.OK)},
@@ -85,8 +138,8 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 			OkResponse: &authv3.OkHttpResponse{
 				Headers: []*corev3.HeaderValueOption{{
 					Header: &corev3.HeaderValue{
-						Key:   "authorization",
-						Value: "Bearer " + apiKey,
+						Key:   cred.headerName,
+						Value: cred.headerPrefix + apiToken,
 					},
 					AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
 				}},
@@ -104,41 +157,155 @@ func main() {
 	log.Printf("Loaded macaroon signing key")
 
 	verifier := macaroon.NewVerifier(keyStore)
+	tokenManager := oauth2.NewTokenManager()
 
-	// hostEnvMap is defined in domains_gen.go (generated from domains.toml)
-	apiKeys := make(map[string]string)
-	for host, envVar := range hostEnvMap {
-		if key := os.Getenv(envVar); key != "" {
-			apiKeys[host] = key
-			log.Printf("Loaded API key for %s", host)
+	// domainConfigMap is defined in domains_gen.go (generated from domains.toml)
+	credentials := make(map[string]domainCredential)
+	for host, config := range domainConfigMap {
+		if config.AuthType == "oauth2" {
+			// OAuth2 credentials
+			refreshToken := os.Getenv(config.EnvVar)
+			clientID := os.Getenv(config.OAuth2ClientIDVar)
+			clientSecret := os.Getenv(config.OAuth2ClientSecVar)
+
+			if refreshToken != "" && clientID != "" && clientSecret != "" {
+				credentials[host] = domainCredential{
+					headerName:   config.HeaderName,
+					headerPrefix: config.HeaderPrefix,
+					authType:     "oauth2",
+					oauth2Config: &oauth2.OAuth2Config{
+						ClientID:     clientID,
+						ClientSecret: clientSecret,
+						RefreshToken: refreshToken,
+						TokenURL:     config.OAuth2TokenURL,
+					},
+				}
+				log.Printf("Loaded OAuth2 credentials for %s", host)
+			}
+		} else {
+			// Static API key
+			if key := os.Getenv(config.EnvVar); key != "" {
+				credentials[host] = domainCredential{
+					apiKey:       key,
+					headerName:   config.HeaderName,
+					headerPrefix: config.HeaderPrefix,
+					authType:     "static",
+				}
+				log.Printf("Loaded API key for %s (header: %s)", host, config.HeaderName)
+			}
 		}
 	}
 
-	if len(apiKeys) == 0 {
-		log.Fatal("No API keys configured. Set STRIPE_API_KEY, OPENAI_API_KEY, etc.")
+	if len(credentials) == 0 {
+		log.Printf("Warning: No API keys configured. Set STRIPE_API_KEY, etc.")
 	}
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "9001"
+	// Open database
+	database, err := db.OpenDefault()
+	if err != nil {
+		log.Fatalf("Failed to open database: %v", err)
 	}
-	if !strings.HasPrefix(port, ":") {
-		port = ":" + port
+	defer database.Close()
+	log.Printf("Database opened")
+
+	// Cleanup expired sessions periodically
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			if err := database.CleanupExpired(); err != nil {
+				log.Printf("Cleanup error: %v", err)
+			}
+		}
+	}()
+
+	// Start HTTP API server
+	httpPort := os.Getenv("HTTP_PORT")
+	if httpPort == "" {
+		httpPort = "8080"
 	}
 
-	lis, err := net.Listen("tcp", port)
+	rpID := os.Getenv("WEBAUTHN_RP_ID")
+	if rpID == "" {
+		rpID = "localhost"
+	}
+	rpOrigin := os.Getenv("WEBAUTHN_RP_ORIGIN")
+	if rpOrigin == "" {
+		rpOrigin = "https://localhost:" + httpPort
+	}
+	rpName := os.Getenv("WEBAUTHN_RP_NAME")
+	if rpName == "" {
+		rpName = "Agent Credentials"
+	}
+
+	apiServer, err := api.NewServer(database, rpID, rpOrigin, rpName)
+	if err != nil {
+		log.Fatalf("Failed to create API server: %v", err)
+	}
+
+	httpServer := &http.Server{
+		Addr:    ":" + httpPort,
+		Handler: apiServer,
+	}
+
+	// Start HTTP server in goroutine
+	go func() {
+		// Check for TLS cert/key
+		certFile := os.Getenv("TLS_CERT_FILE")
+		keyFile := os.Getenv("TLS_KEY_FILE")
+
+		if certFile != "" && keyFile != "" {
+			log.Printf("HTTP API server listening on https://:%s", httpPort)
+			if err := httpServer.ListenAndServeTLS(certFile, keyFile); err != nil && err != http.ErrServerClosed {
+				log.Printf("HTTP server error: %v", err)
+			}
+		} else {
+			log.Printf("HTTP API server listening on http://:%s", httpPort)
+			if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("HTTP server error: %v", err)
+			}
+		}
+	}()
+
+	// Start gRPC server
+	grpcPort := os.Getenv("PORT")
+	if grpcPort == "" {
+		grpcPort = "9001"
+	}
+	if !strings.HasPrefix(grpcPort, ":") {
+		grpcPort = ":" + grpcPort
+	}
+
+	lis, err := net.Listen("tcp", grpcPort)
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
 	}
 
-	server := grpc.NewServer()
-	authv3.RegisterAuthorizationServer(server, &authServer{
-		verifier: verifier,
-		apiKeys:  apiKeys,
+	grpcServer := grpc.NewServer()
+	authv3.RegisterAuthorizationServer(grpcServer, &authServer{
+		verifier:     verifier,
+		credentials:  credentials,
+		tokenManager: tokenManager,
 	})
 
-	log.Printf("Authz server listening on %s", port)
-	if err := server.Serve(lis); err != nil {
+	// Handle graceful shutdown
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		<-sigCh
+		log.Println("Shutting down...")
+		grpcServer.GracefulStop()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		httpServer.Shutdown(ctx)
+	}()
+
+	log.Printf("gRPC authz server listening on %s", grpcPort)
+	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("Failed to serve: %v", err)
 	}
 }
+
+// Silence unused import warning
+var _ = tls.Config{}

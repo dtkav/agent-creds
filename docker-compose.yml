@@ -1,8 +1,14 @@
 services:
   envoy:
-    build: .
+    image: envoyproxy/envoy:v1.28-latest
     ports:
       - "443:443"
+    volumes:
+      - ./generated/certs:/certs:ro
+      - ./generated/envoy.json:/etc/envoy/envoy.json:ro
+    command: ["envoy", "-c", "/etc/envoy/envoy.json"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - authz
     networks:
@@ -10,11 +16,22 @@ services:
 
   authz:
     build: ./authz
+    ports:
+      - "8080:8080"
     environment:
       - MACAROON_SIGNING_KEY=${MACAROON_SIGNING_KEY}
+      - MACAROON_ENCRYPTION_KEY=${MACAROON_ENCRYPTION_KEY}
       - STRIPE_API_KEY=${STRIPE_API_KEY}
+      - WEBAUTHN_RP_ID=${WEBAUTHN_RP_ID:-localhost}
+      - WEBAUTHN_RP_ORIGIN=${WEBAUTHN_RP_ORIGIN:-http://localhost:8080}
+      - WEBAUTHN_RP_NAME=${WEBAUTHN_RP_NAME:-Agent Credentials}
+    volumes:
+      - authz-data:/data
     networks:
       - agent-creds
+
+volumes:
+  authz-data:
 
 networks:
   agent-creds:

@@ -20,7 +20,7 @@ claude-dev/overlay-changes/
 # Go binaries
 authz/authz
 authz/mint
-mint
+/mint
 authz/.signing-key
 authz/.token
 mintfs/mintfs
@@ -49,3 +49,4 @@ domains.toml
 generated/
 authz/domains_gen.go
 claude-dev/claude-config/
+authz/mintfs/mintfs

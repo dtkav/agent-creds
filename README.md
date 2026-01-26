@@ -55,7 +55,11 @@ This turns "full API access" into precisely scoped capabilities that match the a
 ### Setup
 
 ```bash
-# Generate certs and configs from domains.toml
+# Copy and customize domain config
+cp domains.example.toml domains.toml
+# Edit domains.toml to add your API services...
+
+# Generate certs and configs
 make generate
 
 # Generate a signing key (32+ bytes, base64 encoded)
@@ -88,11 +92,11 @@ Tokens are created using `mint` with fine-grained access control:
 
 ```bash
 # Build mint (once)
-cd authz && go build -o ../mint ./cmd/mint && cd ..
+cd authz && go build -o mint ./cmd/mint && cd ..
 
 # Mint a token with restrictions
 export MACAROON_SIGNING_KEY=<your-signing-key>
-./mint --hosts api.stripe.com --methods GET,POST --paths "/v1/*" --valid-for 1h
+./authz/mint --hosts api.stripe.com --methods GET,POST --paths "/v1/*" --valid-for 1h
 ```
 
 #### Token Options
@@ -110,7 +114,7 @@ Tokens without restrictions (no `--hosts`, `--methods`, `--paths`) have full acc
 
 ## Configuration
 
-All domain configuration is centralized in `domains.toml`:
+Copy `domains.example.toml` to `domains.toml` and customize:
 
 ```toml
 [ca]
@@ -143,12 +147,13 @@ env_var = "OPENAI_API_KEY"
 
 ```
 .
-├── domains.toml          # Source of truth for proxied domains
+├── domains.example.toml  # Example domain config (copy to domains.toml)
+├── domains.toml          # Your domain config (gitignored)
 ├── docker-compose.yml    # Docker Compose config
-├── Dockerfile            # Envoy container
 ├── Makefile              # Build/deploy commands
-├── scripts/
-│   └── generate.py       # Generates certs and configs from domains.toml
+├── cmd/
+│   ├── generate/         # Generates certs and configs from domains.toml
+│   └── adev/             # Interactive dev session launcher
 ├── generated/            # Generated files (gitignored)
 │   ├── certs/            # CA and domain certificates
 │   ├── envoy.json        # Envoy config with TLS termination
@@ -156,12 +161,11 @@ env_var = "OPENAI_API_KEY"
 │   └── domains.json      # Domain config for other tools
 ├── authz/
 │   ├── main.go           # gRPC authz service
-│   ├── domains_gen.go    # Generated domain config
+│   ├── domains_gen.go    # Generated domain config (gitignored)
 │   ├── macaroon/         # Macaroon token library (caveats, verification)
 │   ├── cmd/mint/         # Token minting CLI tool
+│   ├── mintfs/           # FUSE filesystem for short-lived tokens
 │   └── Dockerfile
-├── mintfs/               # FUSE filesystem for short-lived tokens
-│   └── main.go           # Serves attenuated tokens at ./creds/
 └── bin/
     ├── arun              # Run a command through the proxy
     └── adev              # Interactive dev session

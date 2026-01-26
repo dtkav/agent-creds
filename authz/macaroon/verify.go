@@ -28,12 +28,27 @@ type Verifier struct {
 	Trusted3Ps map[string][]macaroon.EncryptionKey
 }
 
+// AttestationLocation is the third-party location for YubiKey attestation
+const AttestationLocation = "yubikey-local"
+
 // NewVerifier creates a new token verifier
 func NewVerifier(ks *KeyStore) *Verifier {
-	return &Verifier{
+	v := &Verifier{
 		keyStore:   ks,
 		Trusted3Ps: make(map[string][]macaroon.EncryptionKey),
 	}
+
+	// Register attestation location if encryption key is configured
+	if len(ks.EncryptionKey) > 0 {
+		v.AddTrusted3P(AttestationLocation, ks.EncryptionKey)
+	}
+
+	return v
+}
+
+// AddTrusted3P registers a trusted third-party location with its encryption key
+func (v *Verifier) AddTrusted3P(location string, key macaroon.EncryptionKey) {
+	v.Trusted3Ps[location] = append(v.Trusted3Ps[location], key)
 }
 
 // VerifyRequest verifies a token against a request's Access
@@ -43,20 +58,30 @@ func (v *Verifier) VerifyRequest(authHeader string, access *Access) *VerifyResul
 		return &VerifyResult{Valid: false, Error: fmt.Sprintf("invalid access: %v", err)}
 	}
 
-	// Extract token from Authorization header
-	token, err := extractToken(authHeader)
+	// Extract main token and any discharge tokens from Authorization header
+	mainToken, discharges, err := extractTokens(authHeader)
 	if err != nil {
 		return &VerifyResult{Valid: false, Error: err.Error()}
 	}
 
-	// Decode the token
-	m, err := DecodeToken(token)
+	// Decode the main token
+	m, err := DecodeToken(mainToken)
 	if err != nil {
 		return &VerifyResult{Valid: false, Error: fmt.Sprintf("failed to decode token: %v", err)}
 	}
 
-	// Verify signature (no discharge tokens for now)
-	caveats, err := m.Verify(v.keyStore.SigningKey, nil, v.Trusted3Ps)
+	// Decode discharge tokens
+	var dischargeTokens []*macaroon.Macaroon
+	for i, dt := range discharges {
+		dm, err := DecodeToken(dt)
+		if err != nil {
+			return &VerifyResult{Valid: false, Error: fmt.Sprintf("failed to decode discharge token %d: %v", i, err)}
+		}
+		dischargeTokens = append(dischargeTokens, dm)
+	}
+
+	// Verify signature with discharge tokens
+	caveats, err := m.VerifyParsed(v.keyStore.SigningKey, dischargeTokens, v.Trusted3Ps)
 	if err != nil {
 		return &VerifyResult{Valid: false, Error: fmt.Sprintf("signature verification failed: %v", err)}
 	}
@@ -69,22 +94,52 @@ func (v *Verifier) VerifyRequest(authHeader string, access *Access) *VerifyResul
 	return &VerifyResult{Valid: true, Caveats: caveats}
 }
 
-// extractToken extracts the token from an Authorization header
+// extractTokens extracts the main token and any discharge tokens from an Authorization header
+// Supports: "Bearer sk_main,sk_discharge1,sk_discharge2" or just "sk_main,sk_discharge"
+// Returns: main token, slice of discharge tokens, error
+func extractTokens(header string) (string, []string, error) {
+	if header == "" {
+		return "", nil, fmt.Errorf("missing authorization header")
+	}
+
+	var tokenStr string
+	// Handle "Bearer <tokens>" format
+	if strings.HasPrefix(header, "Bearer ") {
+		tokenStr = strings.TrimPrefix(header, "Bearer ")
+	} else if strings.HasPrefix(header, TokenPrefix) {
+		tokenStr = header
+	} else {
+		return "", nil, fmt.Errorf("invalid authorization header format")
+	}
+
+	// Split by comma to get main token and discharges
+	tokens := strings.Split(tokenStr, ",")
+	if len(tokens) == 0 || tokens[0] == "" {
+		return "", nil, fmt.Errorf("no token found")
+	}
+
+	mainToken := strings.TrimSpace(tokens[0])
+	if !strings.HasPrefix(mainToken, TokenPrefix) {
+		return "", nil, fmt.Errorf("invalid main token prefix")
+	}
+
+	var discharges []string
+	for _, t := range tokens[1:] {
+		t = strings.TrimSpace(t)
+		if t != "" {
+			if !strings.HasPrefix(t, TokenPrefix) {
+				return "", nil, fmt.Errorf("invalid discharge token prefix")
+			}
+			discharges = append(discharges, t)
+		}
+	}
+
+	return mainToken, discharges, nil
+}
+
+// extractToken extracts a single token from an Authorization header (legacy, for simple cases)
 // Supports: "Bearer sk_xxx" or just "sk_xxx"
 func extractToken(header string) (string, error) {
-	if header == "" {
-		return "", fmt.Errorf("missing authorization header")
-	}
-
-	// Handle "Bearer <token>" format
-	if strings.HasPrefix(header, "Bearer ") {
-		return strings.TrimPrefix(header, "Bearer "), nil
-	}
-
-	// Handle raw token
-	if strings.HasPrefix(header, TokenPrefix) {
-		return header, nil
-	}
-
-	return "", fmt.Errorf("invalid authorization header format")
+	main, _, err := extractTokens(header)
+	return main, err
 }

@@ -215,6 +215,14 @@ func main() {
 		credsMounts = []string{"-v", scriptDir + "/creds:/creds:ro"}
 	}
 
+	// Pip cache mount (speeds up pip installs)
+	var pipCacheMounts []string
+	homeDir, _ := os.UserHomeDir()
+	pipCache := filepath.Join(homeDir, ".cache", "pip")
+	if fileExists(pipCache) {
+		pipCacheMounts = []string{"-v", pipCache + ":/home/devuser/.cache/pip"}
+	}
+
 	// Create claude config dir
 	os.MkdirAll(filepath.Join(scriptDir, "claude-dev/claude-config"), 0755)
 
@@ -246,6 +254,7 @@ func main() {
 		"-v", scriptDir + "/claude-dev/claude-config:/home/devuser/.claude",
 	}
 	args = append(args, credsMounts...)
+	args = append(args, pipCacheMounts...)
 	args = append(args, "sandbox")
 
 	cmd := exec.Command("docker", args...)

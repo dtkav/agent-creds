@@ -4,6 +4,11 @@ set -e
 export PATH="$HOME/.local/bin:$PATH"
 export TERM=xterm-256color
 
+# Update CA certificates if mounted (allows hot-reload without rebuild)
+if [ -f /usr/local/share/ca-certificates/agent-creds-ca.crt ]; then
+    sudo update-ca-certificates 2>/dev/null || true
+fi
+
 # Set up overlay filesystem if source is mounted
 if [ -d /src-ro ] && [ "$(ls -A /src-ro 2>/dev/null)" ]; then
     sudo mount -t overlay overlay \

@@ -25,6 +25,14 @@ authz/.signing-key
 authz/.token
 mintfs/mintfs
 bin/adev
+bin/odev
+bin/generate
+
+# Project-specific tools (not generic to agent-creds)
+cmd/odev/
+
+# Internal specs/planning docs
+specs/
 
 # mintfs mount point and base token
 creds/
@@ -34,6 +42,10 @@ creds/
 fly.toml
 authz/fly.toml
 
+# Domain config (copy domains.example.toml to customize)
+domains.toml
+
 # Generated files (run `make generate` to create)
 generated/
+authz/domains_gen.go
 claude-dev/claude-config/

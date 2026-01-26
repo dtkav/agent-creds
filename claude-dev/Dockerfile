@@ -25,8 +25,22 @@ RUN apt-get update && apt-get install -y \
     kitty-terminfo \
     socat \
     build-essential \
+    # Rust CLI tools
+    ripgrep \
+    fd-find \
+    bat \
+    eza \
+    fzf \
+    # Other useful tools
+    httpie \
+    jq \
+    tree \
+    unzip \
     && rm -rf /var/lib/apt/lists/* \
     && rm -f /usr/lib/python*/EXTERNALLY-MANAGED
+
+# Install Python packages
+RUN pip3 install --break-system-packages websockets
 
 # Build abduco from source
 RUN cd /tmp && \

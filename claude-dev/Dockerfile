@@ -66,13 +66,16 @@ RUN update-ca-certificates
 # Copy hosts file for runtime
 COPY generated/hosts /etc/proxy-hosts
 
-# Copy aenv binary and config
+# Copy aenv binary
 COPY generated/aenv /usr/local/bin/aenv
-COPY generated/domains.json /etc/aenv/domains.json
 
 # Copy entrypoint
 COPY claude-dev/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
+
+# Copy browser-forward helper
+COPY claude-dev/open-browser /usr/local/bin/open-browser
+RUN chmod +x /usr/local/bin/open-browser
 
 # Create overlay directories
 RUN mkdir -p /src-ro /src-upper /src-work /workspace \

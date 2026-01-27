@@ -1,19 +1,4 @@
 services:
-  envoy:
-    image: envoyproxy/envoy:v1.28-latest
-    ports:
-      - "443:443"
-    volumes:
-      - ./generated/certs:/certs:ro
-      - ./generated/envoy.json:/etc/envoy/envoy.json:ro
-    command: ["envoy", "-c", "/etc/envoy/envoy.json"]
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    depends_on:
-      - authz
-    networks:
-      - agent-creds
-
   authz:
     build: ./authz
     ports:

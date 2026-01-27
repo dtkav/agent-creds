@@ -150,6 +150,7 @@ func main() {
 	projectSlug := Slug(projectName)
 	containerName := "adev-" + projectSlug + "-net"
 	envoyName := "adev-" + projectSlug + "-envoy"
+	sandboxName := "adev-" + projectSlug + "-sandbox"
 	networkName := "adev-" + projectSlug
 
 	// Get the actual executable path (resolves symlinks)
@@ -176,6 +177,7 @@ func main() {
 	go func() {
 		<-sigChan
 		spinner.Stop()
+		run("docker", "rm", "-f", sandboxName)
 		run("docker", "rm", "-f", containerName)
 		run("docker", "rm", "-f", envoyName)
 		run("docker", "network", "rm", networkName)
@@ -184,7 +186,7 @@ func main() {
 
 	// Run generator to ensure configs are up to date
 	spinner.Status("generating configs...")
-	gen, err := NewGenerator(scriptDir, cfg.Vault)
+	gen, err := NewGenerator(scriptDir, cfg)
 	if err != nil {
 		spinner.Stop()
 		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
@@ -273,22 +275,21 @@ func main() {
 	}
 
 	// Create claude config dir (namespaced per project)
-	claudeConfigDir := filepath.Join(scriptDir, "claude-dev/claude-config-"+projectSlug)
+	claudeConfigDir := filepath.Join(scriptDir, "claude-dev/claude-config")
 	os.MkdirAll(claudeConfigDir, 0755)
 
 	// Stop any existing containers for this project
+	runQuiet("docker", "rm", "-f", sandboxName)
 	runQuiet("docker", "rm", "-f", containerName)
 	runQuiet("docker", "rm", "-f", envoyName)
 	runQuiet("docker", "network", "rm", networkName)
 
 	// Create per-sandbox network
 	spinner.Status("creating network...")
-	createNetArgs := []string{"network", "create", "--internal", networkName}
-	if cfg.Vault.IsRemote() {
-		// Remote authz: envoy needs internet access to reach authz and upstreams.
-		// Sandbox isolation is still enforced by iptables in sandbox-net (all traffic goes through envoy).
-		createNetArgs = []string{"network", "create", networkName}
-	}
+	// Network is not --internal so DNS resolves. Sandbox-net iptables restricts
+	// outbound to DNS + envoy only, so the sandbox can't reach arbitrary hosts.
+	// IPv6 enabled so ip6tables DNAT works for IPv6 destinations.
+	createNetArgs := []string{"network", "create", "--ipv6", networkName}
 	if err := run("docker", createNetArgs...); err != nil {
 		spinner.Stop()
 		fmt.Fprintf(os.Stderr, "Error creating network %s: %v\n", networkName, err)
@@ -301,10 +302,14 @@ func main() {
 		"--name", envoyName,
 		"--network", networkName,
 		"--network-alias", "envoy",
-		"-v", scriptDir+"/generated/certs:/certs:ro",
+		"-v", scriptDir+"/generated/certs/ca.crt:/certs/ca.crt:ro",
+		"-v", scriptDir+"/generated/certs/ca.key:/certs/ca.key:ro",
+		"-v", scriptDir+"/generated/domains.json:/etc/envoy/domains.json:ro",
 		"-v", scriptDir+"/generated/envoy.json:/etc/envoy/envoy.json:ro",
+		"-v", scriptDir+"/envoy-entrypoint.sh:/entrypoint.sh:ro",
+		"--entrypoint", "/entrypoint.sh",
 		"envoyproxy/envoy:v1.28-latest",
-		"envoy", "-c", "/etc/envoy/envoy.json"); err != nil {
+		"-c", "/etc/envoy/envoy.json"); err != nil {
 		spinner.Stop()
 		fmt.Fprintf(os.Stderr, "Error starting envoy: %v\n", err)
 		os.Exit(1)
@@ -347,6 +352,7 @@ func main() {
 
 	// Run sandbox
 	args := []string{"run", "-it", "--rm",
+		"--name", sandboxName,
 		"--network=container:" + containerName,
 		"-e", "CLAUDE_CONFIG_DIR=/home/devuser/.claude",
 		"-v", workDir + ":/workspace",
@@ -373,6 +379,7 @@ func main() {
 	cmd.Run()
 
 	// Cleanup
+	run("docker", "rm", "-f", sandboxName)
 	run("docker", "rm", "-f", containerName)
 	run("docker", "rm", "-f", envoyName)
 	run("docker", "network", "rm", networkName)

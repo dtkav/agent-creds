@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 	"github.com/superfly/macaroon"
@@ -96,9 +96,17 @@ func (c *PathCaveat) CaveatType() macaroon.CaveatType { return CavAPIPath }
 func (c *PathCaveat) Name() string                    { return "APIPath" }
 func (c *PathCaveat) Prohibits(macaroon.Access) error { return nil }
 
-type Domain struct {
-	Host     string `json:"host"`
-	AuthType string `json:"auth_type"`
+type VaultConfig struct {
+	Host string `toml:"host"`
+}
+
+type UpstreamConfig struct {
+	Akey string `toml:"akey"`
+}
+
+type ProjectConfig struct {
+	Vault    VaultConfig                `toml:"vault"`
+	Upstream map[string]UpstreamConfig  `toml:"upstream"`
 }
 
 type TokenInfo struct {
@@ -241,23 +249,18 @@ func renderTokenLine(t TokenInfo) string {
 }
 
 func main() {
-	data, err := os.ReadFile("/etc/aenv/domains.json")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading domains.json: %v\n", err)
+	var cfg ProjectConfig
+	if _, err := toml.DecodeFile("/etc/aenv/agent-creds.toml", &cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "Error reading agent-creds.toml: %v\n", err)
 		os.Exit(1)
 	}
 
-	var domains map[string]Domain
-	if err := json.Unmarshal(data, &domains); err != nil {
-		fmt.Fprintf(os.Stderr, "Error parsing domains.json: %v\n", err)
-		os.Exit(1)
+	// Sort upstream hosts
+	var hosts []string
+	for host := range cfg.Upstream {
+		hosts = append(hosts, host)
 	}
-
-	var names []string
-	for name := range domains {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	sort.Strings(hosts)
 
 	var allTokens []TokenInfo
 	for _, path := range findAkeyFiles() {
@@ -268,18 +271,13 @@ func main() {
 		allTokens = append(allTokens, extractTokenInfo(filepath.Base(path), string(content)))
 	}
 
-	// Separate domains into token-configured and passthrough
-	var tokenDomains, passthroughDomains []string
-	for _, name := range names {
-		d := domains[name]
-		authType := d.AuthType
-		if authType == "" {
-			authType = "static"
-		}
-		if authType == "passthrough" {
-			passthroughDomains = append(passthroughDomains, name)
+	// Separate into credentialed and passthrough
+	var credHosts, passthroughHosts []string
+	for _, host := range hosts {
+		if cfg.Upstream[host].Akey != "" {
+			credHosts = append(credHosts, host)
 		} else {
-			tokenDomains = append(tokenDomains, name)
+			passthroughHosts = append(passthroughHosts, host)
 		}
 	}
 
@@ -287,11 +285,8 @@ func main() {
 	var leftLines []string
 	leftLines = append(leftLines, sectionStyle.Render("Allowlist"))
 	leftLines = append(leftLines, "")
-
-	// Include all domains in allowlist
-	for _, name := range names {
-		d := domains[name]
-		leftLines = append(leftLines, fmt.Sprintf("  %s %s", okStyle.Render("◉"), dimStyle.Render(d.Host)))
+	for _, host := range hosts {
+		leftLines = append(leftLines, fmt.Sprintf("  %s %s", okStyle.Render("◉"), dimStyle.Render(host)))
 	}
 
 	// Build right column: Credentials
@@ -299,25 +294,29 @@ func main() {
 	rightLines = append(rightLines, sectionStyle.Render("Credentials"))
 	rightLines = append(rightLines, "")
 
-	for _, name := range tokenDomains {
-		d := domains[name]
-
+	for _, host := range credHosts {
 		var matching []TokenInfo
 		for _, t := range allTokens {
-			if t.matchesHost(d.Host) {
+			if t.matchesHost(host) {
 				matching = append(matching, t)
 			}
 		}
 
 		if len(matching) == 0 {
-			rightLines = append(rightLines, fmt.Sprintf("  %s %s %s", warnStyle.Render("○"), hostWarnStyle.Render(d.Host), dimStyle.Render("— no token")))
+			rightLines = append(rightLines, fmt.Sprintf("  %s %s %s", warnStyle.Render("○"), hostWarnStyle.Render(host), dimStyle.Render("— no token")))
 			continue
 		}
 
-		rightLines = append(rightLines, fmt.Sprintf("  %s %s", okStyle.Render("◉"), hostOkStyle.Render(d.Host)))
+		rightLines = append(rightLines, fmt.Sprintf("  %s %s", okStyle.Render("◉"), hostOkStyle.Render(host)))
 		for _, t := range matching {
 			rightLines = append(rightLines, renderTokenLine(t))
 		}
+	}
+
+	// Vault info
+	vaultLine := dimStyle.Render("local")
+	if cfg.Vault.Host != "" {
+		vaultLine = okStyle.Render(cfg.Vault.Host)
 	}
 
 	// Column styles
@@ -328,13 +327,12 @@ func main() {
 	rightCol := lipgloss.NewStyle().
 		Width(50)
 
-	// Render columns
+	// Render
 	leftContent := leftCol.Render(strings.Join(leftLines, "\n"))
 	rightContent := rightCol.Render(strings.Join(rightLines, "\n"))
 
-	// Header and columns
 	fmt.Println()
-	fmt.Println(headerStyle.Render("🔑 agent-creds"))
+	fmt.Println(headerStyle.Render("🔑 agent-creds") + "  " + dimStyle.Render("vault: ") + vaultLine)
 	fmt.Println()
 	fmt.Println(lipgloss.JoinHorizontal(lipgloss.Top, leftContent, rightContent))
 	fmt.Println()

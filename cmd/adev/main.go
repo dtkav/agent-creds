@@ -98,17 +98,24 @@ func imageExists(name string) bool {
 	return run("docker", "image", "inspect", name) == nil
 }
 
-func proxyRunning() bool {
-	out, err := runOutput("docker", "compose", "ps", "--status", "running")
-	if err != nil {
-		return false
-	}
-	return len(out) > 0 && exec.Command("grep", "-q", "envoy").Run() == nil
-}
-
 func main() {
 	// Get directories
 	workDir, _ := os.Getwd()
+
+	// Load per-project config
+	cfg, err := LoadProjectConfig(workDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading agent-creds.toml: %v\n", err)
+		os.Exit(1)
+	}
+	projectName := cfg.Sandbox.Name
+	if projectName == "" {
+		projectName = filepath.Base(workDir)
+	}
+	projectSlug := Slug(projectName)
+	containerName := "adev-" + projectSlug + "-net"
+	envoyName := "adev-" + projectSlug + "-envoy"
+	networkName := "adev-" + projectSlug
 
 	// Get the actual executable path (resolves symlinks)
 	exe, err := os.Executable()
@@ -134,13 +141,15 @@ func main() {
 	go func() {
 		<-sigChan
 		spinner.Stop()
-		run("docker", "rm", "-f", "sandbox-net")
+		run("docker", "rm", "-f", containerName)
+		run("docker", "rm", "-f", envoyName)
+		run("docker", "network", "rm", networkName)
 		os.Exit(1)
 	}()
 
 	// Run generator to ensure configs are up to date
 	spinner.Status("generating configs...")
-	gen, err := NewGenerator(scriptDir)
+	gen, err := NewGenerator(scriptDir, cfg.Vault)
 	if err != nil {
 		spinner.Stop()
 		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
@@ -152,14 +161,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Ensure proxy is running
-	out, _ := runOutput("docker", "compose", "ps", "--status", "running")
-	if len(out) == 0 || !contains(string(out), "envoy") {
-		spinner.Status("starting proxy...")
-		if err := run("docker", "compose", "up", "-d", "--build", "--quiet-pull"); err != nil {
-			spinner.Stop()
-			fmt.Fprintf(os.Stderr, "Error starting proxy: %v\n", err)
-			os.Exit(1)
+	// Ensure authz is running (local only)
+	if !cfg.Vault.IsRemote() {
+		out, _ := runOutput("docker", "compose", "ps", "--status", "running")
+		if len(out) == 0 || !contains(string(out), "authz") {
+			spinner.Status("starting authz...")
+			if err := run("docker", "compose", "up", "-d", "--build", "--quiet-pull"); err != nil {
+				spinner.Stop()
+				fmt.Fprintf(os.Stderr, "Error starting authz: %v\n", err)
+				os.Exit(1)
+			}
 		}
 	}
 
@@ -181,8 +192,7 @@ func main() {
 			fileNewer("claude-dev/entrypoint.sh", marker) ||
 			fileNewer("generated/aenv", marker) ||
 			fileNewer("generated/certs/ca.crt", marker) ||
-			fileNewer("generated/hosts", marker) ||
-			fileNewer("generated/domains.json", marker)
+			fileNewer("generated/hosts", marker)
 	}
 	if needsBuild {
 		spinner.Status("building sandbox...")
@@ -223,17 +233,58 @@ func main() {
 		pipCacheMounts = []string{"-v", pipCache + ":/home/devuser/.cache/pip"}
 	}
 
-	// Create claude config dir
-	os.MkdirAll(filepath.Join(scriptDir, "claude-dev/claude-config"), 0755)
+	// Create claude config dir (namespaced per project)
+	claudeConfigDir := filepath.Join(scriptDir, "claude-dev/claude-config-"+projectSlug)
+	os.MkdirAll(claudeConfigDir, 0755)
 
-	// Stop any existing sandbox-net
-	runQuiet("docker", "rm", "-f", "sandbox-net")
+	// Stop any existing containers for this project
+	runQuiet("docker", "rm", "-f", containerName)
+	runQuiet("docker", "rm", "-f", envoyName)
+	runQuiet("docker", "network", "rm", networkName)
 
-	// Start sandbox-net
+	// Create per-sandbox network
+	spinner.Status("creating network...")
+	createNetArgs := []string{"network", "create", "--internal", networkName}
+	if cfg.Vault.IsRemote() {
+		// Remote authz: envoy needs internet access to reach authz and upstreams.
+		// Sandbox isolation is still enforced by iptables in sandbox-net (all traffic goes through envoy).
+		createNetArgs = []string{"network", "create", networkName}
+	}
+	if err := run("docker", createNetArgs...); err != nil {
+		spinner.Stop()
+		fmt.Fprintf(os.Stderr, "Error creating network %s: %v\n", networkName, err)
+		os.Exit(1)
+	}
+
+	// Start per-sandbox envoy
+	spinner.Status("starting envoy...")
+	if err := run("docker", "run", "-d", "--rm",
+		"--name", envoyName,
+		"--network", networkName,
+		"--network-alias", "envoy",
+		"-v", scriptDir+"/generated/certs:/certs:ro",
+		"-v", scriptDir+"/generated/envoy.json:/etc/envoy/envoy.json:ro",
+		"envoyproxy/envoy:v1.28-latest",
+		"envoy", "-c", "/etc/envoy/envoy.json"); err != nil {
+		spinner.Stop()
+		fmt.Fprintf(os.Stderr, "Error starting envoy: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Connect envoy to authz network (local only — remote authz is reachable via internet)
+	if !cfg.Vault.IsRemote() {
+		if err := run("docker", "network", "connect", "agent-creds_agent-creds", envoyName); err != nil {
+			spinner.Stop()
+			fmt.Fprintf(os.Stderr, "Error connecting envoy to authz network: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	// Start sandbox-net on per-sandbox network
 	spinner.Status("starting network filter...")
 	if err := run("docker", "run", "-d", "--rm",
-		"--name", "sandbox-net",
-		"--network=agent-creds_agent-creds",
+		"--name", containerName,
+		"--network", networkName,
 		"--cap-add=NET_ADMIN",
 		"sandbox-net"); err != nil {
 		spinner.Stop()
@@ -248,13 +299,18 @@ func main() {
 
 	// Run sandbox
 	args := []string{"run", "-it", "--rm",
-		"--network=container:sandbox-net",
+		"--network=container:" + containerName,
 		"-e", "CLAUDE_CONFIG_DIR=/home/devuser/.claude",
 		"-v", workDir + ":/workspace",
-		"-v", scriptDir + "/claude-dev/claude-config:/home/devuser/.claude",
+		"-v", claudeConfigDir + ":/home/devuser/.claude",
 	}
 	args = append(args, credsMounts...)
 	args = append(args, pipCacheMounts...)
+	// Mount project config for aenv (read-only, well-known path)
+	agentCredsToml := filepath.Join(workDir, "agent-creds.toml")
+	if fileExists(agentCredsToml) {
+		args = append(args, "-v", agentCredsToml+":/etc/aenv/agent-creds.toml:ro")
+	}
 	args = append(args, "sandbox")
 
 	cmd := exec.Command("docker", args...)
@@ -264,7 +320,9 @@ func main() {
 	cmd.Run()
 
 	// Cleanup
-	run("docker", "rm", "-f", "sandbox-net")
+	run("docker", "rm", "-f", containerName)
+	run("docker", "rm", "-f", envoyName)
+	run("docker", "network", "rm", networkName)
 }
 
 func fileExists(path string) bool {

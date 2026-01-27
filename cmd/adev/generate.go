@@ -33,17 +33,22 @@ type Domain struct {
 }
 
 type Generator struct {
-	rootDir  string
-	certsDir string
-	genDir   string
-	config   Config
+	rootDir   string
+	certsDir  string
+	genDir    string
+	config    Config
+	authzHost string
+	authzPort int
 }
 
-func NewGenerator(rootDir string) (*Generator, error) {
+func NewGenerator(rootDir string, vault VaultConfig) (*Generator, error) {
+	authzHost, authzPort := vault.AuthzAddr()
 	g := &Generator{
-		rootDir:  rootDir,
-		certsDir: filepath.Join(rootDir, "generated", "certs"),
-		genDir:   filepath.Join(rootDir, "generated"),
+		rootDir:   rootDir,
+		certsDir:  filepath.Join(rootDir, "generated", "certs"),
+		genDir:    filepath.Join(rootDir, "generated"),
+		authzHost: authzHost,
+		authzPort: authzPort,
 	}
 
 	// Parse domains.toml
@@ -80,9 +85,6 @@ func (g *Generator) Generate() error {
 		return err
 	}
 	if err := g.generateHostsFile(); err != nil {
-		return err
-	}
-	if err := g.generateDomainsJSON(); err != nil {
 		return err
 	}
 	if err := g.generateAuthzGo(); err != nil {
@@ -176,8 +178,8 @@ func (g *Generator) generateDomainCert(host string) error {
 }
 
 func (g *Generator) generateEnvoyJSON() error {
-	authzHost := "authz"
-	authzPort := 9001
+	authzHost := g.authzHost
+	authzPort := g.authzPort
 	listenPort := 443
 
 	var filterChains []map[string]interface{}
@@ -359,11 +361,6 @@ func (g *Generator) generateHostsFile() error {
 		lines = append(lines, fmt.Sprintf("envoy %s", domain.Host))
 	}
 	return os.WriteFile(filepath.Join(g.genDir, "hosts"), []byte(strings.Join(lines, "\n")+"\n"), 0644)
-}
-
-func (g *Generator) generateDomainsJSON() error {
-	data, _ := json.MarshalIndent(g.config.Domains, "", "  ")
-	return os.WriteFile(filepath.Join(g.genDir, "domains.json"), data, 0644)
 }
 
 func (g *Generator) generateAuthzGo() error {

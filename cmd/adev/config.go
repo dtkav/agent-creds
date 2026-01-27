@@ -10,7 +10,8 @@ import (
 )
 
 type SandboxConfig struct {
-	Name string `toml:"name"`
+	Name  string `toml:"name"`
+	Image string `toml:"image"`
 }
 
 type VaultConfig struct {

@@ -185,24 +185,28 @@ func main() {
 	}
 
 	// Build sandbox if needed
-	needsBuild := !imageExists("sandbox")
-	if !needsBuild {
-		marker := "generated/.sandbox-built"
-		needsBuild = fileNewer("claude-dev/Dockerfile", marker) ||
-			fileNewer("claude-dev/entrypoint.sh", marker) ||
-			fileNewer("generated/aenv", marker) ||
-			fileNewer("generated/certs/ca.crt", marker) ||
-			fileNewer("generated/hosts", marker)
-	}
-	if needsBuild {
-		spinner.Status("building sandbox...")
-		uid := fmt.Sprintf("%d", os.Getuid())
-		gid := fmt.Sprintf("%d", os.Getgid())
-		run("docker", "build", "-q", "-t", "sandbox",
-			"--build-arg", "USER_UID="+uid,
-			"--build-arg", "USER_GID="+gid,
-			"-f", "claude-dev/Dockerfile", ".")
-		os.WriteFile("generated/.sandbox-built", []byte{}, 0644)
+	sandboxImage := cfg.Sandbox.Image
+	if sandboxImage == "" {
+		sandboxImage = "sandbox"
+		needsBuild := !imageExists(sandboxImage)
+		if !needsBuild {
+			marker := "generated/.sandbox-built"
+			needsBuild = fileNewer("claude-dev/Dockerfile", marker) ||
+				fileNewer("claude-dev/entrypoint.sh", marker) ||
+				fileNewer("generated/aenv", marker) ||
+				fileNewer("generated/certs/ca.crt", marker) ||
+				fileNewer("generated/hosts", marker)
+		}
+		if needsBuild {
+			spinner.Status("building sandbox...")
+			uid := fmt.Sprintf("%d", os.Getuid())
+			gid := fmt.Sprintf("%d", os.Getgid())
+			run("docker", "build", "-q", "-t", sandboxImage,
+				"--build-arg", "USER_UID="+uid,
+				"--build-arg", "USER_GID="+gid,
+				"-f", "claude-dev/Dockerfile", ".")
+			os.WriteFile("generated/.sandbox-built", []byte{}, 0644)
+		}
 	}
 
 	// Build sandbox-net if needed
@@ -311,7 +315,7 @@ func main() {
 	if fileExists(agentCredsToml) {
 		args = append(args, "-v", agentCredsToml+":/etc/aenv/agent-creds.toml:ro")
 	}
-	args = append(args, "sandbox")
+	args = append(args, sandboxImage)
 
 	cmd := exec.Command("docker", args...)
 	cmd.Stdin = os.Stdin

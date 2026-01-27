@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -129,6 +130,38 @@ func startBrowserForward() (string, error) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
 	}))
+
+	return sockPath, nil
+}
+
+func startCDPForward() (string, error) {
+	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("cdp-forward-%d.sock", os.Getpid()))
+	os.Remove(sockPath)
+
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		return "", err
+	}
+	os.Chmod(sockPath, 0666)
+
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				upstream, err := net.Dial("tcp", "localhost:9222")
+				if err != nil {
+					return
+				}
+				defer upstream.Close()
+				go io.Copy(upstream, c)
+				io.Copy(c, upstream)
+			}(conn)
+		}
+	}()
 
 	return sockPath, nil
 }
@@ -339,12 +372,25 @@ func main() {
 	time.Sleep(500 * time.Millisecond)
 
 	// Start browser-forward server
-	spinner.Status("starting browser forward...")
-	browserSock, err := startBrowserForward()
-	if err != nil {
-		spinner.Stop()
-		fmt.Fprintf(os.Stderr, "Warning: browser forwarding disabled: %v\n", err)
-		browserSock = ""
+	var browserSock string
+	if cfg.Sandbox.UseHostBrowserEnabled() {
+		spinner.Status("starting browser forward...")
+		browserSock, err = startBrowserForward()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: browser forwarding disabled: %v\n", err)
+			browserSock = ""
+		}
+	}
+
+	// Start CDP forward
+	var cdpSock string
+	if cfg.Sandbox.UseHostBrowserCDPEnabled() {
+		spinner.Status("starting CDP forward...")
+		cdpSock, err = startCDPForward()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: CDP forwarding disabled: %v\n", err)
+			cdpSock = ""
+		}
 	}
 
 	// Stop spinner
@@ -362,6 +408,10 @@ func main() {
 	if browserSock != "" {
 		args = append(args, "-v", browserSock+":/run/browser-forward.sock")
 		args = append(args, "-e", "BROWSER=/usr/local/bin/open-browser")
+	}
+	// Add CDP forwarding if available
+	if cdpSock != "" {
+		args = append(args, "-v", cdpSock+":/run/cdp-forward.sock")
 	}
 	args = append(args, credsMounts...)
 	args = append(args, pipCacheMounts...)

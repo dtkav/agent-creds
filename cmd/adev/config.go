@@ -10,9 +10,14 @@ import (
 )
 
 type SandboxConfig struct {
-	Name  string `toml:"name"`
-	Image string `toml:"image"`
+	Name           string `toml:"name"`
+	Image          string `toml:"image"`
+	UseHostBrowser    *bool `toml:"use_host_browser"`     // default true
+	UseHostBrowserCDP *bool `toml:"use_host_browser_cdp"` // default true
 }
+
+func (s SandboxConfig) UseHostBrowserEnabled() bool    { return s.UseHostBrowser == nil || *s.UseHostBrowser }
+func (s SandboxConfig) UseHostBrowserCDPEnabled() bool { return s.UseHostBrowserCDP == nil || *s.UseHostBrowserCDP }
 
 type VaultConfig struct {
 	Host string `toml:"host"` // bare hostname, implies https:443 + ssh:22

@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -96,6 +98,39 @@ func fileNewer(a, b string) bool {
 
 func imageExists(name string) bool {
 	return run("docker", "image", "inspect", name) == nil
+}
+
+func startBrowserForward() (string, error) {
+	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("browser-forward-%d.sock", os.Getpid()))
+	os.Remove(sockPath) // clean up stale socket
+
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		return "", err
+	}
+
+	// Make socket accessible from container (runs as different uid)
+	os.Chmod(sockPath, 0666)
+
+	go http.Serve(listener, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		url := r.URL.Query().Get("url")
+		if url == "" {
+			http.Error(w, "missing url parameter", http.StatusBadRequest)
+			return
+		}
+
+		cmd := exec.Command("xdg-open", url)
+		if err := cmd.Start(); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		go cmd.Wait()
+
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	}))
+
+	return sockPath, nil
 }
 
 func main() {
@@ -298,6 +333,15 @@ func main() {
 
 	time.Sleep(500 * time.Millisecond)
 
+	// Start browser-forward server
+	spinner.Status("starting browser forward...")
+	browserSock, err := startBrowserForward()
+	if err != nil {
+		spinner.Stop()
+		fmt.Fprintf(os.Stderr, "Warning: browser forwarding disabled: %v\n", err)
+		browserSock = ""
+	}
+
 	// Stop spinner
 	spinner.Stop()
 
@@ -307,6 +351,11 @@ func main() {
 		"-e", "CLAUDE_CONFIG_DIR=/home/devuser/.claude",
 		"-v", workDir + ":/workspace",
 		"-v", claudeConfigDir + ":/home/devuser/.claude",
+	}
+	// Add browser forwarding if available
+	if browserSock != "" {
+		args = append(args, "-v", browserSock+":/run/browser-forward.sock")
+		args = append(args, "-e", "BROWSER=/usr/local/bin/open-browser")
 	}
 	args = append(args, credsMounts...)
 	args = append(args, pipCacheMounts...)

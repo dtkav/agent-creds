@@ -268,24 +268,39 @@ func main() {
 		allTokens = append(allTokens, extractTokenInfo(filepath.Base(path), string(content)))
 	}
 
-	// Header
-	fmt.Println()
-	fmt.Println(headerStyle.Render("🔑 agent-creds"))
-	fmt.Println(sectionStyle.Render("Proxied Hosts"))
-	fmt.Println()
-
-	// Hosts
+	// Separate domains into token-configured and passthrough
+	var tokenDomains, passthroughDomains []string
 	for _, name := range names {
 		d := domains[name]
 		authType := d.AuthType
 		if authType == "" {
 			authType = "static"
 		}
-
 		if authType == "passthrough" {
-			fmt.Printf("  %s %s\n", okStyle.Render("◉"), dimStyle.Render(d.Host+" (passthrough)"))
-			continue
+			passthroughDomains = append(passthroughDomains, name)
+		} else {
+			tokenDomains = append(tokenDomains, name)
 		}
+	}
+
+	// Build left column: Allowlist (all accessible hosts)
+	var leftLines []string
+	leftLines = append(leftLines, sectionStyle.Render("Allowlist"))
+	leftLines = append(leftLines, "")
+
+	// Include all domains in allowlist
+	for _, name := range names {
+		d := domains[name]
+		leftLines = append(leftLines, fmt.Sprintf("  %s %s", okStyle.Render("◉"), dimStyle.Render(d.Host)))
+	}
+
+	// Build right column: Credentials
+	var rightLines []string
+	rightLines = append(rightLines, sectionStyle.Render("Credentials"))
+	rightLines = append(rightLines, "")
+
+	for _, name := range tokenDomains {
+		d := domains[name]
 
 		var matching []TokenInfo
 		for _, t := range allTokens {
@@ -295,15 +310,32 @@ func main() {
 		}
 
 		if len(matching) == 0 {
-			fmt.Printf("  %s %s %s\n", warnStyle.Render("○"), hostWarnStyle.Render(d.Host), dimStyle.Render("— no token"))
+			rightLines = append(rightLines, fmt.Sprintf("  %s %s %s", warnStyle.Render("○"), hostWarnStyle.Render(d.Host), dimStyle.Render("— no token")))
 			continue
 		}
 
-		fmt.Printf("  %s %s\n", okStyle.Render("◉"), hostOkStyle.Render(d.Host))
+		rightLines = append(rightLines, fmt.Sprintf("  %s %s", okStyle.Render("◉"), hostOkStyle.Render(d.Host)))
 		for _, t := range matching {
-			fmt.Println(renderTokenLine(t))
+			rightLines = append(rightLines, renderTokenLine(t))
 		}
 	}
 
+	// Column styles
+	leftCol := lipgloss.NewStyle().
+		Width(30).
+		MarginRight(4)
+
+	rightCol := lipgloss.NewStyle().
+		Width(50)
+
+	// Render columns
+	leftContent := leftCol.Render(strings.Join(leftLines, "\n"))
+	rightContent := rightCol.Render(strings.Join(rightLines, "\n"))
+
+	// Header and columns
+	fmt.Println()
+	fmt.Println(headerStyle.Render("🔑 agent-creds"))
+	fmt.Println()
+	fmt.Println(lipgloss.JoinHorizontal(lipgloss.Top, leftContent, rightContent))
 	fmt.Println()
 }

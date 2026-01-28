@@ -1,0 +1,12 @@
+.signing-key
+.token
+mint
+mintfs-cli
+authz
+authz-ssh
+authz_host_key
+authz_host_key.pub
+
+# design docs / claude specs
+specs/
+

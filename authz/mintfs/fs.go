@@ -25,6 +25,7 @@ type MintFS struct {
 	akeyDir    string
 	sessionMgr *attestation.SessionManager
 	apiClient  *client.Client // For server-side mode
+	sshHost    string         // For SSH mode (e.g., "authz.example.com" or "localhost:2222")
 	server     *fuse.Server
 
 	// Cache of loaded .akey files (local mode only)
@@ -63,6 +64,30 @@ func NewWithAPI(mountPoint string, apiClient *client.Client) (*MintFS, error) {
 	}
 
 	return mfs, nil
+}
+
+// NewWithSSH creates a new MintFS instance (SSH mode)
+// sshHost is the SSH server to connect to (e.g., "authz.example.com" or "localhost -p 2222")
+// hosts is the list of API hosts to expose as files
+func NewWithSSH(mountPoint, sshHost string, hosts []string) (*MintFS, error) {
+	mfs := &MintFS{
+		mountPoint: mountPoint,
+		sshHost:    sshHost,
+		entries:    make(map[string]string),
+	}
+
+	// Create entries for each host
+	for _, host := range hosts {
+		// Use host as the filename (e.g., api.stripe.com)
+		mfs.entries[host] = "" // Token will be fetched on demand
+	}
+
+	return mfs, nil
+}
+
+// IsSSHMode returns true if using SSH-based token minting
+func (m *MintFS) IsSSHMode() bool {
+	return m.sshHost != ""
 }
 
 // loadTokensFromAPI fetches the list of available tokens from the server
@@ -308,6 +333,11 @@ func (t *tokenNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off
 
 // generateHotToken creates a hot token from the main token
 func (t *tokenNode) generateHotToken() (string, error) {
+	// SSH mode: mint via SSH command
+	if t.mfs.sshHost != "" {
+		return t.mintViaSSH()
+	}
+
 	// Server mode: fetch from API
 	if t.mfs.apiClient != nil {
 		hotToken, err := t.mfs.apiClient.GetHotToken(t.name)
@@ -351,6 +381,39 @@ func (t *tokenNode) generateHotToken() (string, error) {
 	}
 
 	return attestation.CombineTokens(t.mainToken, dischargeStr), nil
+}
+
+// mintViaSSH mints a token by calling the SSH server
+func (t *tokenNode) mintViaSSH() (string, error) {
+	// Parse SSH host (might include port like "localhost -p 2222")
+	sshArgs := []string{}
+
+	// Check if host includes port specification
+	parts := strings.Fields(t.mfs.sshHost)
+	if len(parts) > 1 {
+		sshArgs = append(sshArgs, parts...)
+	} else {
+		sshArgs = append(sshArgs, t.mfs.sshHost)
+	}
+
+	// Add the mint command (t.name is the host like "api.stripe.com")
+	sshArgs = append(sshArgs, "mint", t.name)
+
+	cmd := exec.Command("ssh", sshArgs...)
+	output, err := cmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return "", fmt.Errorf("ssh mint failed: %s", string(exitErr.Stderr))
+		}
+		return "", fmt.Errorf("ssh mint failed: %w", err)
+	}
+
+	token := strings.TrimSpace(string(output))
+	if token == "" {
+		return "", fmt.Errorf("ssh mint returned empty token")
+	}
+
+	return token, nil
 }
 
 // tokenHandle holds the generated token content

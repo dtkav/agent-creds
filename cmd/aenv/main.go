@@ -2,7 +2,10 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -248,6 +251,49 @@ func renderTokenLine(t TokenInfo) string {
 	return fmt.Sprintf("    %s %s", tokenNameStyle.Render(source), strings.Join(parts, " "+sep+" "))
 }
 
+func checkBrowserForward() string {
+	sock := "/run/browser-forward.sock"
+	if _, err := os.Stat(sock); err != nil {
+		return ""
+	}
+	// Try connecting to verify it's alive
+	conn, err := net.DialTimeout("unix", sock, 500*time.Millisecond)
+	if err != nil {
+		return "dead"
+	}
+	conn.Close()
+	return "ok"
+}
+
+func checkCDP() string {
+	sock := "/run/cdp-forward.sock"
+	if _, err := os.Stat(sock); err != nil {
+		// Also check if cdp-proxy is listening on 9222 directly
+		conn, err := net.DialTimeout("tcp", "127.0.0.1:9222", 500*time.Millisecond)
+		if err != nil {
+			return ""
+		}
+		conn.Close()
+	}
+	// Try /json/version via the TCP port (cdp-proxy -> socket -> host Chrome)
+	client := &http.Client{Timeout: time.Second}
+	resp, err := client.Get("http://127.0.0.1:9222/json/version")
+	if err != nil {
+		return "no-remote"
+	}
+	defer resp.Body.Close()
+	var info struct {
+		Browser string `json:"Browser"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return "connected"
+	}
+	if info.Browser != "" {
+		return info.Browser
+	}
+	return "connected"
+}
+
 func main() {
 	var cfg ProjectConfig
 	if _, err := toml.DecodeFile("/etc/aenv/agent-creds.toml", &cfg); err != nil {
@@ -313,6 +359,31 @@ func main() {
 		}
 	}
 
+	// Build third column: Host Access
+	var thirdLines []string
+	thirdLines = append(thirdLines, sectionStyle.Render("Host Access"))
+	thirdLines = append(thirdLines, "")
+
+	// Browser forward
+	switch checkBrowserForward() {
+	case "ok":
+		thirdLines = append(thirdLines, fmt.Sprintf("  %s %s", okStyle.Render("◉"), dimStyle.Render("browser forward")))
+	case "dead":
+		thirdLines = append(thirdLines, fmt.Sprintf("  %s %s", errStyle.Render("◉"), dimStyle.Render("browser forward (dead)")))
+	default:
+		thirdLines = append(thirdLines, fmt.Sprintf("  %s %s", dimStyle.Render("○"), dimStyle.Render("browser forward")))
+	}
+
+	// CDP
+	switch cdp := checkCDP(); cdp {
+	case "":
+		thirdLines = append(thirdLines, fmt.Sprintf("  %s %s", dimStyle.Render("○"), dimStyle.Render("cdp")))
+	case "no-remote":
+		thirdLines = append(thirdLines, fmt.Sprintf("  %s %s", warnStyle.Render("◉"), dimStyle.Render("cdp (no remote browser)")))
+	default:
+		thirdLines = append(thirdLines, fmt.Sprintf("  %s %s", okStyle.Render("◉"), dimStyle.Render("cdp → "+cdp)))
+	}
+
 	// Vault info
 	vaultLine := dimStyle.Render("local")
 	if cfg.Vault.Host != "" {
@@ -325,15 +396,20 @@ func main() {
 		MarginRight(4)
 
 	rightCol := lipgloss.NewStyle().
-		Width(50)
+		Width(50).
+		MarginRight(4)
+
+	thirdCol := lipgloss.NewStyle().
+		Width(35)
 
 	// Render
 	leftContent := leftCol.Render(strings.Join(leftLines, "\n"))
 	rightContent := rightCol.Render(strings.Join(rightLines, "\n"))
+	thirdContent := thirdCol.Render(strings.Join(thirdLines, "\n"))
 
 	fmt.Println()
 	fmt.Println(headerStyle.Render("🔑 agent-creds") + "  " + dimStyle.Render("vault: ") + vaultLine)
 	fmt.Println()
-	fmt.Println(lipgloss.JoinHorizontal(lipgloss.Top, leftContent, rightContent))
+	fmt.Println(lipgloss.JoinHorizontal(lipgloss.Top, leftContent, rightContent, thirdContent))
 	fmt.Println()
 }

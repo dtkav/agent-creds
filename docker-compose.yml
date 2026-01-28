@@ -3,6 +3,7 @@ services:
     build: ./authz
     ports:
       - "8080:8080"
+      - "2222:2222"
     environment:
       - MACAROON_SIGNING_KEY=${MACAROON_SIGNING_KEY}
       - MACAROON_ENCRYPTION_KEY=${MACAROON_ENCRYPTION_KEY}

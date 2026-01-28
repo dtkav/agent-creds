@@ -16,6 +16,11 @@ if [ -d /src-ro ] && [ "$(ls -A /src-ro 2>/dev/null)" ]; then
         /workspace
 fi
 
+# Start CDP proxy if socket is mounted
+if [ -S /run/cdp-forward.sock ]; then
+    cdp-proxy &
+fi
+
 # Session name
 SESSION="${ABDUCO_SESSION:-claude}"
 

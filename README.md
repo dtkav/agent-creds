@@ -43,7 +43,7 @@ This turns "full API access" into precisely scoped capabilities that match the a
 ```
 
 - **sandbox**: Container running your code, with `/etc/hosts` routing API domains to envoy
-- **envoy**: Terminates TLS with custom certs, calls authz for token validation
+- **envoy**: Terminates TLS with runtime-generated certs, calls authz for token validation
 - **authz**: Validates macaroon tokens, injects real API keys into requests
 
 ## Quick Start
@@ -51,40 +51,44 @@ This turns "full API access" into precisely scoped capabilities that match the a
 ### Prerequisites
 
 - Docker and Docker Compose
+- Go 1.21+ (for building tools)
 
 ### Setup
 
 ```bash
-# Copy and customize domain config
-cp domains.example.toml domains.toml
-# Edit domains.toml to add your API services...
+# Create project config
+cat > agent-creds.toml << 'EOF'
+[sandbox]
+name = "myproject"
 
-# Generate certs and configs
-make generate
+[upstream."api.stripe.com"]
+akey = "stripe.akey"
+EOF
 
 # Generate a signing key (32+ bytes, base64 encoded)
 export MACAROON_SIGNING_KEY=$(openssl rand -base64 32)
 export STRIPE_API_KEY=sk_live_xxx
 
-# Start the proxy
+# Start authz service
 make up
+
+# Start development environment
+make dev
 ```
 
 ### Usage
 
-```bash
-# Build the sandbox container (once)
-make build
+The `make dev` command runs `adev`, which:
+1. Generates configs from `agent-creds.toml`
+2. Starts envoy with runtime cert generation
+3. Launches an interactive sandbox container
 
-# Run a command through the proxy
-bin/arun curl https://api.stripe.com/v1/customers \
+Inside the sandbox, API calls are automatically proxied:
+
+```bash
+curl https://api.stripe.com/v1/customers \
   -H "Authorization: Bearer <token>"
 ```
-
-The `bin/arun` wrapper runs your command in a sandbox container that:
-- Joins the `envoy_agent-creds` Docker network
-- Has `/etc/hosts` routing `api.stripe.com` → `envoy`
-- Trusts the proxy CA for TLS
 
 #### Minting Tokens
 
@@ -92,11 +96,11 @@ Tokens are created using `mint` with fine-grained access control:
 
 ```bash
 # Build mint (once)
-cd authz && go build -o mint ./cmd/mint && cd ..
+cd authz && go build -o ../bin/mint ./cmd/mint && cd ..
 
 # Mint a token with restrictions
 export MACAROON_SIGNING_KEY=<your-signing-key>
-./authz/mint --hosts api.stripe.com --methods GET,POST --paths "/v1/*" --valid-for 1h
+bin/mint --hosts api.stripe.com --methods GET,POST --paths "/v1/*" --valid-for 1h
 ```
 
 #### Token Options
@@ -114,67 +118,71 @@ Tokens without restrictions (no `--hosts`, `--methods`, `--paths`) have full acc
 
 ## Configuration
 
-Copy `domains.example.toml` to `domains.toml` and customize:
+Create `agent-creds.toml` in your project directory:
 
 ```toml
-[ca]
-common_name = "Agent-Creds Proxy CA"
-days_valid = 3650
+[sandbox]
+name = "myproject"
 
-[domains.stripe]
-host = "api.stripe.com"
-env_var = "STRIPE_API_KEY"
+# Remote authz (optional - defaults to local docker-compose)
+# [vault]
+# host = "authz.example.com"
 
-# Add more domains as needed
-[domains.openai]
-host = "api.openai.com"
-env_var = "OPENAI_API_KEY"
+# Passthrough (no credential injection)
+[upstream."api.example.com"]
+
+# With credential injection
+[upstream."api.stripe.com"]
+akey = "stripe.akey"
+
+[upstream."api.openai.com"]
+akey = "openai.akey"
 ```
 
 ### Adding a new service
 
-1. Add domain to `domains.toml`
-2. Run `make generate` to regenerate certs and configs
-3. Add the API key environment variable to `docker-compose.yml`
-4. Restart: `make down && make up`
+1. Add upstream to `agent-creds.toml`
+2. If using credential injection, create the `.akey` file
+3. Run `make dev` - configs regenerate automatically
 
 ### Environment Variables (authz)
 
 - `MACAROON_SIGNING_KEY`: Base64-encoded 32+ byte key for signing/verifying tokens
-- `STRIPE_API_KEY`: Stripe API key (or other keys matching `env_var` in domains.toml)
+- `STRIPE_API_KEY`: Stripe API key (env var derived from akey filename)
 
 ## Files
 
 ```
 .
-├── domains.example.toml  # Example domain config (copy to domains.toml)
-├── domains.toml          # Your domain config (gitignored)
-├── docker-compose.yml    # Docker Compose config
+├── agent-creds.toml      # Project config (per-project)
+├── docker-compose.yml    # Authz service config
 ├── Makefile              # Build/deploy commands
+├── envoy-entrypoint.sh   # Runtime cert generation for envoy
 ├── cmd/
-│   ├── generate/         # Generates certs and configs from domains.toml
-│   └── adev/             # Interactive dev session launcher
+│   ├── adev/             # Development orchestrator
+│   └── aenv/             # Environment variable helper
 ├── generated/            # Generated files (gitignored)
-│   ├── certs/            # CA and domain certificates
-│   ├── envoy.json        # Envoy config with TLS termination
+│   ├── certs/            # CA certificate (domain certs generated at runtime)
+│   ├── envoy.json        # Envoy config
 │   ├── hosts             # /etc/hosts entries
-│   └── domains.json      # Domain config for other tools
+│   └── domains.json      # Domain config for runtime cert generation
 ├── authz/
 │   ├── main.go           # gRPC authz service
-│   ├── domains_gen.go    # Generated domain config (gitignored)
-│   ├── macaroon/         # Macaroon token library (caveats, verification)
-│   ├── cmd/mint/         # Token minting CLI tool
+│   ├── domains_gen.go    # Generated domain config
+│   ├── macaroon/         # Macaroon token library
+│   ├── cmd/mint/         # Token minting CLI
 │   ├── mintfs/           # FUSE filesystem for short-lived tokens
 │   └── Dockerfile
 └── bin/
-    ├── arun              # Run a command through the proxy
-    └── adev              # Interactive dev session
+    ├── adev              # Development session launcher
+    └── mint              # Token minting tool
 ```
 
 ## How It Works
 
-1. **Certificate Generation**: `make generate` creates a CA and signs certificates for each domain in `domains.toml`
-2. **TLS Termination**: Envoy presents these certificates to clients, so `https://api.stripe.com` works with unmodified code
-3. **DNS Routing**: Client containers need `/etc/hosts` entries pointing proxied domains to the envoy service
-4. **Token Verification**: Authz verifies the macaroon token signature and checks caveats (host, method, path, validity)
-5. **Credential Injection**: On successful verification, authz injects the real API key before forwarding to upstream
+1. **CA Generation**: `adev` creates a CA cert once in `generated/certs/`
+2. **Runtime Certs**: `envoy-entrypoint.sh` generates domain certs at startup using the CA
+3. **TLS Termination**: Envoy presents these certificates to clients, so `https://api.stripe.com` works with unmodified code
+4. **DNS Routing**: Sandbox containers have `/etc/hosts` entries pointing proxied domains to envoy
+5. **Token Verification**: Authz verifies the macaroon token signature and checks caveats (host, method, path, validity)
+6. **Credential Injection**: On successful verification, authz injects the real API key before forwarding to upstream

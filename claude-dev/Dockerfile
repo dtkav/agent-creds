@@ -77,6 +77,10 @@ RUN chmod +x /entrypoint.sh
 COPY claude-dev/open-browser /usr/local/bin/open-browser
 RUN chmod +x /usr/local/bin/open-browser
 
+# Copy cdp-proxy binary
+COPY generated/cdp-proxy /usr/local/bin/cdp-proxy
+RUN chmod +x /usr/local/bin/cdp-proxy
+
 # Create overlay directories
 RUN mkdir -p /src-ro /src-upper /src-work /workspace \
     && chown devuser:devuser /src-upper /src-work /workspace

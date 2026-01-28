@@ -5,10 +5,12 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -101,7 +103,7 @@ func imageExists(name string) bool {
 	return run("docker", "image", "inspect", name) == nil
 }
 
-func startBrowserForward() (string, error) {
+func startBrowserForward(netContainerName string) (string, error) {
 	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("browser-forward-%d.sock", os.Getpid()))
 	os.Remove(sockPath) // clean up stale socket
 
@@ -114,13 +116,25 @@ func startBrowserForward() (string, error) {
 	os.Chmod(sockPath, 0666)
 
 	go http.Serve(listener, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		url := r.URL.Query().Get("url")
-		if url == "" {
+		rawURL := r.URL.Query().Get("url")
+		if rawURL == "" {
 			http.Error(w, "missing url parameter", http.StatusBadRequest)
 			return
 		}
 
-		cmd := exec.Command("xdg-open", url)
+		// If the URL points to localhost with a port, set up a TCP proxy
+		// so the host browser's OAuth callback can reach the sandbox container.
+		if parsed, err := url.Parse(rawURL); err == nil {
+			host := parsed.Hostname()
+			port := parsed.Port()
+			if port != "" && (host == "localhost" || host == "127.0.0.1") {
+				go proxyLocalPort(netContainerName, port)
+				// Small delay to let the listener start before the browser navigates back
+				time.Sleep(100 * time.Millisecond)
+			}
+		}
+
+		cmd := exec.Command("xdg-open", rawURL)
 		if err := cmd.Start(); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -164,6 +178,52 @@ func startCDPForward() (string, error) {
 	}()
 
 	return sockPath, nil
+}
+
+// proxyLocalPort creates a temporary TCP listener on the host at the given port,
+// forwarding connections to the same port inside the net container. This allows
+// OAuth callbacks (host browser -> localhost:PORT) to reach the sandbox.
+func proxyLocalPort(containerName, port string) {
+	// Get the container's IP address
+	out, err := exec.Command("docker", "inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", containerName).Output()
+	if err != nil {
+		return
+	}
+	containerIP := strings.TrimSpace(string(out))
+	if containerIP == "" {
+		return
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:"+port)
+	if err != nil {
+		return
+	}
+
+	// Auto-close after 5 minutes
+	go func() {
+		time.Sleep(5 * time.Minute)
+		ln.Close()
+	}()
+
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			return // listener closed
+		}
+		go func(c net.Conn) {
+			defer c.Close()
+			upstream, err := net.DialTimeout("tcp", containerIP+":"+port, 5*time.Second)
+			if err != nil {
+				return
+			}
+			defer upstream.Close()
+			go io.Copy(upstream, c)
+			io.Copy(c, upstream)
+		}(conn)
+		// Close listener after first connection completes
+		ln.Close()
+		return
+	}
 }
 
 func main() {
@@ -251,6 +311,16 @@ func main() {
 		spinner.Status("building aenv...")
 		cmd := exec.Command("go", "build", "-o", "../../generated/aenv", ".")
 		cmd.Dir = "cmd/aenv"
+		cmd.Run()
+	}
+
+	// Build cdp-proxy if needed
+	cdpProxyBin := "generated/cdp-proxy"
+	cdpProxySrc := "cmd/cdp-proxy/main.go"
+	if !fileExists(cdpProxyBin) || fileNewer(cdpProxySrc, cdpProxyBin) {
+		spinner.Status("building cdp-proxy...")
+		cmd := exec.Command("go", "build", "-o", "../../generated/cdp-proxy", ".")
+		cmd.Dir = "cmd/cdp-proxy"
 		cmd.Run()
 	}
 
@@ -375,7 +445,7 @@ func main() {
 	var browserSock string
 	if cfg.Sandbox.UseHostBrowserEnabled() {
 		spinner.Status("starting browser forward...")
-		browserSock, err = startBrowserForward()
+		browserSock, err = startBrowserForward(containerName)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: browser forwarding disabled: %v\n", err)
 			browserSock = ""

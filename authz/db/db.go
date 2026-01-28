@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -121,10 +122,27 @@ func (d *DB) migrate() error {
 			created_at INTEGER NOT NULL,
 			expires_at INTEGER NOT NULL
 		)`,
+
+		// SSH keys (for SSH-based authentication)
+		`CREATE TABLE IF NOT EXISTS ssh_keys (
+			fingerprint TEXT PRIMARY KEY,
+			user_id BLOB NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			comment TEXT,
+			created_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_ssh_keys_user ON ssh_keys(user_id)`,
+
+		// Add status column to users if it doesn't exist
+		`ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'pending'`,
 	}
 
 	for _, m := range migrations {
-		if _, err := d.Exec(m); err != nil {
+		_, err := d.Exec(m)
+		if err != nil {
+			// Ignore "duplicate column" errors from ALTER TABLE
+			if strings.Contains(err.Error(), "duplicate column") {
+				continue
+			}
 			return fmt.Errorf("migration failed: %w\nSQL: %s", err, m)
 		}
 	}

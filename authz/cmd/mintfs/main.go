@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"authz/api/client"
@@ -47,11 +48,16 @@ Usage:
   mintfs status                         Show mounted filesystems
 
 Options:
+  --ssh <host>         SSH server for token minting (e.g., "localhost -p 2222")
+  --hosts <list>       Comma-separated hosts for SSH mode (e.g., "api.stripe.com,api.openai.com")
   --user <username>    Username for server authentication
   --server <url>       Server URL (default: http://localhost:8080)
   --insecure           Skip TLS verification
 
 Examples:
+  # SSH mode (uses ssh-agent for authentication)
+  mintfs start ~/.mintfs --ssh "localhost -p 2222" --hosts api.stripe.com,api.openai.com
+
   # Local mode (touch YubiKey once at start)
   mintfs start ~/.mintfs
 
@@ -59,17 +65,18 @@ Examples:
   mintfs start ~/.mintfs --user alice --server https://authz.example.com
 
   # Read tokens without additional YubiKey touches
-  TOKEN=$(cat ~/.mintfs/gmail-drafts)
+  TOKEN=$(cat ~/.mintfs/api.stripe.com)
 
   # Use in curl
-  curl -H "Authorization: Bearer $(cat ~/.mintfs/gmail-drafts)" \
-    https://gmail.googleapis.com/gmail/v1/users/me/drafts
+  curl -H "Authorization: Bearer $(cat ~/.mintfs/api.stripe.com)" \
+    https://api.stripe.com/v1/customers
 
   # Stop mintfs
   mintfs stop ~/.mintfs
 
-Local mode loads .akey files from ~/.config/agent-creds/ and serves
-hot tokens. Server mode fetches tokens from the authz server.
+SSH mode uses your SSH key to authenticate with the authz SSH server.
+Local mode loads .akey files from ~/.config/agent-creds/.
+Server mode fetches tokens from the authz HTTP server.
 
 Environment:
   MACAROON_SIGNING_KEY     Base64-encoded signing key (local mode)
@@ -77,11 +84,14 @@ Environment:
   AKEY_DIR                 Directory with .akey files (default: ~/.config/agent-creds)
   AUTHZ_SERVER             Server URL for server mode
   AUTHZ_USER               Username for server mode
+  AUTHZ_SSH                SSH server for SSH mode
 `)
 }
 
 func startCmd(args []string) {
 	fs := flag.NewFlagSet("start", flag.ExitOnError)
+	sshHost := fs.String("ssh", os.Getenv("AUTHZ_SSH"), "SSH server for token minting")
+	hosts := fs.String("hosts", "", "Comma-separated hosts for SSH mode")
 	username := fs.String("user", os.Getenv("AUTHZ_USER"), "Username for server authentication")
 	serverURL := fs.String("server", os.Getenv("AUTHZ_SERVER"), "Server URL")
 	insecure := fs.Bool("insecure", false, "Skip TLS verification")
@@ -108,7 +118,15 @@ func startCmd(args []string) {
 	}
 
 	// Decide mode based on options
-	if *username != "" && *serverURL != "" {
+	if *sshHost != "" {
+		// SSH mode
+		hostList := parseHosts(*hosts)
+		if len(hostList) == 0 {
+			// Default hosts
+			hostList = []string{"api.stripe.com", "api.openai.com", "api.anthropic.com"}
+		}
+		startSSHMode(mountPoint, *sshHost, hostList)
+	} else if *username != "" && *serverURL != "" {
 		// Server mode
 		startServerMode(mountPoint, *username, *serverURL, *insecure)
 	} else if *username != "" || *serverURL != "" {
@@ -117,6 +135,37 @@ func startCmd(args []string) {
 		// Local mode
 		startLocalMode(mountPoint)
 	}
+}
+
+// parseHosts splits a comma-separated list of hosts
+func parseHosts(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var hosts []string
+	for _, h := range strings.Split(s, ",") {
+		h = strings.TrimSpace(h)
+		if h != "" {
+			hosts = append(hosts, h)
+		}
+	}
+	return hosts
+}
+
+// startSSHMode starts mintfs in SSH mode
+func startSSHMode(mountPoint, sshHost string, hosts []string) {
+	fmt.Printf("Starting mintfs in SSH mode\n")
+	fmt.Printf("SSH server: %s\n", sshHost)
+	fmt.Printf("Hosts: %v\n", hosts)
+	fmt.Printf("Mounting at %s...\n", mountPoint)
+
+	// Create and mount the filesystem
+	mfs, err := mintfs.NewWithSSH(mountPoint, sshHost, hosts)
+	if err != nil {
+		log.Fatalf("failed to create filesystem: %v", err)
+	}
+
+	serveFilesystem(mfs, mountPoint)
 }
 
 // startServerMode starts mintfs in server mode

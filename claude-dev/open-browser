@@ -1,0 +1,11 @@
+#!/bin/sh
+# Opens URL on host via browser-forward unix socket
+
+url="$1"
+if [ -z "$url" ]; then
+    echo "Usage: open-browser <url>" >&2
+    exit 1
+fi
+
+# Use -G --data-urlencode so curl properly encodes the URL parameter
+curl -sf -G --data-urlencode "url=$url" --unix-socket /run/browser-forward.sock "http://localhost/open" >/dev/null 2>&1 &

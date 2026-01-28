@@ -272,7 +272,7 @@ func (g *Generator) generateEnvoyJSON() error {
 	}
 
 	data, _ := json.MarshalIndent(envoyConfig, "", "  ")
-	return os.WriteFile(filepath.Join(g.genDir, "envoy.json"), data, 0644)
+	return writeIfChanged(filepath.Join(g.genDir, "envoy.json"), data, 0644)
 }
 
 func (g *Generator) generateHostsFile() error {
@@ -281,7 +281,7 @@ func (g *Generator) generateHostsFile() error {
 	for _, host := range g.hosts {
 		lines = append(lines, fmt.Sprintf("envoy %s", host))
 	}
-	return os.WriteFile(filepath.Join(g.genDir, "hosts"), []byte(strings.Join(lines, "\n")+"\n"), 0644)
+	return writeIfChanged(filepath.Join(g.genDir, "hosts"), []byte(strings.Join(lines, "\n")+"\n"), 0644)
 }
 
 func (g *Generator) generateDomainsJSON() error {
@@ -301,7 +301,7 @@ func (g *Generator) generateDomainsJSON() error {
 	}
 
 	data, _ := json.MarshalIndent(domains, "", "  ")
-	return os.WriteFile(filepath.Join(g.genDir, "domains.json"), data, 0644)
+	return writeIfChanged(filepath.Join(g.genDir, "domains.json"), data, 0644)
 }
 
 func (g *Generator) generateAuthzGo() error {
@@ -341,7 +341,7 @@ func (g *Generator) generateAuthzGo() error {
 	lines = append(lines, "}")
 	lines = append(lines, "")
 
-	return os.WriteFile(filepath.Join(g.rootDir, "authz", "domains_gen.go"), []byte(strings.Join(lines, "\n")), 0644)
+	return writeIfChanged(filepath.Join(g.rootDir, "authz", "domains_gen.go"), []byte(strings.Join(lines, "\n")), 0644)
 }
 
 // akeyToEnvVar converts an akey filename to an env var name.
@@ -349,6 +349,16 @@ func (g *Generator) generateAuthzGo() error {
 func akeyToEnvVar(akey string) string {
 	name := strings.TrimSuffix(akey, ".akey")
 	return strings.ToUpper(name) + "_API_KEY"
+}
+
+// writeIfChanged writes data to path only if the content differs from what's on disk.
+// This preserves mtimes for unchanged files, avoiding unnecessary Docker rebuilds.
+func writeIfChanged(path string, data []byte, perm os.FileMode) error {
+	existing, err := os.ReadFile(path)
+	if err == nil && string(existing) == string(data) {
+		return nil
+	}
+	return os.WriteFile(path, data, perm)
 }
 
 func runCmd(name string, args ...string) error {

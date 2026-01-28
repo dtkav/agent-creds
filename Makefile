@@ -1,4 +1,4 @@
-.PHONY: up down reload deploy deploy-proxy deploy-authz dev build test apply-changes discard-changes generate generate-fly clean-certs
+.PHONY: up down reload deploy deploy-proxy deploy-authz dev build test apply-changes discard-changes generate generate-fly clean-certs binaries
 
 # Docker Compose (primary)
 up: generate
@@ -44,9 +44,40 @@ discard-changes:
 test:
 	bin/arun curl -v https://api.stripe.com/v1/customers -H "Authorization: Bearer $$(cat /creds/stripe)"
 
-# Build the generate CLI
+# Build all binaries
+binaries: bin/generate bin/actl bin/adev bin/aenv bin/odev bin/cdp-proxy bin/mint bin/mintfs bin/authz-admin bin/authz-ssh
+
+# Root-level cmd binaries
 bin/generate: cmd/generate/main.go cmd/generate/go.mod
 	cd cmd/generate && go build -o ../../bin/generate .
+
+bin/actl: cmd/actl/main.go cmd/actl/go.mod
+	cd cmd/actl && go build -o ../../bin/actl .
+
+bin/adev: cmd/adev/main.go cmd/adev/go.mod
+	cd cmd/adev && go build -o ../../bin/adev .
+
+bin/aenv: cmd/aenv/main.go cmd/aenv/go.mod
+	cd cmd/aenv && go build -o ../../bin/aenv .
+
+bin/odev: cmd/odev/main.go cmd/odev/go.mod
+	cd cmd/odev && go build -o ../../bin/odev .
+
+bin/cdp-proxy: cmd/cdp-proxy/main.go cmd/cdp-proxy/go.mod
+	cd cmd/cdp-proxy && go build -o ../../bin/cdp-proxy .
+
+# Authz binaries (share authz/go.mod)
+bin/mint: authz/cmd/mint/main.go authz/go.mod
+	cd authz && go build -o ../bin/mint ./cmd/mint
+
+bin/mintfs: authz/cmd/mintfs/main.go authz/go.mod
+	cd authz && go build -o ../bin/mintfs ./cmd/mintfs
+
+bin/authz-admin: authz/cmd/authz-admin/main.go authz/go.mod
+	cd authz && go build -o ../bin/authz-admin ./cmd/authz-admin
+
+bin/authz-ssh: authz/cmd/authz-ssh/main.go authz/go.mod
+	cd authz && go build -o ../bin/authz-ssh ./cmd/authz-ssh
 
 # Generate certs and configs from domains.toml
 generate: bin/generate

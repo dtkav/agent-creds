@@ -1,10 +1,10 @@
 # Environment files
 .env
 *.env
-.auth.env
 
-# mitmproxy certs (persisted locally)
-.mitmproxy/
+# igit
+.igit
+.igitignore
 
 # IDE
 .idea/
@@ -18,35 +18,23 @@ claude-dev/workspace/
 claude-dev/overlay-changes/
 
 # Go binaries
-authz/authz
-authz/mint
-/mint
-authz/.signing-key
-authz/.token
-mintfs/mintfs
-bin/adev
-bin/odev
-bin/generate
-
-# Project-specific tools (not generic to agent-creds)
-cmd/odev/
+bin/*
 
 # Internal specs/planning docs
 specs/
 
-# mintfs mount point and base token
-creds/
-.base-token
-
 # Fly.io config (contains private app names)
 fly.toml
 authz/fly.toml
+cmd/odev
 
-# Domain config (copy domains.example.toml to customize)
-domains.toml
+# User config
+agent-creds.toml
+
+# Sandbox claude config mount directory
+claude-dev/claude-config/
 
 # Generated files (run `make generate` to create)
 generated/
 authz/domains_gen.go
-claude-dev/claude-config/
 authz/mintfs/mintfs

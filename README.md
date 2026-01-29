@@ -33,8 +33,8 @@ This turns "full API access" into precisely scoped capabilities that match the a
 │  │   sandbox   │      │    envoy    │      │    authz    │ │
 │  │  (your app) │─────▶│  (TLS term) │─────▶│  (tokens)   │ │
 │  └─────────────┘      └─────────────┘      └─────────────┘ │
-│   /etc/hosts:             │                                 │
-│   api.stripe.com→envoy    │                                 │
+│   iptables NAT:           │                                 │
+│   :443 → envoy            │                                 │
 │                           ▼                                 │
 └───────────────────────────┼─────────────────────────────────┘
                             │ HTTPS
@@ -42,7 +42,7 @@ This turns "full API access" into precisely scoped capabilities that match the a
                     api.stripe.com (real)
 ```
 
-- **sandbox**: Container running your code, with `/etc/hosts` routing API domains to envoy
+- **sandbox**: Container running your code, with iptables redirecting all :443 traffic to envoy
 - **envoy**: Terminates TLS with runtime-generated certs, calls authz for token validation
 - **authz**: Validates macaroon tokens, injects real API keys into requests
 
@@ -62,10 +62,9 @@ cat > agent-creds.toml << 'EOF'
 name = "myproject"
 
 [upstream."api.stripe.com"]
-akey = "stripe.akey"
 EOF
 
-# Generate a signing key (32+ bytes, base64 encoded)
+# Set environment variables for authz
 export MACAROON_SIGNING_KEY=$(openssl rand -base64 32)
 export STRIPE_API_KEY=sk_live_xxx
 
@@ -96,11 +95,67 @@ adev stop foo     # Stop sandbox named "foo"
 - Starts authz service if not running
 - Attaches to existing instances instead of creating duplicates
 
-**Browser forwarding:** When code inside the sandbox needs to open a browser (e.g., OAuth flows), adev forwards the request to your host browser. OAuth callbacks to localhost are automatically proxied back into the sandbox.
-
-**CDP forwarding:** If you have Chrome running with remote debugging (`--remote-debugging-port=9222`), the sandbox can connect to it via Chrome DevTools Protocol for browser automation.
-
 Multiple named sandboxes can run concurrently.
+
+### aenv Dashboard
+
+When you enter the sandbox, running `aenv` displays a status dashboard:
+
+<!-- TODO: aenv screenshot -->
+
+The dashboard shows:
+- **Allowlist**: Which API domains are accessible (everything else is blocked)
+- **Credentials**: Token status for each API with credential injection (validity, restrictions)
+- **Host Access**: Browser forwarding and CDP connection status
+
+### Browser Forwarding
+
+Code inside the sandbox can open URLs in your host's default browser:
+
+```bash
+xdg-open https://accounts.google.com/oauth/authorize?...
+```
+
+This enables OAuth flows where:
+1. Sandbox code calls `xdg-open` with auth URL → browser opens on host
+2. User authenticates in host browser
+3. OAuth callback to `localhost:PORT` routes back into the sandbox
+
+The callback routing works automatically—adev detects localhost URLs with ports and proxies incoming connections from the host back to the sandbox.
+
+Configure in `agent-creds.toml`:
+```toml
+[sandbox]
+use_host_browser = true  # default
+```
+
+### Chrome DevTools Protocol (CDP)
+
+Control your host's Chrome browser from inside the sandbox. Playwright, Puppeteer, and other automation tools connect to `localhost:9222` which forwards to Chrome on your host.
+
+```python
+# Inside sandbox - controls host Chrome
+from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    browser = p.chromium.connect_over_cdp("http://localhost:9222")
+    page = browser.new_page()
+    page.goto("https://example.com")
+```
+
+Start Chrome on your host with remote debugging enabled:
+```bash
+google-chrome --remote-debugging-port=9222
+```
+
+The `aenv` dashboard shows CDP connection status (e.g., "cdp → Chrome 127.0.1").
+
+Configure in `agent-creds.toml`:
+```toml
+[sandbox]
+use_host_browser_cdp = true  # default
+```
+
+### Network Isolation
 
 Inside the sandbox, only configured domains are reachable:
 
@@ -158,37 +213,44 @@ Tokens without restrictions (no `--hosts`, `--methods`, `--paths`) have full acc
 
 ## Configuration
 
-Create `agent-creds.toml` in your project directory:
+### agent-creds.toml (per-project)
+
+Controls which domains are routed through the proxy:
 
 ```toml
 [sandbox]
 name = "myproject"
 
-# Remote authz (optional - defaults to local docker-compose)
-# [vault]
-# host = "authz.example.com"
-
-# Passthrough (no credential injection)
-[upstream."api.example.com"]
-
-# With credential injection
 [upstream."api.stripe.com"]
-akey = "stripe.akey"
-
-[upstream."api.openai.com"]
-akey = "openai.akey"
+[upstream."pocketbase.example.com"]
 ```
 
-### Adding a new service
+### vault.toml (authz service)
 
-1. Add upstream to `agent-creds.toml`
-2. If using credential injection, create the `.akey` file
-3. Run `adev console` - configs regenerate automatically
+Configures credential injection for each domain:
 
-### Environment Variables (authz)
+```toml
+[credentials."api.stripe.com"]
+type = "bearer"
+token = { provider = "env", name = "STRIPE_API_KEY" }
+
+[credentials."pocketbase.example.com"]
+type = "basic"
+username = { provider = "env", name = "PB_USERNAME" }
+password = { provider = "env", name = "PB_PASSWORD" }
+```
+
+**Credential types:**
+- **bearer**: Injects `Authorization: Bearer <token>`
+- **basic**: Injects `Authorization: Basic <base64>` (base64-encoded username:password)
+
+**Providers:**
+- **env**: Read from environment variable
+
+### Environment Variables
 
 - `MACAROON_SIGNING_KEY`: Base64-encoded 32+ byte key for signing/verifying tokens
-- `STRIPE_API_KEY`: Stripe API key (env var derived from akey filename)
+- Plus any env vars referenced in `vault.toml`
 
 ## Development Commands
 
@@ -226,15 +288,11 @@ make clean-certs  # Remove generated certs (forces regeneration)
 ├── generated/            # Generated files (gitignored)
 │   ├── certs/            # CA certificate (domain certs generated at runtime)
 │   ├── envoy.json        # Envoy config
-│   ├── hosts             # /etc/hosts entries
 │   └── domains.json      # Domain config for runtime cert generation
 ├── authz/
 │   ├── main.go           # gRPC authz service
 │   ├── macaroon/         # Macaroon token library
-│   ├── cmd/
-│   │   ├── mint/         # Token minting CLI
-│   │   ├── mintfs/       # FUSE filesystem for short-lived tokens
-│   │   └── authz-admin/  # Admin CLI for authz service
+│   ├── cmd/mint/         # Token minting CLI
 │   └── Dockerfile
 └── bin/                  # Built binaries (run make binaries)
 ```
@@ -243,7 +301,7 @@ make clean-certs  # Remove generated certs (forces regeneration)
 
 1. **CA Generation**: `adev` creates a CA cert once in `generated/certs/`
 2. **Runtime Certs**: `envoy-entrypoint.sh` generates domain certs at startup using the CA
-3. **TLS Termination**: Envoy presents these certificates to clients, so `https://api.stripe.com` works with unmodified code
-4. **DNS Routing**: Sandbox containers have `/etc/hosts` entries pointing proxied domains to envoy
+3. **Traffic Interception**: iptables NAT rules redirect all :443 traffic to envoy
+4. **TLS Termination**: Envoy terminates TLS using SNI to select the right certificate, so `https://api.stripe.com` works with unmodified code
 5. **Token Verification**: Authz verifies the macaroon token signature and checks caveats (host, method, path, validity)
 6. **Credential Injection**: On successful verification, authz injects the real API key before forwarding to upstream

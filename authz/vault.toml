@@ -1,0 +1,12 @@
+# Credential injection configuration for authz service
+# See README.md for documentation
+
+[credentials."api.stripe.com"]
+type = "bearer"
+token = { provider = "env", name = "STRIPE_API_KEY" }
+
+# Example: Basic auth for PocketBase
+# [credentials."pocketbase.example.com"]
+# type = "basic"
+# username = { provider = "env", name = "PB_USERNAME" }
+# password = { provider = "env", name = "PB_PASSWORD" }

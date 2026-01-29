@@ -203,12 +203,6 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	claudeConfigDir := filepath.Join(scriptDir, "claude-dev/claude-config")
 	os.MkdirAll(claudeConfigDir, 0755)
 
-	// Stop any existing containers for this project
-	runQuiet("docker", "rm", "-f", sandboxName)
-	runQuiet("docker", "rm", "-f", containerName)
-	runQuiet("docker", "rm", "-f", envoyName)
-	runQuiet("docker", "network", "rm", networkName)
-
 	// Create per-sandbox network
 	spinner.Status("creating network...")
 	createNetArgs := []string{"network", "create", "--ipv6", networkName}

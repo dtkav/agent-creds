@@ -69,38 +69,78 @@ EOF
 export MACAROON_SIGNING_KEY=$(openssl rand -base64 32)
 export STRIPE_API_KEY=sk_live_xxx
 
-# Start authz service
+# Start authz service (once)
 make up
 
-# Start development environment
-make dev
+# Launch sandbox
+adev console
 ```
 
-### Usage
+### adev
 
-The `make dev` command runs `adev`, which:
-1. Generates configs from `agent-creds.toml`
-2. Starts envoy with runtime cert generation
-3. Launches an interactive sandbox container
-
-Inside the sandbox, API calls are automatically proxied:
+`adev` is the main development tool. It launches sandboxed environments where your code runs with transparent API proxying.
 
 ```bash
+adev              # Show running instances (interactive TUI)
+adev console      # Start or attach to sandbox for current directory
+adev console foo  # Start or attach to sandbox named "foo"
+adev stop         # Stop sandbox for current directory
+adev stop foo     # Stop sandbox named "foo"
+```
+
+**What adev does:**
+
+- Mounts your current directory at `/workspace` inside the container
+- **Blocks all network traffic by default** — the sandbox has no internet access except through the proxy
+- Routes only the domains listed in `agent-creds.toml` through envoy
+- Starts authz service if not running
+- Attaches to existing instances instead of creating duplicates
+
+**Browser forwarding:** When code inside the sandbox needs to open a browser (e.g., OAuth flows), adev forwards the request to your host browser. OAuth callbacks to localhost are automatically proxied back into the sandbox.
+
+**CDP forwarding:** If you have Chrome running with remote debugging (`--remote-debugging-port=9222`), the sandbox can connect to it via Chrome DevTools Protocol for browser automation.
+
+Multiple named sandboxes can run concurrently.
+
+Inside the sandbox, only configured domains are reachable:
+
+```bash
+# Works - domain is in agent-creds.toml
 curl https://api.stripe.com/v1/customers \
-  -H "Authorization: Bearer <token>"
+  -H "Authorization: Bearer $STRIPE_TOKEN"
+
+# Blocked - domain not configured
+curl https://example.com  # connection refused
 ```
 
-#### Minting Tokens
+### Credential Swap
 
-Tokens are created using `mint` with fine-grained access control:
+The core feature: your code uses an opaque macaroon token, and the proxy swaps it for the real API key before forwarding to the upstream.
 
 ```bash
-# Build mint (once)
-cd authz && go build -o ../bin/mint ./cmd/mint && cd ..
+# 1. Mint a token (on host, before launching sandbox)
+export STRIPE_TOKEN=$(bin/mint --hosts api.stripe.com --valid-for 1h)
 
-# Mint a token with restrictions
-export MACAROON_SIGNING_KEY=<your-signing-key>
-bin/mint --hosts api.stripe.com --methods GET,POST --paths "/v1/*" --valid-for 1h
+# 2. Launch sandbox with token as env var
+STRIPE_TOKEN=$STRIPE_TOKEN adev console
+
+# 3. Inside sandbox, use the token normally
+curl https://api.stripe.com/v1/customers \
+  -H "Authorization: Bearer $STRIPE_TOKEN"
+```
+
+The sandbox never sees `sk_live_...` — only the macaroon token. The authz service validates the token and injects the real Stripe API key before the request reaches Stripe.
+
+### Minting Tokens
+
+Tokens can include caveats that restrict what the token can do:
+
+```bash
+# Full access to configured APIs
+bin/mint
+
+# Read-only access to Stripe customers endpoint for 1 hour
+bin/mint --hosts api.stripe.com --methods GET --paths "/v1/customers/*" --valid-for 1h
 ```
 
 #### Token Options
@@ -109,8 +149,8 @@ bin/mint --hosts api.stripe.com --methods GET,POST --paths "/v1/*" --valid-for 1
 |------|-------------|---------|
 | `--hosts` | Allowed API hosts | `api.stripe.com,api.openai.com` |
 | `--methods` | Allowed HTTP methods | `GET,POST` |
-| `--paths` | Allowed path patterns (supports `*` and `**` globs) | `/v1/customers/*` |
-| `--valid-for` | Token validity duration | `1h`, `24h`, `168h` |
+| `--paths` | Allowed path patterns (`*` = segment, `**` = multiple) | `/v1/customers/*` |
+| `--valid-for` | Token expiration | `1h`, `24h`, `7d` |
 | `--not-before` | Validity start time (RFC3339) | `2024-01-01T00:00:00Z` |
 | `--show-caveats` | Print caveats to stderr | |
 
@@ -143,12 +183,32 @@ akey = "openai.akey"
 
 1. Add upstream to `agent-creds.toml`
 2. If using credential injection, create the `.akey` file
-3. Run `make dev` - configs regenerate automatically
+3. Run `adev console` - configs regenerate automatically
 
 ### Environment Variables (authz)
 
 - `MACAROON_SIGNING_KEY`: Base64-encoded 32+ byte key for signing/verifying tokens
 - `STRIPE_API_KEY`: Stripe API key (env var derived from akey filename)
+
+## Development Commands
+
+```bash
+# Primary workflow
+adev              # Interactive TUI showing running sandboxes
+adev console      # Start or attach to sandbox
+
+# Authz service
+make up           # Start authz with docker-compose
+make down         # Stop authz
+
+# Building
+make build        # Build sandbox Docker image
+make binaries     # Build all CLI tools to bin/
+
+# Maintenance
+make deploy       # Deploy authz service to Fly.io
+make clean-certs  # Remove generated certs (forces regeneration)
+```
 
 ## Files
 
@@ -160,7 +220,9 @@ akey = "openai.akey"
 ├── envoy-entrypoint.sh   # Runtime cert generation for envoy
 ├── cmd/
 │   ├── adev/             # Development orchestrator
-│   └── aenv/             # Environment variable helper
+│   ├── actl/             # Control utility for managing instances
+│   ├── aenv/             # Environment variable helper
+│   └── cdp-proxy/        # Chrome DevTools Protocol proxy
 ├── generated/            # Generated files (gitignored)
 │   ├── certs/            # CA certificate (domain certs generated at runtime)
 │   ├── envoy.json        # Envoy config
@@ -168,14 +230,13 @@ akey = "openai.akey"
 │   └── domains.json      # Domain config for runtime cert generation
 ├── authz/
 │   ├── main.go           # gRPC authz service
-│   ├── domains_gen.go    # Generated domain config
 │   ├── macaroon/         # Macaroon token library
-│   ├── cmd/mint/         # Token minting CLI
-│   ├── mintfs/           # FUSE filesystem for short-lived tokens
+│   ├── cmd/
+│   │   ├── mint/         # Token minting CLI
+│   │   ├── mintfs/       # FUSE filesystem for short-lived tokens
+│   │   └── authz-admin/  # Admin CLI for authz service
 │   └── Dockerfile
-└── bin/
-    ├── adev              # Development session launcher
-    └── mint              # Token minting tool
+└── bin/                  # Built binaries (run make binaries)
 ```
 
 ## How It Works

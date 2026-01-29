@@ -23,6 +23,7 @@ import (
 	"authz/db"
 	"authz/macaroon"
 	"authz/oauth2"
+	"authz/vault"
 )
 
 type domainCredential struct {
@@ -159,45 +160,35 @@ func main() {
 	verifier := macaroon.NewVerifier(keyStore)
 	tokenManager := oauth2.NewTokenManager()
 
-	// domainConfigMap is defined in domains_gen.go (generated from domains.toml)
+	// Load credentials from vault.toml
 	credentials := make(map[string]domainCredential)
-	for host, config := range domainConfigMap {
-		if config.AuthType == "oauth2" {
-			// OAuth2 credentials
-			refreshToken := os.Getenv(config.EnvVar)
-			clientID := os.Getenv(config.OAuth2ClientIDVar)
-			clientSecret := os.Getenv(config.OAuth2ClientSecVar)
 
-			if refreshToken != "" && clientID != "" && clientSecret != "" {
-				credentials[host] = domainCredential{
-					headerName:   config.HeaderName,
-					headerPrefix: config.HeaderPrefix,
-					authType:     "oauth2",
-					oauth2Config: &oauth2.OAuth2Config{
-						ClientID:     clientID,
-						ClientSecret: clientSecret,
-						RefreshToken: refreshToken,
-						TokenURL:     config.OAuth2TokenURL,
-					},
-				}
-				log.Printf("Loaded OAuth2 credentials for %s", host)
-			}
+	vaultPath := os.Getenv("VAULT_CONFIG")
+	if vaultPath == "" {
+		vaultPath = "vault.toml"
+	}
+
+	if vaultCfg, err := vault.Load(vaultPath); err != nil {
+		log.Printf("Warning: Failed to load vault.toml: %v", err)
+	} else {
+		resolved, err := vaultCfg.Resolve()
+		if err != nil {
+			log.Printf("Warning: Failed to resolve vault credentials: %v", err)
 		} else {
-			// Static API key
-			if key := os.Getenv(config.EnvVar); key != "" {
+			for host, cred := range resolved {
 				credentials[host] = domainCredential{
-					apiKey:       key,
-					headerName:   config.HeaderName,
-					headerPrefix: config.HeaderPrefix,
+					apiKey:       cred.Value,
+					headerName:   cred.HeaderName,
+					headerPrefix: "", // Value already includes prefix
 					authType:     "static",
 				}
-				log.Printf("Loaded API key for %s (header: %s)", host, config.HeaderName)
+				log.Printf("Loaded %s credentials for %s", cred.Type, host)
 			}
 		}
 	}
 
 	if len(credentials) == 0 {
-		log.Printf("Warning: No API keys configured. Set STRIPE_API_KEY, etc.")
+		log.Printf("Warning: No credentials configured. Create vault.toml or set VAULT_CONFIG.")
 	}
 
 	// Open database

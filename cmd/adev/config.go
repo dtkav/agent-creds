@@ -40,7 +40,7 @@ func (v VaultConfig) IsRemote() bool {
 }
 
 type UpstreamConfig struct {
-	Akey string `toml:"akey"` // .akey file name (empty = passthrough)
+	// Empty for now - domains are just listed, auth is handled by vault.toml
 }
 
 type ProjectConfig struct {

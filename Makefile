@@ -1,4 +1,4 @@
-.PHONY: up down deploy deploy-vault build test apply-changes discard-changes clean-certs binaries
+.PHONY: up down deploy deploy-vault build test clean-certs binaries
 
 # Docker Compose
 up:
@@ -15,16 +15,6 @@ deploy-vault:
 
 build:
 	docker build -t sandbox --build-arg USER_UID=$$(id -u) --build-arg USER_GID=$$(id -g) -f claude-dev/Dockerfile .
-
-apply-changes:
-	@if [ -d claude-dev/overlay-changes ] && [ "$$(ls -A claude-dev/overlay-changes 2>/dev/null)" ]; then \
-		cp -rv claude-dev/overlay-changes/. . && rm -rf claude-dev/overlay-changes; \
-	else \
-		echo "No changes to apply"; \
-	fi
-
-discard-changes:
-	rm -rf claude-dev/overlay-changes
 
 test:
 	bin/arun curl -v https://api.stripe.com/v1/customers -H "Authorization: Bearer $$(cat /creds/stripe)"

@@ -1,4 +1,4 @@
-.PHONY: up down deploy deploy-authz dev build test apply-changes discard-changes clean-certs binaries
+.PHONY: up down deploy deploy-vault dev build test apply-changes discard-changes clean-certs binaries
 
 # Docker Compose
 up:
@@ -8,10 +8,10 @@ down:
 	docker compose down
 
 # Fly.io deployment
-deploy: deploy-authz
+deploy: deploy-vault
 
-deploy-authz:
-	cd authz && fly deploy --local-only --flycast
+deploy-vault:
+	cd vault && fly deploy --local-only --flycast
 
 build:
 	docker build -t sandbox --build-arg USER_UID=$$(id -u) --build-arg USER_GID=$$(id -g) -f claude-dev/Dockerfile .
@@ -33,7 +33,7 @@ test:
 	bin/arun curl -v https://api.stripe.com/v1/customers -H "Authorization: Bearer $$(cat /creds/stripe)"
 
 # Build all binaries
-binaries: bin/actl bin/adev bin/aenv bin/arun bin/odev bin/cdp-proxy bin/mint bin/mintfs bin/authz-admin bin/authz-ssh
+binaries: bin/actl bin/adev bin/aenv bin/arun bin/odev bin/cdp-proxy bin/mint bin/mintfs bin/vault-admin bin/vault-ssh
 
 # Root-level cmd binaries
 bin/actl: cmd/actl/main.go cmd/actl/go.mod
@@ -54,18 +54,18 @@ bin/odev: cmd/odev/main.go cmd/odev/go.mod
 bin/cdp-proxy: cmd/cdp-proxy/main.go cmd/cdp-proxy/go.mod
 	cd cmd/cdp-proxy && go build -o ../../bin/cdp-proxy .
 
-# Authz binaries (share authz/go.mod)
-bin/mint: authz/cmd/mint/main.go authz/go.mod
-	cd authz && go build -o ../bin/mint ./cmd/mint
+# Vault binaries (share vault/go.mod)
+bin/mint: vault/cmd/mint/main.go vault/go.mod
+	cd vault && go build -o ../bin/mint ./cmd/mint
 
-bin/mintfs: authz/cmd/mintfs/main.go authz/go.mod
-	cd authz && go build -o ../bin/mintfs ./cmd/mintfs
+bin/mintfs: vault/cmd/mintfs/main.go vault/go.mod
+	cd vault && go build -o ../bin/mintfs ./cmd/mintfs
 
-bin/authz-admin: authz/cmd/authz-admin/main.go authz/go.mod
-	cd authz && go build -o ../bin/authz-admin ./cmd/authz-admin
+bin/vault-admin: vault/cmd/vault-admin/main.go vault/go.mod
+	cd vault && go build -o ../bin/vault-admin ./cmd/vault-admin
 
-bin/authz-ssh: authz/cmd/authz-ssh/main.go authz/go.mod
-	cd authz && go build -o ../bin/authz-ssh ./cmd/authz-ssh
+bin/vault-ssh: vault/cmd/vault-ssh/main.go vault/go.mod
+	cd vault && go build -o ../bin/vault-ssh ./cmd/vault-ssh
 
 # Remove generated certs (forces regeneration on next adev run)
 clean-certs:

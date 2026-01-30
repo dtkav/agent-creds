@@ -1,6 +1,6 @@
 services:
-  authz:
-    build: ./authz
+  vault:
+    build: ./vault
     ports:
       - "8080:8080"
       - "2222:2222"
@@ -12,13 +12,13 @@ services:
       - WEBAUTHN_RP_ORIGIN=${WEBAUTHN_RP_ORIGIN:-http://localhost:8080}
       - WEBAUTHN_RP_NAME=${WEBAUTHN_RP_NAME:-Agent Credentials}
     volumes:
-      - authz-data:/data
-      - ./authz/vault.toml:/app/vault.toml:ro
+      - vault-data:/data
+      - ./vault/vault.toml:/app/vault.toml:ro
     networks:
       - agent-creds
 
 volumes:
-  authz-data:
+  vault-data:
 
 networks:
   agent-creds:

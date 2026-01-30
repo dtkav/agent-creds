@@ -33,7 +33,7 @@ This turns "full API access" into precisely scoped capabilities that match the a
 │                    Docker network                           │
 │                                                             │
 │  ┌─────────────┐      ┌─────────────┐      ┌─────────────┐ │
-│  │   sandbox   │      │    envoy    │      │    authz    │ │
+│  │   sandbox   │      │    envoy    │      │    vault    │ │
 │  │  (your app) │─────▶│  (TLS term) │─────▶│  (tokens)   │ │
 │  └─────────────┘      └─────────────┘      └─────────────┘ │
 │   iptables NAT:           │                                 │
@@ -46,8 +46,8 @@ This turns "full API access" into precisely scoped capabilities that match the a
 ```
 
 - **sandbox**: Container running your code, with iptables redirecting all :443 traffic to envoy
-- **envoy**: Terminates TLS with runtime-generated certs, calls authz for token validation
-- **authz**: Validates macaroon tokens, injects real API keys into requests
+- **envoy**: Terminates TLS with runtime-generated certs, calls vault for token validation
+- **vault**: Validates macaroon tokens, injects real API keys into requests
 
 ## Quick Start
 
@@ -67,11 +67,11 @@ name = "myproject"
 [upstream."api.stripe.com"]
 EOF
 
-# Set environment variables for authz
+# Set environment variables for vault
 export MACAROON_SIGNING_KEY=$(openssl rand -base64 32)
 export STRIPE_API_KEY=sk_live_xxx
 
-# Start authz service (once)
+# Start vault service (once)
 make up
 
 # Launch sandbox
@@ -95,7 +95,7 @@ adev stop foo     # Stop sandbox named "foo"
 - Mounts your current directory at `/workspace` inside the container
 - **Blocks all network traffic by default** — the sandbox has no internet access except through the proxy
 - Routes only the domains listed in `agent-creds.toml` through envoy
-- Starts authz service if not running
+- Starts vault service if not running
 - Attaches to existing instances instead of creating duplicates
 
 Multiple named sandboxes can run concurrently.
@@ -176,7 +176,7 @@ curl https://api.stripe.com/v1/customers \
   -H "Authorization: Bearer $STRIPE_TOKEN"
 ```
 
-The sandbox never sees `sk_live_...` — only the macaroon token. The authz service validates the token and injects the real Stripe API key before the request reaches Stripe.
+The sandbox never sees `sk_live_...` — only the macaroon token. The vault service validates the token and injects the real Stripe API key before the request reaches Stripe.
 
 ### Minting Tokens
 
@@ -217,7 +217,7 @@ name = "myproject"
 [upstream."pocketbase.example.com"]
 ```
 
-### vault.toml (authz service)
+### vault.toml (vault service)
 
 Configures credential injection for each domain:
 
@@ -251,16 +251,16 @@ password = { provider = "env", name = "PB_PASSWORD" }
 adev              # Interactive TUI showing running sandboxes
 adev console      # Start or attach to sandbox
 
-# Authz service
-make up           # Start authz with docker-compose
-make down         # Stop authz
+# Vault service
+make up           # Start vault with docker-compose
+make down         # Stop vault
 
 # Building
 make build        # Build sandbox Docker image
 make binaries     # Build all CLI tools to bin/
 
 # Maintenance
-make deploy       # Deploy authz service to Fly.io
+make deploy       # Deploy vault service to Fly.io
 make clean-certs  # Remove generated certs (forces regeneration)
 ```
 
@@ -269,7 +269,7 @@ make clean-certs  # Remove generated certs (forces regeneration)
 ```
 .
 ├── agent-creds.toml      # Project config (per-project)
-├── docker-compose.yml    # Authz service config
+├── docker-compose.yml    # Vault service config
 ├── Makefile              # Build/deploy commands
 ├── envoy-entrypoint.sh   # Runtime cert generation for envoy
 ├── cmd/
@@ -281,8 +281,8 @@ make clean-certs  # Remove generated certs (forces regeneration)
 │   ├── certs/            # CA certificate (domain certs generated at runtime)
 │   ├── envoy.json        # Envoy config
 │   └── domains.json      # Domain config for runtime cert generation
-├── authz/
-│   ├── main.go           # gRPC authz service
+├── vault/
+│   ├── main.go           # gRPC vault service
 │   ├── macaroon/         # Macaroon token library
 │   ├── cmd/mint/         # Token minting CLI
 │   └── Dockerfile
@@ -295,5 +295,5 @@ make clean-certs  # Remove generated certs (forces regeneration)
 2. **Runtime Certs**: `envoy-entrypoint.sh` generates domain certs at startup using the CA
 3. **Traffic Interception**: iptables NAT rules redirect all :443 traffic to envoy
 4. **TLS Termination**: Envoy terminates TLS using SNI to select the right certificate, so `https://api.stripe.com` works with unmodified code
-5. **Token Verification**: Authz verifies the macaroon token signature and checks caveats (host, method, path, validity)
-6. **Credential Injection**: On successful verification, authz injects the real API key before forwarding to upstream
+5. **Token Verification**: Vault verifies the macaroon token signature and checks caveats (host, method, path, validity)
+6. **Credential Injection**: On successful verification, vault injects the real API key before forwarding to upstream

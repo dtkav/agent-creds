@@ -12,9 +12,12 @@ const (
 	// TokenLocation identifies this service (used in macaroon location field)
 	TokenLocation = "agent-creds"
 
-	// TokenPrefix for encoded tokens
-	TokenPrefix = "sk_"
+	// DefaultTokenPrefix is the default prefix for encoded tokens
+	DefaultTokenPrefix = "sk_"
 )
+
+// TokenPrefix is the current prefix for encoded tokens (can be overridden via env)
+var TokenPrefix = DefaultTokenPrefix
 
 // KeyStore manages signing keys for token minting and verification
 type KeyStore struct {
@@ -26,6 +29,9 @@ type KeyStore struct {
 
 	// KeyID identifies this key (stored in token for key rotation)
 	KeyID []byte
+
+	// TokenPrefix overrides the default token prefix
+	TokenPrefix string
 }
 
 // LoadKeyStore loads keys from environment variables
@@ -64,10 +70,19 @@ func LoadKeyStore() (*KeyStore, error) {
 		keyID = []byte("primary")
 	}
 
+	// TOKEN_PREFIX: optional token prefix (default: "sk_")
+	tokenPrefix := os.Getenv("TOKEN_PREFIX")
+	if tokenPrefix == "" {
+		tokenPrefix = DefaultTokenPrefix
+	}
+	// Update the package-level variable for backward compatibility
+	TokenPrefix = tokenPrefix
+
 	return &KeyStore{
 		SigningKey:    macaroon.SigningKey(signingKey),
 		EncryptionKey: encryptionKey,
 		KeyID:         keyID,
+		TokenPrefix:   tokenPrefix,
 	}, nil
 }
 

@@ -13,6 +13,7 @@ services:
       - WEBAUTHN_RP_NAME=${WEBAUTHN_RP_NAME:-Agent Credentials}
     volumes:
       - authz-data:/data
+      - ./authz/vault.toml:/app/vault.toml:ro
     networks:
       - agent-creds
 

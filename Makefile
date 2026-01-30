@@ -33,7 +33,7 @@ test:
 	bin/arun curl -v https://api.stripe.com/v1/customers -H "Authorization: Bearer $$(cat /creds/stripe)"
 
 # Build all binaries
-binaries: bin/actl bin/adev bin/aenv bin/odev bin/cdp-proxy bin/mint bin/mintfs bin/authz-admin bin/authz-ssh
+binaries: bin/actl bin/adev bin/aenv bin/arun bin/odev bin/cdp-proxy bin/mint bin/mintfs bin/authz-admin bin/authz-ssh
 
 # Root-level cmd binaries
 bin/actl: cmd/actl/main.go cmd/actl/go.mod
@@ -41,6 +41,9 @@ bin/actl: cmd/actl/main.go cmd/actl/go.mod
 
 bin/adev: cmd/adev/main.go cmd/adev/go.mod
 	cd cmd/adev && go build -o ../../bin/adev .
+
+bin/arun: cmd/arun/main.go cmd/arun/go.mod
+	cd cmd/arun && go build -o ../../bin/arun .
 
 bin/aenv: cmd/aenv/main.go cmd/aenv/go.mod
 	cd cmd/aenv && go build -o ../../bin/aenv .

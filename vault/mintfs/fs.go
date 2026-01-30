@@ -14,9 +14,9 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
-	"authz/api/client"
-	"authz/attestation"
-	tfmac "authz/macaroon"
+	"vault/api/client"
+	"vault/attestation"
+	tfmac "vault/macaroon"
 )
 
 // MintFS is a FUSE filesystem that serves hot tokens from .akey files

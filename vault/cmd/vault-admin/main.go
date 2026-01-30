@@ -10,9 +10,9 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"authz/attestation"
-	"authz/db"
-	tfmac "authz/macaroon"
+	"vault/attestation"
+	"vault/db"
+	tfmac "vault/macaroon"
 
 	"github.com/superfly/macaroon"
 )
@@ -40,23 +40,23 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Println(`authz-admin - Admin CLI for authz service
+	fmt.Println(`vault-admin - Admin CLI for authz service
 
 Usage:
-  authz-admin user <command>   Manage users
-  authz-admin token <command>  Manage tokens
-  authz-admin acl <command>    Manage token ACLs
+  vault-admin user <command>   Manage users
+  vault-admin token <command>  Manage tokens
+  vault-admin acl <command>    Manage token ACLs
 
 User Commands:
-  authz-admin user add <name> [--display-name <name>]
-  authz-admin user list
-  authz-admin user get <name>
-  authz-admin user deactivate <name>
-  authz-admin user activate <name>
-  authz-admin user delete <name>
+  vault-admin user add <name> [--display-name <name>]
+  vault-admin user list
+  vault-admin user get <name>
+  vault-admin user deactivate <name>
+  vault-admin user activate <name>
+  vault-admin user delete <name>
 
 Token Commands:
-  authz-admin token create <id> [options]
+  vault-admin token create <id> [options]
     --hosts <hosts>           Comma-separated list of allowed hosts
     --methods <methods>       Comma-separated list of HTTP methods
     --paths <patterns>        Comma-separated list of path patterns
@@ -64,14 +64,14 @@ Token Commands:
     --require-attestation     Require FIDO2 attestation
     --description <text>      Token description
 
-  authz-admin token list
-  authz-admin token get <id>
-  authz-admin token delete <id>
+  vault-admin token list
+  vault-admin token get <id>
+  vault-admin token delete <id>
 
 ACL Commands:
-  authz-admin acl grant <token-id> <username>
-  authz-admin acl revoke <token-id> <username>
-  authz-admin acl list <token-id>
+  vault-admin acl grant <token-id> <username>
+  vault-admin acl revoke <token-id> <username>
+  vault-admin acl list <token-id>
 
 Environment:
   AUTHZ_DB_PATH              Database path (default: /data/authz.db or ~/.config/agent-creds/authz.db)
@@ -91,7 +91,7 @@ func openDB() *db.DB {
 // User commands
 func userCmd(args []string) {
 	if len(args) == 0 {
-		fmt.Println("Usage: authz-admin user <add|list|get|deactivate|activate|delete>")
+		fmt.Println("Usage: vault-admin user <add|list|get|deactivate|activate|delete>")
 		os.Exit(1)
 	}
 
@@ -122,7 +122,7 @@ func userAdd(args []string) {
 	}
 
 	if fs.NArg() == 0 {
-		log.Fatal("Usage: authz-admin user add <name> [--display-name <name>]")
+		log.Fatal("Usage: vault-admin user add <name> [--display-name <name>]")
 	}
 
 	name := fs.Arg(0)
@@ -171,7 +171,7 @@ func userList() {
 
 func userGet(args []string) {
 	if len(args) == 0 {
-		log.Fatal("Usage: authz-admin user get <name>")
+		log.Fatal("Usage: vault-admin user get <name>")
 	}
 
 	database := openDB()
@@ -217,7 +217,7 @@ func userGet(args []string) {
 
 func userDeactivate(args []string) {
 	if len(args) == 0 {
-		log.Fatal("Usage: authz-admin user deactivate <name>")
+		log.Fatal("Usage: vault-admin user deactivate <name>")
 	}
 
 	database := openDB()
@@ -240,7 +240,7 @@ func userDeactivate(args []string) {
 
 func userActivate(args []string) {
 	if len(args) == 0 {
-		log.Fatal("Usage: authz-admin user activate <name>")
+		log.Fatal("Usage: vault-admin user activate <name>")
 	}
 
 	database := openDB()
@@ -263,7 +263,7 @@ func userActivate(args []string) {
 
 func userDelete(args []string) {
 	if len(args) == 0 {
-		log.Fatal("Usage: authz-admin user delete <name>")
+		log.Fatal("Usage: vault-admin user delete <name>")
 	}
 
 	database := openDB()
@@ -287,7 +287,7 @@ func userDelete(args []string) {
 // Token commands
 func tokenCmd(args []string) {
 	if len(args) == 0 {
-		fmt.Println("Usage: authz-admin token <create|list|get|delete>")
+		fmt.Println("Usage: vault-admin token <create|list|get|delete>")
 		os.Exit(1)
 	}
 
@@ -320,7 +320,7 @@ func tokenCreate(args []string) {
 	}
 
 	if fs.NArg() == 0 {
-		log.Fatal("Usage: authz-admin token create <id> [options]")
+		log.Fatal("Usage: vault-admin token create <id> [options]")
 	}
 
 	tokenID := fs.Arg(0)
@@ -436,7 +436,7 @@ func tokenList() {
 
 func tokenGet(args []string) {
 	if len(args) == 0 {
-		log.Fatal("Usage: authz-admin token get <id>")
+		log.Fatal("Usage: vault-admin token get <id>")
 	}
 
 	database := openDB()
@@ -493,7 +493,7 @@ func tokenGet(args []string) {
 
 func tokenDelete(args []string) {
 	if len(args) == 0 {
-		log.Fatal("Usage: authz-admin token delete <id>")
+		log.Fatal("Usage: vault-admin token delete <id>")
 	}
 
 	database := openDB()
@@ -509,7 +509,7 @@ func tokenDelete(args []string) {
 // ACL commands
 func aclCmd(args []string) {
 	if len(args) == 0 {
-		fmt.Println("Usage: authz-admin acl <grant|revoke|list>")
+		fmt.Println("Usage: vault-admin acl <grant|revoke|list>")
 		os.Exit(1)
 	}
 
@@ -528,7 +528,7 @@ func aclCmd(args []string) {
 
 func aclGrant(args []string) {
 	if len(args) < 2 {
-		log.Fatal("Usage: authz-admin acl grant <token-id> <username>")
+		log.Fatal("Usage: vault-admin acl grant <token-id> <username>")
 	}
 
 	tokenID := args[0]
@@ -556,7 +556,7 @@ func aclGrant(args []string) {
 
 func aclRevoke(args []string) {
 	if len(args) < 2 {
-		log.Fatal("Usage: authz-admin acl revoke <token-id> <username>")
+		log.Fatal("Usage: vault-admin acl revoke <token-id> <username>")
 	}
 
 	tokenID := args[0]
@@ -584,7 +584,7 @@ func aclRevoke(args []string) {
 
 func aclList(args []string) {
 	if len(args) == 0 {
-		log.Fatal("Usage: authz-admin acl list <token-id>")
+		log.Fatal("Usage: vault-admin acl list <token-id>")
 	}
 
 	tokenID := args[0]

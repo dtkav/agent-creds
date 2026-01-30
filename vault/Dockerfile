@@ -9,21 +9,21 @@ RUN go mod download
 COPY . .
 
 # Build with CGO enabled for sqlite3
-RUN CGO_ENABLED=1 go build -o authz .
+RUN CGO_ENABLED=1 go build -o vault .
 RUN CGO_ENABLED=1 go build -o mint ./cmd/mint
 RUN CGO_ENABLED=1 go build -o mintfs ./cmd/mintfs
-RUN CGO_ENABLED=1 go build -o authz-admin ./cmd/authz-admin
-RUN CGO_ENABLED=1 go build -o authz-ssh ./cmd/authz-ssh
+RUN CGO_ENABLED=1 go build -o vault-admin ./cmd/vault-admin
+RUN CGO_ENABLED=1 go build -o vault-ssh ./cmd/vault-ssh
 
 FROM alpine:latest
 RUN apk --no-cache add ca-certificates fuse libfido2
 WORKDIR /app
-COPY --from=builder /app/authz .
+COPY --from=builder /app/vault .
 COPY --from=builder /app/mint .
 COPY --from=builder /app/mintfs .
-COPY --from=builder /app/authz-admin .
-COPY --from=builder /app/authz-ssh .
-COPY authz_host_key .
+COPY --from=builder /app/vault-admin .
+COPY --from=builder /app/vault-ssh .
+COPY vault_host_key .
 
 # Create data directory for SQLite database
 RUN mkdir -p /data
@@ -32,8 +32,8 @@ RUN mkdir -p /data
 EXPOSE 9001
 # HTTP port for API
 EXPOSE 8080
-# SSH port for authz-ssh
+# SSH port for vault-ssh
 EXPOSE 2222
 
-# Run both authz and authz-ssh
-CMD sh -c './authz & ./authz-ssh & wait'
+# Run both vault and vault-ssh
+CMD sh -c './vault & ./vault-ssh & wait'

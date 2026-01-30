@@ -9,7 +9,7 @@ import (
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 
-	"authz/db"
+	"vault/db"
 )
 
 // WebAuthnHandler handles WebAuthn registration and authentication

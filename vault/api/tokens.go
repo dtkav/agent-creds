@@ -8,9 +8,9 @@ import (
 
 	"github.com/superfly/macaroon"
 
-	"authz/attestation"
-	"authz/db"
-	tfmac "authz/macaroon"
+	"vault/attestation"
+	"vault/db"
+	tfmac "vault/macaroon"
 )
 
 // TokenStore interface for token minting (injected from main)

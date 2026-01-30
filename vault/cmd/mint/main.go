@@ -12,8 +12,8 @@ import (
 
 	"github.com/superfly/macaroon"
 
-	"authz/attestation"
-	tfmac "authz/macaroon"
+	"vault/attestation"
+	tfmac "vault/macaroon"
 )
 
 func main() {

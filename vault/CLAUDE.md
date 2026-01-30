@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-The authz service is a Go gRPC service implementing Envoy's external authorization (ext_authz) filter. It validates macaroon-based tokens with fine-grained access control and injects real API keys into requests before they reach upstream APIs.
+The vault service is a Go gRPC service implementing Envoy's external authorization (ext_authz) filter. It validates macaroon-based tokens with fine-grained access control and injects real API keys into requests before they reach upstream APIs.
 
 ## Development Commands
 
@@ -13,8 +13,8 @@ The authz service is a Go gRPC service implementing Envoy's external authorizati
 openssl rand -base64 32
 
 # Build and run locally
-go build -o authz .
-MACAROON_SIGNING_KEY=<base64-key> STRIPE_API_KEY=sk_test_xxx ./authz
+go build -o vault .
+MACAROON_SIGNING_KEY=<base64-key> STRIPE_API_KEY=sk_test_xxx ./vault
 
 # Build mint tool
 go build -o mint ./cmd/mint
@@ -25,8 +25,8 @@ MACAROON_SIGNING_KEY=<base64-key> ./mint --hosts api.stripe.com --valid-for 1h
 # Deploy to Fly.io
 fly deploy --local-only --flycast
 
-# Set secrets (replace <your-authz-app> with your Fly.io app name)
-fly secrets set MACAROON_SIGNING_KEY=<base64-key> STRIPE_API_KEY=xxx -a <your-authz-app>
+# Set secrets (replace <your-vault-app> with your Fly.io app name)
+fly secrets set MACAROON_SIGNING_KEY=<base64-key> STRIPE_API_KEY=xxx -a <your-vault-app>
 ```
 
 ## Code Structure
@@ -62,7 +62,7 @@ Tokens can be restricted with caveats:
 
 1. Add domain to `../domains.toml`
 2. Run `make generate` from parent directory (regenerates `domains_gen.go`)
-3. Set the API key secret: `fly secrets set NEWSERVICE_API_KEY=xxx -a <your-authz-app>`
+3. Set the API key secret: `fly secrets set NEWSERVICE_API_KEY=xxx -a <your-vault-app>`
 
 ## Environment Variables
 
@@ -72,6 +72,6 @@ Tokens can be restricted with caveats:
 
 ## Flycast Notes
 
-- Listens on port 9001, accessed via `<your-authz-app>.flycast:80`
+- Listens on port 9001, accessed via `<your-vault-app>.flycast:80`
 - Requires `h2_backend = true` in fly.toml for gRPC over HTTP/2
 - Uses `force_https = false` since flycast handles internal routing

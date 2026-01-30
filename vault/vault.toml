@@ -1,4 +1,4 @@
-# Credential injection configuration for authz service
+# Credential injection configuration for vault service
 # See README.md for documentation
 
 [credentials."api.stripe.com"]

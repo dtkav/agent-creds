@@ -19,11 +19,11 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 
-	"authz/api"
-	"authz/db"
-	"authz/macaroon"
-	"authz/oauth2"
-	"authz/vault"
+	"vault/api"
+	"vault/db"
+	"vault/macaroon"
+	"vault/oauth2"
+	"vault/vault"
 )
 
 type domainCredential struct {
@@ -317,7 +317,7 @@ func main() {
 		httpServer.Shutdown(ctx)
 	}()
 
-	log.Printf("gRPC authz server listening on %s", grpcPort)
+	log.Printf("gRPC vault server listening on %s", grpcPort)
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("Failed to serve: %v", err)
 	}

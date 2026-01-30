@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strings"
 
-	"authz/db"
+	"vault/db"
 )
 
 // Server is the HTTP API server

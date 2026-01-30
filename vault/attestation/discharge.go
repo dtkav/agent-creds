@@ -8,7 +8,7 @@ import (
 
 	"github.com/superfly/macaroon"
 
-	tfmac "authz/macaroon"
+	tfmac "vault/macaroon"
 )
 
 // SessionManager manages attestation sessions

@@ -12,10 +12,10 @@ import (
 	"strings"
 	"syscall"
 
-	"authz/api/client"
-	"authz/attestation"
-	tfmac "authz/macaroon"
-	"authz/mintfs"
+	"vault/api/client"
+	"vault/attestation"
+	tfmac "vault/macaroon"
+	"vault/mintfs"
 )
 
 func main() {

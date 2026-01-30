@@ -1,4 +1,4 @@
-.PHONY: up down deploy deploy-vault dev build test apply-changes discard-changes clean-certs binaries
+.PHONY: up down deploy deploy-vault build test apply-changes discard-changes clean-certs binaries
 
 # Docker Compose
 up:
@@ -15,9 +15,6 @@ deploy-vault:
 
 build:
 	docker build -t sandbox --build-arg USER_UID=$$(id -u) --build-arg USER_GID=$$(id -g) -f claude-dev/Dockerfile .
-
-dev:
-	bin/adev
 
 apply-changes:
 	@if [ -d claude-dev/overlay-changes ] && [ "$$(ls -A claude-dev/overlay-changes 2>/dev/null)" ]; then \

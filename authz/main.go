@@ -44,6 +44,8 @@ type authServer struct {
 	credentials map[string]domainCredential
 	// OAuth2 token manager for handling token refresh
 	tokenManager *oauth2.TokenManager
+	// StrictMode requires macaroon tokens for all requests (no passthrough)
+	strictMode bool
 }
 
 func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*authv3.CheckResponse, error) {
@@ -70,17 +72,32 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 	// Check for authorization header
 	authHeader := headers["authorization"]
 
-	// No auth header = pass through without credential injection
-	if authHeader == "" {
-		log.Printf("No auth header, passing through: %s %s", access.Method, access.Path)
+	// Check if this looks like a macaroon token (configurable prefix)
+	tokenPrefix := s.verifier.GetTokenPrefix()
+	isMacaroon := macaroon.IsMacaroonAuth(authHeader, tokenPrefix)
+
+	// Passthrough: unrecognized token format (unless strict mode)
+	if !isMacaroon {
+		if s.strictMode {
+			log.Printf("Strict mode: rejected non-macaroon request to %s %s", host, access.Path)
+			return &authv3.CheckResponse{
+				Status: &status.Status{Code: int32(codes.PermissionDenied)},
+				HttpResponse: &authv3.CheckResponse_DeniedResponse{
+					DeniedResponse: &authv3.DeniedHttpResponse{
+						Status: &typev3.HttpStatus{Code: typev3.StatusCode_Unauthorized},
+						Body:   "Unauthorized: macaroon token required",
+					},
+				},
+			}, nil
+		}
+		log.Printf("Passthrough: %s %s %s", access.Method, host, access.Path)
 		return &authv3.CheckResponse{
 			Status: &status.Status{Code: int32(codes.OK)},
 		}, nil
 	}
 
-	// Verify macaroon token
+	// Macaroon token: validate and inject credentials
 	result := s.verifier.VerifyRequest(authHeader, access)
-
 	if !result.Valid {
 		log.Printf("Auth failed: %s", result.Error)
 		return &authv3.CheckResponse{
@@ -97,13 +114,13 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 	// Look up credential config for this host
 	cred, ok := s.credentials[host]
 	if !ok {
-		log.Printf("Auth failed: unknown host %s", host)
+		log.Printf("Auth failed: no credentials configured for %s", host)
 		return &authv3.CheckResponse{
 			Status: &status.Status{Code: int32(codes.PermissionDenied)},
 			HttpResponse: &authv3.CheckResponse_DeniedResponse{
 				DeniedResponse: &authv3.DeniedHttpResponse{
 					Status: &typev3.HttpStatus{Code: typev3.StatusCode_Forbidden},
-					Body:   "Unknown service",
+					Body:   "No credentials configured for this host",
 				},
 			},
 		}, nil
@@ -272,11 +289,19 @@ func main() {
 		log.Fatalf("Failed to listen: %v", err)
 	}
 
+	// STRICT_MODE: require macaroon tokens (no passthrough)
+	strictMode := os.Getenv("STRICT_MODE") == "true" || os.Getenv("STRICT_MODE") == "1"
+	if strictMode {
+		log.Printf("Strict mode enabled: all requests require macaroon tokens")
+	}
+	log.Printf("Token prefix: %s", macaroon.TokenPrefix)
+
 	grpcServer := grpc.NewServer()
 	authv3.RegisterAuthorizationServer(grpcServer, &authServer{
 		verifier:     verifier,
 		credentials:  credentials,
 		tokenManager: tokenManager,
+		strictMode:   strictMode,
 	})
 
 	// Handle graceful shutdown

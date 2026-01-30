@@ -51,6 +51,14 @@ func (v *Verifier) AddTrusted3P(location string, key macaroon.EncryptionKey) {
 	v.Trusted3Ps[location] = append(v.Trusted3Ps[location], key)
 }
 
+// GetTokenPrefix returns the configured token prefix
+func (v *Verifier) GetTokenPrefix() string {
+	if v.keyStore != nil && v.keyStore.TokenPrefix != "" {
+		return v.keyStore.TokenPrefix
+	}
+	return TokenPrefix
+}
+
 // VerifyRequest verifies a token against a request's Access
 func (v *Verifier) VerifyRequest(authHeader string, access *Access) *VerifyResult {
 	// Validate access structure first
@@ -142,4 +150,31 @@ func extractTokens(header string) (string, []string, error) {
 func extractToken(header string) (string, error) {
 	main, _, err := extractTokens(header)
 	return main, err
+}
+
+// IsMacaroonAuth checks if an Authorization header contains a macaroon token
+// Returns true if the header is "Bearer <prefix>..." or just "<prefix>..."
+func IsMacaroonAuth(header, prefix string) bool {
+	if header == "" {
+		return false
+	}
+
+	if prefix == "" {
+		prefix = TokenPrefix
+	}
+
+	var tokenStr string
+	if strings.HasPrefix(header, "Bearer ") {
+		tokenStr = strings.TrimPrefix(header, "Bearer ")
+	} else {
+		tokenStr = header
+	}
+
+	// Check if the first token (before any comma) has the macaroon prefix
+	if idx := strings.Index(tokenStr, ","); idx > 0 {
+		tokenStr = tokenStr[:idx]
+	}
+	tokenStr = strings.TrimSpace(tokenStr)
+
+	return strings.HasPrefix(tokenStr, prefix)
 }

@@ -1,8 +1,11 @@
 # agent-creds
 
-**Status: Experimental** — This is a vibe-coded proof-of-concept. The API and architecture may change significantly. Not recommended for production use without thorough review.
+Agent sandbox with integrated credential injection proxy. Allows unmodified code to hit e.g. `https://api.stripe.com` and have API credentials injected transparently via an Envoy proxy with TLS termination.
 
-Credential injection proxy for AI agents. Allows unmodified code to hit `https://api.stripe.com` and have API credentials injected transparently via an Envoy proxy with TLS termination.
+![agent-creds sandbox](agent-creds.png)
+
+
+**Status: Experimental** — The API and architecture may change significantly. Not recommended for production use.
 
 ## Threat Model
 
@@ -96,17 +99,6 @@ adev stop foo     # Stop sandbox named "foo"
 - Attaches to existing instances instead of creating duplicates
 
 Multiple named sandboxes can run concurrently.
-
-### aenv Dashboard
-
-When you enter the sandbox, running `aenv` displays a status dashboard:
-
-<!-- TODO: aenv screenshot -->
-
-The dashboard shows:
-- **Allowlist**: Which API domains are accessible (everything else is blocked)
-- **Credentials**: Token status for each API with credential injection (validity, restrictions)
-- **Host Access**: Browser forwarding and CDP connection status
 
 ### Browser Forwarding
 

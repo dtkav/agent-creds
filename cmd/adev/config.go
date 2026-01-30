@@ -25,16 +25,16 @@ type VaultConfig struct {
 	SSH  string `toml:"ssh"`  // explicit ssh address (e.g. localhost:2222)
 }
 
-// AuthzAddr returns the host and port for the authz gRPC service.
-// Remote: host on port 443. Local: "authz" on port 9001.
-func (v VaultConfig) AuthzAddr() (host string, port int) {
+// VaultAddr returns the host and port for the vault gRPC service.
+// Remote: host on port 443. Local: "vault" on port 9001.
+func (v VaultConfig) VaultAddr() (host string, port int) {
 	if v.Host != "" {
 		return v.Host, 443
 	}
-	return "authz", 9001
+	return "vault", 9001
 }
 
-// IsRemote returns true when authz is a remote service (not local docker-compose).
+// IsRemote returns true when vault is a remote service (not local docker-compose).
 func (v VaultConfig) IsRemote() bool {
 	return v.Host != ""
 }

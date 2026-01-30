@@ -16,19 +16,19 @@ type Generator struct {
 	genDir    string
 	hosts     []string            // all upstream hosts
 	upstream  map[string]UpstreamConfig
-	authzHost string
-	authzPort int
+	vaultHost string
+	vaultPort int
 }
 
 func NewGenerator(rootDir string, cfg ProjectConfig) (*Generator, error) {
-	authzHost, authzPort := cfg.Vault.AuthzAddr()
+	vaultHost, vaultPort := cfg.Vault.VaultAddr()
 	g := &Generator{
 		rootDir:   rootDir,
 		certsDir:  filepath.Join(rootDir, "generated", "certs"),
 		genDir:    filepath.Join(rootDir, "generated"),
 		upstream:  cfg.Upstream,
-		authzHost: authzHost,
-		authzPort: authzPort,
+		vaultHost: vaultHost,
+		vaultPort: vaultPort,
 	}
 
 	for host := range cfg.Upstream {
@@ -95,8 +95,8 @@ func (g *Generator) generateCA() error {
 }
 
 func (g *Generator) generateEnvoyJSON() error {
-	authzHost := g.authzHost
-	authzPort := g.authzPort
+	vaultHost := g.vaultHost
+	vaultPort := g.vaultPort
 	listenPort := 443
 
 	var filterChains []map[string]interface{}
@@ -107,7 +107,7 @@ func (g *Generator) generateEnvoyJSON() error {
 		clusterName := safeName + "_cluster"
 
 		// All domains go through ext_authz for token validation
-		// Credential injection is controlled by vault.toml in authz
+		// Credential injection is controlled by vault.toml in vault
 		httpFilters := []map[string]interface{}{
 			{
 				"name": "envoy.filters.http.ext_authz",
@@ -115,7 +115,7 @@ func (g *Generator) generateEnvoyJSON() error {
 					"@type": "type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz",
 					"grpc_service": map[string]interface{}{
 						"envoy_grpc": map[string]interface{}{
-							"cluster_name": "authz_cluster",
+							"cluster_name": "vault_cluster",
 						},
 						"timeout": "5s",
 					},
@@ -211,20 +211,20 @@ func (g *Generator) generateEnvoyJSON() error {
 		})
 	}
 
-	// Add authz cluster
+	// Add vault cluster
 	clusters = append(clusters, map[string]interface{}{
-		"name":              "authz_cluster",
+		"name":              "vault_cluster",
 		"type":              "LOGICAL_DNS",
 		"dns_lookup_family": "V4_ONLY",
 		"load_assignment": map[string]interface{}{
-			"cluster_name": "authz_cluster",
+			"cluster_name": "vault_cluster",
 			"endpoints": []map[string]interface{}{{
 				"lb_endpoints": []map[string]interface{}{{
 					"endpoint": map[string]interface{}{
 						"address": map[string]interface{}{
 							"socket_address": map[string]interface{}{
-								"address":    authzHost,
-								"port_value": authzPort,
+								"address":    vaultHost,
+								"port_value": vaultPort,
 							},
 						},
 					},

@@ -88,7 +88,7 @@ func checkIdentity(sshAddr string) identityInfo {
 	return info
 }
 
-func checkAuthzHTTP(url string) bool {
+func checkVaultHTTP(url string) bool {
 	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
@@ -113,7 +113,7 @@ func runStatus(cfg ProjectConfig) {
 	var wg sync.WaitGroup
 	var containers []containerStatus
 	var identity identityInfo
-	var authzUp bool
+	var vaultUp bool
 
 	wg.Add(1)
 	go func() {
@@ -121,11 +121,11 @@ func runStatus(cfg ProjectConfig) {
 		containers = checkContainers(slug)
 	}()
 
-	authzAddr := cfg.Vault.HTTPAddr()
+	vaultAddr := cfg.Vault.HTTPAddr()
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		authzUp = checkAuthzHTTP(authzAddr)
+		vaultUp = checkVaultHTTP(vaultAddr)
 	}()
 
 	sshAddr := cfg.Vault.SSHAddr()
@@ -171,11 +171,11 @@ func runStatus(cfg ProjectConfig) {
 	fmt.Println()
 	fmt.Println(indent.Render(sectionStyle.Render("Connectivity")))
 
-	// Authz HTTP
-	if authzUp {
-		fmt.Println(indent.Render(fmt.Sprintf("  %s  %-30s %s", okStyle.Render("●"), "authz "+dimStyle.Render(authzAddr), okStyle.Render("✓ up"))))
+	// Vault HTTP
+	if vaultUp {
+		fmt.Println(indent.Render(fmt.Sprintf("  %s  %-30s %s", okStyle.Render("●"), "vault "+dimStyle.Render(vaultAddr), okStyle.Render("✓ up"))))
 	} else {
-		fmt.Println(indent.Render(fmt.Sprintf("  %s  %-30s %s", warnStyle.Render("○"), "authz "+dimStyle.Render(authzAddr), warnStyle.Render("✗ down"))))
+		fmt.Println(indent.Render(fmt.Sprintf("  %s  %-30s %s", warnStyle.Render("○"), "vault "+dimStyle.Render(vaultAddr), warnStyle.Render("✗ down"))))
 	}
 
 	// SSH connectivity

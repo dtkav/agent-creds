@@ -30,7 +30,7 @@ func (v VaultConfig) SSHAddr() string {
 	return ""
 }
 
-// HTTPAddr returns the HTTP URL for the authz API.
+// HTTPAddr returns the HTTP URL for the vault API.
 func (v VaultConfig) HTTPAddr() string {
 	if v.HTTP != "" {
 		return v.HTTP
@@ -41,7 +41,7 @@ func (v VaultConfig) HTTPAddr() string {
 	return "http://localhost:8080"
 }
 
-// IsRemote returns true when authz is a remote service.
+// IsRemote returns true when vault is a remote service.
 func (v VaultConfig) IsRemote() bool {
 	return v.Host != ""
 }

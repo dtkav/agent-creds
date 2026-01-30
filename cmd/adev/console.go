@@ -113,14 +113,14 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		os.Exit(1)
 	}
 
-	// Ensure authz is running (local only)
+	// Ensure vault is running (local only)
 	if !cfg.Vault.IsRemote() {
 		out, _ := runOutput("docker", "compose", "ps", "--status", "running")
-		if len(out) == 0 || !contains(string(out), "authz") {
-			spinner.Status("starting authz...")
+		if len(out) == 0 || !contains(string(out), "vault") {
+			spinner.Status("starting vault...")
 			if err := run("docker", "compose", "up", "-d", "--build", "--quiet-pull"); err != nil {
 				spinner.Stop()
-				fmt.Fprintf(os.Stderr, "Error starting authz: %v\n", err)
+				fmt.Fprintf(os.Stderr, "Error starting vault: %v\n", err)
 				os.Exit(1)
 			}
 		}
@@ -231,11 +231,11 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		os.Exit(1)
 	}
 
-	// Connect envoy to authz network (local only)
+	// Connect envoy to vault network (local only)
 	if !cfg.Vault.IsRemote() {
 		if err := run("docker", "network", "connect", "agent-creds_agent-creds", envoyName); err != nil {
 			spinner.Stop()
-			fmt.Fprintf(os.Stderr, "Error connecting envoy to authz network: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error connecting envoy to vault network: %v\n", err)
 			os.Exit(1)
 		}
 	}

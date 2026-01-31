@@ -199,6 +199,13 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		pipCacheMounts = []string{"-v", pipCache + ":/home/devuser/.cache/pip"}
 	}
 
+	// Git config mount (preserves git identity for commits)
+	var gitConfigMounts []string
+	gitConfig := filepath.Join(homeDir, ".gitconfig")
+	if fileExists(gitConfig) {
+		gitConfigMounts = []string{"-v", gitConfig + ":/home/devuser/.gitconfig:ro"}
+	}
+
 	// Create claude config dir (namespaced per project)
 	claudeConfigDir := filepath.Join(scriptDir, "claude-dev/claude-config")
 	os.MkdirAll(claudeConfigDir, 0755)
@@ -300,10 +307,12 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	}
 	args = append(args, credsMounts...)
 	args = append(args, pipCacheMounts...)
-	// Mount project config for aenv (read-only, well-known path)
+	args = append(args, gitConfigMounts...)
+	// Mount project config for aenv (read-only, well-known path and in workspace)
 	agentCredsToml := filepath.Join(workDir, "agent-creds.toml")
 	if fileExists(agentCredsToml) {
 		args = append(args, "-v", agentCredsToml+":/etc/aenv/agent-creds.toml:ro")
+		args = append(args, "-v", agentCredsToml+":/workspace/agent-creds.toml:ro")
 	}
 
 	if sandboxImage == "" {

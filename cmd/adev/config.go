@@ -21,6 +21,7 @@ func (s SandboxConfig) UseHostBrowserCDPEnabled() bool { return s.UseHostBrowser
 
 type VaultConfig struct {
 	Host string `toml:"host"` // bare hostname, implies https:443 + ssh:22
+	DNS  string `toml:"dns"`  // optional DNS server for resolving host (e.g. for private networks)
 	HTTP string `toml:"http"` // explicit URL for local dev (e.g. http://localhost:8080)
 	SSH  string `toml:"ssh"`  // explicit ssh address (e.g. localhost:2222)
 }

@@ -14,10 +14,11 @@ type Generator struct {
 	rootDir   string
 	certsDir  string
 	genDir    string
-	hosts     []string            // all upstream hosts
+	hosts     []string // all upstream hosts
 	upstream  map[string]UpstreamConfig
 	vaultHost string
 	vaultPort int
+	vaultDNS  string // optional DNS server for resolving vault host
 }
 
 func NewGenerator(rootDir string, cfg ProjectConfig) (*Generator, error) {
@@ -29,6 +30,7 @@ func NewGenerator(rootDir string, cfg ProjectConfig) (*Generator, error) {
 		upstream:  cfg.Upstream,
 		vaultHost: vaultHost,
 		vaultPort: vaultPort,
+		vaultDNS:  cfg.Vault.DNS,
 	}
 
 	for host := range cfg.Upstream {
@@ -212,10 +214,10 @@ func (g *Generator) generateEnvoyJSON() error {
 	}
 
 	// Add vault cluster
-	clusters = append(clusters, map[string]interface{}{
+	vaultCluster := map[string]interface{}{
 		"name":              "vault_cluster",
 		"type":              "LOGICAL_DNS",
-		"dns_lookup_family": "V4_ONLY",
+		"dns_lookup_family": "AUTO",
 		"load_assignment": map[string]interface{}{
 			"cluster_name": "vault_cluster",
 			"endpoints": []map[string]interface{}{{
@@ -239,7 +241,17 @@ func (g *Generator) generateEnvoyJSON() error {
 				},
 			},
 		},
-	})
+	}
+	// Add custom DNS resolver if configured (for private networks)
+	if g.vaultDNS != "" {
+		vaultCluster["dns_resolvers"] = []map[string]interface{}{{
+			"socket_address": map[string]interface{}{
+				"address":    g.vaultDNS,
+				"port_value": 53,
+			},
+		}}
+	}
+	clusters = append(clusters, vaultCluster)
 
 	envoyConfig := map[string]interface{}{
 		"static_resources": map[string]interface{}{

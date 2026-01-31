@@ -274,14 +274,23 @@ type CDPTarget struct {
 
 type CDPInfo struct {
 	Status  string // "", "no-remote", or browser version
+	Port    int
 	Targets []CDPTarget
 }
 
 func checkCDP() CDPInfo {
+	port := 9222
+	if p := os.Getenv("CDP_PORT"); p != "" {
+		if v, err := fmt.Sscanf(p, "%d", &port); err != nil || v != 1 {
+			port = 9222
+		}
+	}
+
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	sock := "/run/cdp-forward.sock"
 	if _, err := os.Stat(sock); err != nil {
-		// Also check if cdp-proxy is listening on 9222 directly
-		conn, err := net.DialTimeout("tcp", "127.0.0.1:9222", 500*time.Millisecond)
+		// Also check if cdp-proxy is listening directly
+		conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
 		if err != nil {
 			return CDPInfo{}
 		}
@@ -291,8 +300,8 @@ func checkCDP() CDPInfo {
 	client := &http.Client{Timeout: time.Second}
 
 	// Try /json/version via the TCP port (cdp-proxy -> socket -> host Chrome)
-	var info CDPInfo
-	resp, err := client.Get("http://127.0.0.1:9222/json/version")
+	info := CDPInfo{Port: port}
+	resp, err := client.Get(fmt.Sprintf("http://%s/json/version", addr))
 	if err != nil {
 		info.Status = "no-remote"
 		return info
@@ -311,7 +320,7 @@ func checkCDP() CDPInfo {
 	}
 
 	// Fetch target list
-	resp2, err := client.Get("http://127.0.0.1:9222/json/list")
+	resp2, err := client.Get(fmt.Sprintf("http://%s/json/list", addr))
 	if err != nil {
 		return info
 	}
@@ -407,9 +416,9 @@ func main() {
 	case "":
 		thirdLines = append(thirdLines, fmt.Sprintf("  %s %s", dimStyle.Render("○"), dimStyle.Render("cdp")))
 	case "no-remote":
-		thirdLines = append(thirdLines, fmt.Sprintf("  %s %s", warnStyle.Render("◉"), dimStyle.Render("cdp (no remote browser)")))
+		thirdLines = append(thirdLines, fmt.Sprintf("  %s %s", warnStyle.Render("◉"), dimStyle.Render(fmt.Sprintf("cdp :%d (no remote browser)", cdp.Port))))
 	default:
-		thirdLines = append(thirdLines, fmt.Sprintf("  %s %s", okStyle.Render("◉"), dimStyle.Render("cdp → "+cdp.Status)))
+		thirdLines = append(thirdLines, fmt.Sprintf("  %s %s", okStyle.Render("◉"), dimStyle.Render(fmt.Sprintf("cdp :%d → %s", cdp.Port, cdp.Status))))
 		for _, t := range cdp.Targets {
 			title := t.Title
 			if len(title) > 35 {

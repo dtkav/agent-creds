@@ -385,10 +385,11 @@ func main() {
 	}
 
 	// Vault info
-	vaultLine := dimStyle.Render("local")
+	vaultText := "local"
 	if cfg.Vault.Host != "" {
-		vaultLine = okStyle.Render(cfg.Vault.Host)
+		vaultText = cfg.Vault.Host
 	}
+	vaultBox := headerStyle.Render("🏛 vault " + vaultText)
 
 	// Column styles
 	leftCol := lipgloss.NewStyle().
@@ -408,7 +409,7 @@ func main() {
 	thirdContent := thirdCol.Render(strings.Join(thirdLines, "\n"))
 
 	fmt.Println()
-	fmt.Println(headerStyle.Render("🔑 agent-creds") + "  " + dimStyle.Render("vault: ") + vaultLine)
+	fmt.Println(headerStyle.Render("🔑 agent-creds") + "  " + vaultBox)
 	fmt.Println()
 	fmt.Println(lipgloss.JoinHorizontal(lipgloss.Top, leftContent, rightContent, thirdContent))
 	fmt.Println()

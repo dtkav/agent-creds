@@ -265,33 +265,60 @@ func checkBrowserForward() string {
 	return "ok"
 }
 
-func checkCDP() string {
+type CDPTarget struct {
+	ID    string `json:"id"`
+	Type  string `json:"type"`
+	Title string `json:"title"`
+	URL   string `json:"url"`
+}
+
+type CDPInfo struct {
+	Status  string // "", "no-remote", or browser version
+	Targets []CDPTarget
+}
+
+func checkCDP() CDPInfo {
 	sock := "/run/cdp-forward.sock"
 	if _, err := os.Stat(sock); err != nil {
 		// Also check if cdp-proxy is listening on 9222 directly
 		conn, err := net.DialTimeout("tcp", "127.0.0.1:9222", 500*time.Millisecond)
 		if err != nil {
-			return ""
+			return CDPInfo{}
 		}
 		conn.Close()
 	}
-	// Try /json/version via the TCP port (cdp-proxy -> socket -> host Chrome)
+
 	client := &http.Client{Timeout: time.Second}
+
+	// Try /json/version via the TCP port (cdp-proxy -> socket -> host Chrome)
+	var info CDPInfo
 	resp, err := client.Get("http://127.0.0.1:9222/json/version")
 	if err != nil {
-		return "no-remote"
+		info.Status = "no-remote"
+		return info
 	}
 	defer resp.Body.Close()
-	var info struct {
+
+	var version struct {
 		Browser string `json:"Browser"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
-		return "connected"
+	if err := json.NewDecoder(resp.Body).Decode(&version); err != nil {
+		info.Status = "connected"
+	} else if version.Browser != "" {
+		info.Status = version.Browser
+	} else {
+		info.Status = "connected"
 	}
-	if info.Browser != "" {
-		return info.Browser
+
+	// Fetch target list
+	resp2, err := client.Get("http://127.0.0.1:9222/json/list")
+	if err != nil {
+		return info
 	}
-	return "connected"
+	defer resp2.Body.Close()
+	json.NewDecoder(resp2.Body).Decode(&info.Targets)
+
+	return info
 }
 
 func main() {
@@ -375,13 +402,27 @@ func main() {
 	}
 
 	// CDP
-	switch cdp := checkCDP(); cdp {
+	cdp := checkCDP()
+	switch cdp.Status {
 	case "":
 		thirdLines = append(thirdLines, fmt.Sprintf("  %s %s", dimStyle.Render("○"), dimStyle.Render("cdp")))
 	case "no-remote":
 		thirdLines = append(thirdLines, fmt.Sprintf("  %s %s", warnStyle.Render("◉"), dimStyle.Render("cdp (no remote browser)")))
 	default:
-		thirdLines = append(thirdLines, fmt.Sprintf("  %s %s", okStyle.Render("◉"), dimStyle.Render("cdp → "+cdp)))
+		thirdLines = append(thirdLines, fmt.Sprintf("  %s %s", okStyle.Render("◉"), dimStyle.Render("cdp → "+cdp.Status)))
+		for _, t := range cdp.Targets {
+			title := t.Title
+			if len(title) > 35 {
+				title = title[:32] + "..."
+			}
+			if title == "" {
+				title = t.URL
+				if len(title) > 35 {
+					title = title[:32] + "..."
+				}
+			}
+			thirdLines = append(thirdLines, fmt.Sprintf("    %s %s", dimStyle.Render("·"), dimStyle.Render(title)))
+		}
 	}
 
 	// Vault info

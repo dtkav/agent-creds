@@ -43,6 +43,10 @@ RUN apt-get update && apt-get install -y \
 # Install Python packages
 RUN pip3 install --break-system-packages websockets
 
+# Install Go
+RUN curl -fsSL https://go.dev/dl/go1.23.5.linux-amd64.tar.gz | tar -C /usr/local -xzf -
+ENV PATH="/usr/local/go/bin:${PATH}"
+
 # Build abduco from source
 RUN cd /tmp && \
     git clone https://github.com/martanne/abduco.git && \
@@ -89,6 +93,8 @@ RUN mkdir -p /src-ro /src-upper /src-work /workspace \
 # Switch to user
 USER devuser
 ENV HOME=/home/devuser
+ENV GOPATH=/home/devuser/go
+ENV PATH="/home/devuser/go/bin:/usr/local/go/bin:${PATH}"
 WORKDIR /workspace
 
 # Suppress Ubuntu sudo hint

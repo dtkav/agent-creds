@@ -146,7 +146,7 @@ func startBrowserForward(netContainerName, slug string) (string, error) {
 	return sockPath, nil
 }
 
-func startCDPForward(slug string) (string, error) {
+func startCDPForward(slug string, port int) (string, error) {
 	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("adev-%s-cdp.sock", slug))
 	os.Remove(sockPath)
 
@@ -156,6 +156,7 @@ func startCDPForward(slug string) (string, error) {
 	}
 	os.Chmod(sockPath, 0666)
 
+	addr := fmt.Sprintf("localhost:%d", port)
 	go func() {
 		for {
 			conn, err := listener.Accept()
@@ -164,7 +165,7 @@ func startCDPForward(slug string) (string, error) {
 			}
 			go func(c net.Conn) {
 				defer c.Close()
-				upstream, err := net.Dial("tcp", "localhost:9222")
+				upstream, err := net.Dial("tcp", addr)
 				if err != nil {
 					return
 				}

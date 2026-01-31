@@ -267,9 +267,10 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 
 	// Start CDP forward with instance-based socket path
 	var cdpSock string
+	cdpPort := int(cfg.Sandbox.UseHostBrowserCDP)
 	if cfg.Sandbox.UseHostBrowserCDPEnabled() {
 		spinner.Status("starting CDP forward...")
-		cdpSock, err = startCDPForward(slug)
+		cdpSock, err = startCDPForward(slug, cdpPort)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: CDP forwarding disabled: %v\n", err)
 			cdpSock = ""
@@ -295,6 +296,7 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	// Add CDP forwarding if available
 	if cdpSock != "" {
 		args = append(args, "-v", cdpSock+":/run/cdp-forward.sock")
+		args = append(args, "-e", fmt.Sprintf("CDP_PORT=%d", cdpPort))
 	}
 	args = append(args, credsMounts...)
 	args = append(args, pipCacheMounts...)

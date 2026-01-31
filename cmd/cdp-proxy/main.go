@@ -1,16 +1,27 @@
-// cdp-proxy listens on tcp:9222 and forwards connections to /run/cdp-forward.sock.
-// This runs inside the sandbox so that tools expecting localhost:9222 can reach
+// cdp-proxy listens on a TCP port and forwards connections to /run/cdp-forward.sock.
+// This runs inside the sandbox so that tools expecting localhost:<port> can reach
 // the host's Chrome DevTools via the unix socket forwarded by adev.
+//
+// The port is configured via the CDP_PORT environment variable (default: 9222).
 package main
 
 import (
+	"fmt"
 	"io"
 	"net"
 	"os"
+	"strconv"
 )
 
 func main() {
-	ln, err := net.Listen("tcp", "127.0.0.1:9222")
+	port := 9222
+	if p := os.Getenv("CDP_PORT"); p != "" {
+		if v, err := strconv.Atoi(p); err == nil && v > 0 {
+			port = v
+		}
+	}
+
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		os.Exit(1)
 	}

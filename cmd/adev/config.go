@@ -9,15 +9,33 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+// CDPPort handles both boolean and integer values for use_host_browser_cdp.
+// false or omitted = 0 (disabled), true = 9222 (default), integer = custom port.
+type CDPPort int
+
+func (c *CDPPort) UnmarshalTOML(data any) error {
+	switch v := data.(type) {
+	case bool:
+		if v {
+			*c = 9222
+		} else {
+			*c = 0
+		}
+	case int64:
+		*c = CDPPort(v)
+	}
+	return nil
+}
+
 type SandboxConfig struct {
-	Name           string `toml:"name"`
-	Image          string `toml:"image"`
-	UseHostBrowser    *bool `toml:"use_host_browser"`     // default true
-	UseHostBrowserCDP *bool `toml:"use_host_browser_cdp"` // default true
+	Name              string  `toml:"name"`
+	Image             string  `toml:"image"`
+	UseHostBrowser    *bool   `toml:"use_host_browser"`     // default true
+	UseHostBrowserCDP CDPPort `toml:"use_host_browser_cdp"` // 0=disabled, port number=enabled
 }
 
 func (s SandboxConfig) UseHostBrowserEnabled() bool    { return s.UseHostBrowser == nil || *s.UseHostBrowser }
-func (s SandboxConfig) UseHostBrowserCDPEnabled() bool { return s.UseHostBrowserCDP == nil || *s.UseHostBrowserCDP }
+func (s SandboxConfig) UseHostBrowserCDPEnabled() bool { return s.UseHostBrowserCDP > 0 }
 
 type VaultConfig struct {
 	Host string `toml:"host"` // bare hostname, implies https:443 + ssh:22

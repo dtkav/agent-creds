@@ -418,8 +418,20 @@ func main() {
 	case "no-remote":
 		thirdLines = append(thirdLines, fmt.Sprintf("  %s %s", warnStyle.Render("◉"), dimStyle.Render(fmt.Sprintf("cdp :%d (no remote browser)", cdp.Port))))
 	default:
-		thirdLines = append(thirdLines, fmt.Sprintf("  %s %s", okStyle.Render("◉"), dimStyle.Render(fmt.Sprintf("cdp :%d → %s", cdp.Port, cdp.Status))))
+		// Shorten browser version (e.g., "Chrome/144.0.7559.109" -> "Chrome/144")
+		browserVer := cdp.Status
+		if idx := strings.Index(browserVer, "."); idx > 0 {
+			browserVer = browserVer[:idx]
+		}
+		thirdLines = append(thirdLines, fmt.Sprintf("  %s %s", okStyle.Render("◉"), dimStyle.Render(fmt.Sprintf("cdp :%d → %s", cdp.Port, browserVer))))
 		for _, t := range cdp.Targets {
+			// Skip internal Chrome pages
+			if strings.HasPrefix(t.URL, "chrome://") ||
+				strings.HasPrefix(t.URL, "chrome-untrusted://") ||
+				strings.HasPrefix(t.URL, "devtools://") ||
+				strings.HasPrefix(t.URL, "about:") {
+				continue
+			}
 			title := t.Title
 			if len(title) > 35 {
 				title = title[:32] + "..."
@@ -443,15 +455,15 @@ func main() {
 
 	// Column styles
 	leftCol := lipgloss.NewStyle().
-		Width(30).
-		MarginRight(4)
+		Width(28).
+		MarginRight(2)
 
 	rightCol := lipgloss.NewStyle().
-		Width(50).
-		MarginRight(4)
+		Width(45).
+		MarginRight(2)
 
 	thirdCol := lipgloss.NewStyle().
-		Width(35)
+		Width(40)
 
 	// Render
 	leftContent := leftCol.Render(strings.Join(leftLines, "\n"))
@@ -459,7 +471,7 @@ func main() {
 	thirdContent := thirdCol.Render(strings.Join(thirdLines, "\n"))
 
 	fmt.Println()
-	fmt.Println(headerStyle.Render("🔑 agent-creds") + "  " + vaultBox)
+	fmt.Println(lipgloss.JoinHorizontal(lipgloss.Top, headerStyle.Render("🔑 agent-creds"), "  ", vaultBox))
 	fmt.Println()
 	fmt.Println(lipgloss.JoinHorizontal(lipgloss.Top, leftContent, rightContent, thirdContent))
 	fmt.Println()

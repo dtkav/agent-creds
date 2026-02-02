@@ -26,6 +26,10 @@ RUN apt-get update && apt-get install -y \
     kitty-terminfo \
     socat \
     build-essential \
+    # Git build dependencies
+    libcurl4-openssl-dev \
+    libssl-dev \
+    zlib1g-dev \
     # Rust CLI tools
     ripgrep \
     fd-find \
@@ -54,6 +58,10 @@ RUN cd /tmp && \
     make && \
     make install && \
     cd / && rm -rf /tmp/abduco
+
+# Download igit binary (git with inverted .gitignore semantics)
+RUN curl -fsSL https://github.com/dtkav/igit/releases/download/v0.1.0/igit-linux-x64 -o /usr/local/bin/igit && \
+    chmod +x /usr/local/bin/igit
 
 # Create user with matching UID/GID
 RUN groupadd --gid $USER_GID --force devuser || true \

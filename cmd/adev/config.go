@@ -70,11 +70,30 @@ type CDPTargetConfig struct {
 	URL   string `toml:"url"`   // glob pattern matching target URL
 }
 
+// BrowserTargetConfig defines an allowed URL pattern for browser forwarding.
+type BrowserTargetConfig struct {
+	URL string `toml:"url"` // glob pattern matching URL to open
+}
+
 type ProjectConfig struct {
-	Sandbox    SandboxConfig              `toml:"sandbox"`
-	Vault      VaultConfig                `toml:"vault"`
-	Upstream   map[string]UpstreamConfig  `toml:"upstream"`
-	CDPTargets []CDPTargetConfig          `toml:"cdp_target"`
+	Sandbox        SandboxConfig              `toml:"sandbox"`
+	Vault          VaultConfig                `toml:"vault"`
+	Upstream       map[string]UpstreamConfig  `toml:"upstream"`
+	CDPTargets     []CDPTargetConfig          `toml:"cdp_target"`
+	BrowserTargets []BrowserTargetConfig      `toml:"browser_target"`
+}
+
+// MatchGlob performs simple glob matching where * matches any characters.
+// Pattern must match the entire string (anchored). Empty pattern matches anything.
+func MatchGlob(pattern, value string) bool {
+	if pattern == "" {
+		return true
+	}
+	re := regexp.QuoteMeta(pattern)
+	re = strings.ReplaceAll(re, `\*`, `.*`)
+	re = "^" + re + "$"
+	matched, _ := regexp.MatchString(re, value)
+	return matched
 }
 
 // LoadProjectConfig reads agent-creds.toml from dir if it exists.

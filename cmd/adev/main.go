@@ -116,7 +116,7 @@ func (f *ForwardState) Close() {
 	}
 }
 
-func startBrowserForward(netContainerName, slug string) (*ForwardState, error) {
+func startBrowserForward(netContainerName, slug string, targets []BrowserTargetConfig) (*ForwardState, error) {
 	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("adev-%s-browser.sock", slug))
 	os.Remove(sockPath) // clean up stale socket
 
@@ -132,6 +132,19 @@ func startBrowserForward(netContainerName, slug string) (*ForwardState, error) {
 		rawURL := r.URL.Query().Get("url")
 		if rawURL == "" {
 			http.Error(w, "missing url parameter", http.StatusBadRequest)
+			return
+		}
+
+		// Check URL against allow-list (empty list = all blocked)
+		allowed := false
+		for _, t := range targets {
+			if MatchGlob(t.URL, rawURL) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			http.Error(w, "url not allowed", http.StatusForbidden)
 			return
 		}
 

@@ -278,7 +278,7 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	// Start browser-forward server with instance-based socket path
 	if cfg.Sandbox.UseHostBrowserEnabled() {
 		spinner.Status("starting browser forward...")
-		browserFwd, err = startBrowserForward(containerName, slug)
+		browserFwd, err = startBrowserForward(containerName, slug, cfg.BrowserTargets)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: browser forwarding disabled: %v\n", err)
 		}
@@ -319,7 +319,7 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 							wantBrowser := newCfg.Sandbox.UseHostBrowserEnabled()
 							haveBrowser := browserFwd != nil
 							if wantBrowser && !haveBrowser {
-								browserFwd, _ = startBrowserForward(containerName, slug)
+								browserFwd, _ = startBrowserForward(containerName, slug, newCfg.BrowserTargets)
 							} else if !wantBrowser && haveBrowser {
 								browserFwd.Close()
 								browserFwd = nil

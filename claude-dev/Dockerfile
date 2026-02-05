@@ -69,9 +69,6 @@ RUN groupadd --gid $USER_GID --force devuser || true \
     || usermod -l devuser -d /home/devuser -m ubuntu 2>/dev/null || true \
     && echo "devuser ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
-# Install Claude Code (bootstrap via npm for global availability)
-RUN npm install -g @anthropic-ai/claude-code
-
 # Copy CA cert and add to system trust store
 COPY generated/certs/ca.crt /usr/local/share/ca-certificates/agent-creds-ca.crt
 RUN update-ca-certificates
@@ -115,8 +112,9 @@ RUN cargo install diffr
 # Suppress Ubuntu sudo hint
 RUN touch ~/.hushlogin
 
-# Install auto-updating version of Claude Code
-RUN yes | claude install
+# Install Claude Code (native installer, auto-updates)
+RUN curl -fsSL https://claude.ai/install.sh | bash
+ENV PATH="/home/devuser/.local/bin:${PATH}"
 
 # Node.js also needs to trust the CA
 ENV NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/agent-creds-ca.crt

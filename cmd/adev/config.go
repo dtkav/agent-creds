@@ -62,10 +62,19 @@ type UpstreamConfig struct {
 	// Empty for now - domains are just listed, auth is handled by vault.toml
 }
 
+// CDPTargetConfig defines an allowed CDP target pattern.
+// All specified fields must match (empty = match any).
+type CDPTargetConfig struct {
+	Type  string `toml:"type"`  // glob pattern matching target type (page, background_page, service_worker, etc.)
+	Title string `toml:"title"` // glob pattern matching target title
+	URL   string `toml:"url"`   // glob pattern matching target URL
+}
+
 type ProjectConfig struct {
-	Sandbox  SandboxConfig              `toml:"sandbox"`
-	Vault    VaultConfig                `toml:"vault"`
-	Upstream map[string]UpstreamConfig  `toml:"upstream"`
+	Sandbox    SandboxConfig              `toml:"sandbox"`
+	Vault      VaultConfig                `toml:"vault"`
+	Upstream   map[string]UpstreamConfig  `toml:"upstream"`
+	CDPTargets []CDPTargetConfig          `toml:"cdp_target"`
 }
 
 // LoadProjectConfig reads agent-creds.toml from dir if it exists.

@@ -105,6 +105,10 @@ ENV GOPATH=/home/devuser/go
 ENV PATH="/home/devuser/go/bin:/usr/local/go/bin:${PATH}"
 WORKDIR /workspace
 
+# Install Rust via rustup
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/home/devuser/.cargo/bin:${PATH}"
+
 # Suppress Ubuntu sudo hint
 RUN touch ~/.hushlogin
 

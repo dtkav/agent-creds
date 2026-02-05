@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -107,9 +108,16 @@ type UpstreamConfig struct {
 	Akey string `toml:"akey"`
 }
 
+type CDPTargetConfig struct {
+	Type  string `toml:"type"`
+	Title string `toml:"title"`
+	URL   string `toml:"url"`
+}
+
 type ProjectConfig struct {
-	Vault    VaultConfig                `toml:"vault"`
-	Upstream map[string]UpstreamConfig  `toml:"upstream"`
+	Vault      VaultConfig                `toml:"vault"`
+	Upstream   map[string]UpstreamConfig  `toml:"upstream"`
+	CDPTargets []CDPTargetConfig          `toml:"cdp_target"`
 }
 
 type TokenInfo struct {
@@ -272,6 +280,32 @@ type CDPTarget struct {
 	URL   string `json:"url"`
 }
 
+// matchGlob performs simple glob matching where * matches any characters.
+// Pattern must match the entire string (anchored).
+func matchGlob(pattern, value string) bool {
+	if pattern == "" {
+		return true
+	}
+	re := regexp.QuoteMeta(pattern)
+	re = strings.ReplaceAll(re, `\*`, `.*`)
+	re = "^" + re + "$"
+	matched, _ := regexp.MatchString(re, value)
+	return matched
+}
+
+// isTargetAllowed checks if a CDP target matches any of the configured patterns.
+func isTargetAllowed(target CDPTarget, configs []CDPTargetConfig) bool {
+	for _, cfg := range configs {
+		typeMatch := matchGlob(cfg.Type, target.Type)
+		titleMatch := matchGlob(cfg.Title, target.Title)
+		urlMatch := matchGlob(cfg.URL, target.URL)
+		if typeMatch && titleMatch && urlMatch {
+			return true
+		}
+	}
+	return false
+}
+
 type CDPInfo struct {
 	Status  string // "", "no-remote", or browser version
 	Port    int
@@ -424,6 +458,10 @@ func main() {
 			browserVer = browserVer[:idx]
 		}
 		thirdLines = append(thirdLines, fmt.Sprintf("  %s %s", okStyle.Render("◉"), dimStyle.Render(fmt.Sprintf("cdp :%d → %s", cdp.Port, browserVer))))
+
+		// Check if CDP targets are configured
+		hasCDPConfig := len(cfg.CDPTargets) > 0
+
 		for _, t := range cdp.Targets {
 			// Skip internal Chrome pages
 			if strings.HasPrefix(t.URL, "chrome://") ||
@@ -432,17 +470,31 @@ func main() {
 				strings.HasPrefix(t.URL, "about:") {
 				continue
 			}
-			title := t.Title
-			if len(title) > 35 {
-				title = title[:32] + "..."
+
+			// Determine display name from title
+			displayName := t.Title
+			if len(displayName) > 25 {
+				displayName = displayName[:22] + "..."
 			}
-			if title == "" {
-				title = t.URL
-				if len(title) > 35 {
-					title = title[:32] + "..."
+			if displayName == "" {
+				displayName = t.URL
+				if len(displayName) > 25 {
+					displayName = displayName[:22] + "..."
 				}
 			}
-			thirdLines = append(thirdLines, fmt.Sprintf("    %s %s", dimStyle.Render("·"), dimStyle.Render(title)))
+
+			allowed := hasCDPConfig && isTargetAllowed(t, cfg.CDPTargets)
+
+			if allowed {
+				thirdLines = append(thirdLines, fmt.Sprintf("    %s %s", okStyle.Render("◉"), dimStyle.Render(displayName)))
+			} else {
+				thirdLines = append(thirdLines, fmt.Sprintf("    %s %s", dimStyle.Render("○"), dimStyle.Render(displayName)))
+			}
+		}
+
+		// If no CDP targets are configured, show hint
+		if !hasCDPConfig && len(cdp.Targets) > 0 {
+			thirdLines = append(thirdLines, dimStyle.Render("    add [[cdp_target]] to config"))
 		}
 	}
 

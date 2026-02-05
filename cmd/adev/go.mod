@@ -6,6 +6,7 @@ require (
 	github.com/BurntSushi/toml v1.3.2
 	github.com/charmbracelet/bubbletea v1.3.4
 	github.com/charmbracelet/lipgloss v1.0.0
+	github.com/fsnotify/fsnotify v1.7.0
 	github.com/muesli/termenv v0.15.2
 )
 

@@ -6,8 +6,11 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
+
+	"github.com/fsnotify/fsnotify"
 )
 
 func runConsole(args []string) {
@@ -79,14 +82,18 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	spinner.Status("starting")
 	spinner.Start()
 
+	// Socket paths for cleanup
+	browserSockCleanup := filepath.Join(os.TempDir(), fmt.Sprintf("adev-%s-browser.sock", slug))
+	cdpSockCleanup := filepath.Join(os.TempDir(), fmt.Sprintf("adev-%s-cdp.sock", slug))
+
 	cleanup := func() {
 		run("docker", "rm", "-f", sandboxName)
 		run("docker", "rm", "-f", containerName)
 		run("docker", "rm", "-f", envoyName)
 		run("docker", "network", "rm", networkName)
 		// Clean up sockets
-		os.Remove(filepath.Join(os.TempDir(), fmt.Sprintf("adev-%s-browser.sock", slug)))
-		os.Remove(filepath.Join(os.TempDir(), fmt.Sprintf("adev-%s-cdp.sock", slug)))
+		os.Remove(browserSockCleanup)
+		os.Remove(cdpSockCleanup)
 	}
 
 	// Handle cleanup on interrupt
@@ -261,26 +268,87 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 
 	time.Sleep(500 * time.Millisecond)
 
+	// Forwarder state (protected by mutex for config watcher)
+	var fwdMu sync.Mutex
+	var browserFwd, cdpFwd *ForwardState
+	browserSockPath := filepath.Join(os.TempDir(), fmt.Sprintf("adev-%s-browser.sock", slug))
+	cdpSockPath := filepath.Join(os.TempDir(), fmt.Sprintf("adev-%s-cdp.sock", slug))
+	cdpPort := int(cfg.Sandbox.UseHostBrowserCDP)
+
 	// Start browser-forward server with instance-based socket path
-	var browserSock string
 	if cfg.Sandbox.UseHostBrowserEnabled() {
 		spinner.Status("starting browser forward...")
-		browserSock, err = startBrowserForward(containerName, slug)
+		browserFwd, err = startBrowserForward(containerName, slug)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: browser forwarding disabled: %v\n", err)
-			browserSock = ""
 		}
 	}
 
 	// Start CDP forward with instance-based socket path
-	var cdpSock string
-	cdpPort := int(cfg.Sandbox.UseHostBrowserCDP)
 	if cfg.Sandbox.UseHostBrowserCDPEnabled() {
 		spinner.Status("starting CDP forward...")
-		cdpSock, err = startCDPForward(slug, cdpPort)
+		cdpFwd, err = startCDPForward(slug, cdpPort)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: CDP forwarding disabled: %v\n", err)
-			cdpSock = ""
+		}
+	}
+
+	// Watch config file for changes
+	configPath := filepath.Join(workDir, "agent-creds.toml")
+	if fileExists(configPath) {
+		watcher, err := fsnotify.NewWatcher()
+		if err == nil {
+			watcher.Add(configPath)
+			go func() {
+				defer watcher.Close()
+				for {
+					select {
+					case event, ok := <-watcher.Events:
+						if !ok {
+							return
+						}
+						if event.Op&(fsnotify.Write|fsnotify.Create) != 0 {
+							// Reload config
+							newCfg, err := LoadProjectConfig(workDir)
+							if err != nil {
+								continue
+							}
+
+							fwdMu.Lock()
+							// Handle browser forwarding changes
+							wantBrowser := newCfg.Sandbox.UseHostBrowserEnabled()
+							haveBrowser := browserFwd != nil
+							if wantBrowser && !haveBrowser {
+								browserFwd, _ = startBrowserForward(containerName, slug)
+							} else if !wantBrowser && haveBrowser {
+								browserFwd.Close()
+								browserFwd = nil
+							}
+
+							// Handle CDP forwarding changes
+							newCdpPort := int(newCfg.Sandbox.UseHostBrowserCDP)
+							wantCDP := newCfg.Sandbox.UseHostBrowserCDPEnabled()
+							haveCDP := cdpFwd != nil
+							if wantCDP && !haveCDP {
+								cdpFwd, _ = startCDPForward(slug, newCdpPort)
+							} else if !wantCDP && haveCDP {
+								cdpFwd.Close()
+								cdpFwd = nil
+							} else if wantCDP && haveCDP && newCdpPort != cdpPort {
+								// Port changed, restart
+								cdpFwd.Close()
+								cdpFwd, _ = startCDPForward(slug, newCdpPort)
+							}
+							cdpPort = newCdpPort
+							fwdMu.Unlock()
+						}
+					case _, ok := <-watcher.Errors:
+						if !ok {
+							return
+						}
+					}
+				}
+			}()
 		}
 	}
 
@@ -295,14 +363,14 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		"-v", workDir + ":/workspace",
 		"-v", claudeConfigDir + ":/home/devuser/.claude",
 	}
-	// Add browser forwarding if available
-	if browserSock != "" {
-		args = append(args, "-v", browserSock+":/run/browser-forward.sock")
+	// Add browser forwarding socket mount (always mount the path, forwarder can be toggled)
+	args = append(args, "-v", browserSockPath+":/run/browser-forward.sock")
+	if browserFwd != nil {
 		args = append(args, "-e", "BROWSER=/usr/local/bin/open-browser")
 	}
-	// Add CDP forwarding if available
-	if cdpSock != "" {
-		args = append(args, "-v", cdpSock+":/run/cdp-forward.sock")
+	// Add CDP forwarding socket mount (always mount the path, forwarder can be toggled)
+	args = append(args, "-v", cdpSockPath+":/run/cdp-forward.sock")
+	if cdpFwd != nil {
 		args = append(args, "-e", fmt.Sprintf("CDP_PORT=%d", cdpPort))
 	}
 	args = append(args, credsMounts...)

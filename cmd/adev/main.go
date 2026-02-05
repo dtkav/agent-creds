@@ -101,13 +101,28 @@ func imageExists(name string) bool {
 	return run("docker", "image", "inspect", name) == nil
 }
 
-func startBrowserForward(netContainerName, slug string) (string, error) {
+// ForwardState tracks a forwarder's listener and socket path for cleanup.
+type ForwardState struct {
+	Listener net.Listener
+	SockPath string
+}
+
+func (f *ForwardState) Close() {
+	if f.Listener != nil {
+		f.Listener.Close()
+	}
+	if f.SockPath != "" {
+		os.Remove(f.SockPath)
+	}
+}
+
+func startBrowserForward(netContainerName, slug string) (*ForwardState, error) {
 	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("adev-%s-browser.sock", slug))
 	os.Remove(sockPath) // clean up stale socket
 
 	listener, err := net.Listen("unix", sockPath)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	// Make socket accessible from container (runs as different uid)
@@ -143,16 +158,16 @@ func startBrowserForward(netContainerName, slug string) (string, error) {
 		w.Write([]byte("ok"))
 	}))
 
-	return sockPath, nil
+	return &ForwardState{Listener: listener, SockPath: sockPath}, nil
 }
 
-func startCDPForward(slug string, port int) (string, error) {
+func startCDPForward(slug string, port int) (*ForwardState, error) {
 	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("adev-%s-cdp.sock", slug))
 	os.Remove(sockPath)
 
 	listener, err := net.Listen("unix", sockPath)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	os.Chmod(sockPath, 0666)
 
@@ -176,7 +191,7 @@ func startCDPForward(slug string, port int) (string, error) {
 		}
 	}()
 
-	return sockPath, nil
+	return &ForwardState{Listener: listener, SockPath: sockPath}, nil
 }
 
 // proxyLocalPort creates a temporary TCP listener on the host at the given port,

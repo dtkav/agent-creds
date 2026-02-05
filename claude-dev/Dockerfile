@@ -109,6 +109,9 @@ WORKDIR /workspace
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/home/devuser/.cargo/bin:${PATH}"
 
+# Install Rust CLI tools
+RUN cargo install diffr
+
 # Suppress Ubuntu sudo hint
 RUN touch ~/.hushlogin
 

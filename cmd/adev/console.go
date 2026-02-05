@@ -383,6 +383,11 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		args = append(args, "-v", agentCredsToml+":/workspace/agent-creds.toml:ro")
 	}
 
+	// Add gvisor runtime if configured (only for sandbox, not sandbox-net or envoy)
+	if rt := cfg.Sandbox.RuntimeArg(); rt != "" {
+		args = append(args, "--runtime="+rt)
+	}
+
 	if sandboxImage == "" {
 		sandboxImage = "sandbox"
 	}

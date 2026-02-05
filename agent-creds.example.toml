@@ -1,0 +1,66 @@
+# agent-creds.toml - Example configuration
+#
+# Copy this file to agent-creds.toml and customize for your project.
+
+[sandbox]
+name = "myproject"
+
+# Browser forwarding: allow sandbox to open URLs in host browser
+# use_host_browser = true  # default
+
+# CDP forwarding: allow sandbox to control host Chrome via DevTools Protocol
+# use_host_browser_cdp = true      # enable on default port 9222
+# use_host_browser_cdp = 9333      # enable on custom port
+
+# Remote vault (optional - uses local docker-compose vault by default)
+# [vault]
+# host = "vault.example.com"
+
+# =============================================================================
+# Upstream API Allowlist
+# =============================================================================
+# Only these domains are reachable from the sandbox. All other traffic is blocked.
+
+[upstream."api.stripe.com"]
+# akey = "stripe.akey"  # optional: credential file for token-based auth
+
+[upstream."api.github.com"]
+[upstream."api.anthropic.com"]
+
+# =============================================================================
+# Browser Target Allowlist
+# =============================================================================
+# URLs the sandbox can open in the host browser via xdg-open.
+# Empty = all URLs blocked. Patterns use glob syntax (* matches any chars).
+
+[[browser_target]]
+url = "*accounts.google.com/o/oauth*"  # Google OAuth
+
+[[browser_target]]
+url = "*github.com/login/oauth*"  # GitHub OAuth
+
+[[browser_target]]
+url = "http://localhost:*"  # OAuth callbacks
+
+# =============================================================================
+# CDP Target Allowlist
+# =============================================================================
+# Browser tabs/windows the sandbox can control via Chrome DevTools Protocol.
+# Empty = all targets blocked. Patterns use glob syntax (* matches any chars).
+#
+# Available fields (all optional, empty = match any):
+#   type  - target type: "page", "background_page", "service_worker", etc.
+#   title - page title pattern
+#   url   - page URL pattern
+#
+# When multiple fields specified, ALL must match.
+
+[[cdp_target]]
+type = "page"
+title = "*My App*"
+
+[[cdp_target]]
+url = "*localhost:3000*"  # Local dev server
+
+[[cdp_target]]
+title = "*- workspace -*"  # Specific workspace windows

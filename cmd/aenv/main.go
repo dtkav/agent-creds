@@ -114,10 +114,15 @@ type CDPTargetConfig struct {
 	URL   string `toml:"url"`
 }
 
+type BrowserTargetConfig struct {
+	URL string `toml:"url"`
+}
+
 type ProjectConfig struct {
-	Vault      VaultConfig                `toml:"vault"`
-	Upstream   map[string]UpstreamConfig  `toml:"upstream"`
-	CDPTargets []CDPTargetConfig          `toml:"cdp_target"`
+	Vault          VaultConfig                `toml:"vault"`
+	Upstream       map[string]UpstreamConfig  `toml:"upstream"`
+	CDPTargets     []CDPTargetConfig          `toml:"cdp_target"`
+	BrowserTargets []BrowserTargetConfig      `toml:"browser_target"`
 }
 
 type TokenInfo struct {
@@ -435,9 +440,16 @@ func main() {
 	thirdLines = append(thirdLines, "")
 
 	// Browser forward
-	switch checkBrowserForward() {
+	browserStatus := checkBrowserForward()
+	hasBrowserConfig := len(cfg.BrowserTargets) > 0
+	switch browserStatus {
 	case "ok":
-		thirdLines = append(thirdLines, fmt.Sprintf("  %s %s", okStyle.Render("◉"), dimStyle.Render("browser forward")))
+		if hasBrowserConfig {
+			thirdLines = append(thirdLines, fmt.Sprintf("  %s %s", okStyle.Render("◉"), dimStyle.Render(fmt.Sprintf("browser forward (%d patterns)", len(cfg.BrowserTargets)))))
+		} else {
+			thirdLines = append(thirdLines, fmt.Sprintf("  %s %s", warnStyle.Render("◉"), dimStyle.Render("browser forward (all blocked)")))
+			thirdLines = append(thirdLines, dimStyle.Render("    add [[browser_target]] to config"))
+		}
 	case "dead":
 		thirdLines = append(thirdLines, fmt.Sprintf("  %s %s", errStyle.Render("◉"), dimStyle.Render("browser forward (dead)")))
 	default:

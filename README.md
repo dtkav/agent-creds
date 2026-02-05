@@ -119,7 +119,16 @@ Configure in `agent-creds.toml`:
 ```toml
 [sandbox]
 use_host_browser = true  # default
+
+# URL allow-list (required - empty = all blocked)
+[[browser_target]]
+url = "*accounts.google.com/o/oauth*"
+
+[[browser_target]]
+url = "http://localhost:*"
 ```
+
+Only URLs matching a `[[browser_target]]` pattern will be opened. All others return 403.
 
 ### Chrome DevTools Protocol (CDP)
 
@@ -145,7 +154,24 @@ Configure in `agent-creds.toml`:
 ```toml
 [sandbox]
 use_host_browser_cdp = true  # default
+
+# Target allow-list (required - empty = all blocked)
+[[cdp_target]]
+type = "page"
+title = "*My App*"
+
+[[cdp_target]]
+url = "*github.com*"
 ```
+
+Only browser tabs matching a `[[cdp_target]]` pattern will be accessible. This prevents agents from accessing sensitive tabs (email, banking, etc.).
+
+**CDP target fields** (all optional, empty = match any):
+- `type`: Target type (`page`, `background_page`, `service_worker`, etc.)
+- `title`: Glob pattern matching page title
+- `url`: Glob pattern matching page URL
+
+When multiple fields are specified, all must match.
 
 ### Network Isolation
 

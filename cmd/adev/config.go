@@ -30,12 +30,23 @@ func (c *CDPPort) UnmarshalTOML(data any) error {
 type SandboxConfig struct {
 	Name              string  `toml:"name"`
 	Image             string  `toml:"image"`
+	Runtime           string  `toml:"runtime"` // "", "runc", or "gvisor"
 	UseHostBrowser    *bool   `toml:"use_host_browser"`     // default true
 	UseHostBrowserCDP CDPPort `toml:"use_host_browser_cdp"` // 0=disabled, port number=enabled
 }
 
 func (s SandboxConfig) UseHostBrowserEnabled() bool    { return s.UseHostBrowser == nil || *s.UseHostBrowser }
 func (s SandboxConfig) UseHostBrowserCDPEnabled() bool { return s.UseHostBrowserCDP > 0 }
+
+// RuntimeArg returns the --runtime flag value for docker, or empty if default.
+func (s SandboxConfig) RuntimeArg() string {
+	switch s.Runtime {
+	case "gvisor":
+		return "runsc"
+	default:
+		return "" // use docker default (runc)
+	}
+}
 
 type VaultConfig struct {
 	Host string `toml:"host"` // bare hostname, implies https:443 + ssh:22

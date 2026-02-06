@@ -57,16 +57,17 @@ var (
 	allowedIDs   = make(map[string]bool)
 	allowedMu    sync.RWMutex
 	sockPath     = "/run/cdp-forward.sock"
+	listenPort   int
 	upgrader     = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool { return true },
 	}
 )
 
 func main() {
-	port := 9222
+	listenPort = 9222
 	if p := os.Getenv("CDP_PORT"); p != "" {
 		if v, err := strconv.Atoi(p); err == nil && v > 0 {
-			port = v
+			listenPort = v
 		}
 	}
 
@@ -77,7 +78,7 @@ func main() {
 	http.HandleFunc("/devtools/", handleDevTools)
 	http.HandleFunc("/", handlePassthrough)
 
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	addr := fmt.Sprintf("127.0.0.1:%d", listenPort)
 	if err := http.ListenAndServe(addr, nil); err != nil {
 		os.Exit(1)
 	}
@@ -135,6 +136,37 @@ func isIDAllowed(id string) bool {
 	return allowedIDs[id]
 }
 
+// rewriteCDPUrl rewrites a CDP URL (webSocketDebuggerUrl or devtoolsFrontendUrl)
+// to use the proxy's listen port instead of the upstream's port (typically 80 from
+// the Unix socket connection). Only rewrites URLs pointing to localhost.
+func rewriteCDPUrl(rawURL string) string {
+	if rawURL == "" {
+		return rawURL
+	}
+	for _, scheme := range []string{"ws://", "wss://", "http://", "https://"} {
+		if strings.HasPrefix(rawURL, scheme) {
+			rest := rawURL[len(scheme):]
+			slashIdx := strings.Index(rest, "/")
+			if slashIdx < 0 {
+				slashIdx = len(rest)
+			}
+			host := rest[:slashIdx]
+			path := rest[slashIdx:]
+			// Strip existing port to get bare hostname
+			bareHost := host
+			if colonIdx := strings.LastIndex(bareHost, ":"); colonIdx >= 0 {
+				bareHost = bareHost[:colonIdx]
+			}
+			// Only rewrite localhost URLs, not external ones
+			if bareHost != "localhost" && bareHost != "127.0.0.1" {
+				return rawURL
+			}
+			return fmt.Sprintf("%s%s:%d%s", scheme, bareHost, listenPort, path)
+		}
+	}
+	return rawURL
+}
+
 func handleJSONList(w http.ResponseWriter, r *http.Request) {
 	// Fetch from upstream
 	resp, err := fetchUpstream("/json/list")
@@ -153,10 +185,12 @@ func handleJSONList(w http.ResponseWriter, r *http.Request) {
 	// Update allowed IDs cache
 	updateAllowedIDs(targets)
 
-	// Filter targets
+	// Filter targets and rewrite URLs to use proxy port
 	var allowed []CDPTarget
 	for _, t := range targets {
 		if isTargetAllowed(t) {
+			t.WebSocketDebuggerUrl = rewriteCDPUrl(t.WebSocketDebuggerUrl)
+			t.DevtoolsFrontendUrl = rewriteCDPUrl(t.DevtoolsFrontendUrl)
 			allowed = append(allowed, t)
 		}
 	}
@@ -172,6 +206,31 @@ func handleJSONPassthrough(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+
+	// /json/version returns a webSocketDebuggerUrl that also needs rewriting
+	if strings.HasSuffix(r.URL.Path, "/json/version") {
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		var version map[string]interface{}
+		if json.Unmarshal(body, &version) == nil {
+			if wsURL, ok := version["webSocketDebuggerUrl"].(string); ok {
+				version["webSocketDebuggerUrl"] = rewriteCDPUrl(wsURL)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(version)
+			return
+		}
+		// If not JSON, fall through to raw passthrough
+		for k, v := range resp.Header {
+			w.Header()[k] = v
+		}
+		w.WriteHeader(resp.StatusCode)
+		w.Write(body)
+		return
+	}
 
 	for k, v := range resp.Header {
 		w.Header()[k] = v

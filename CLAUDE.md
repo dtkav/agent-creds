@@ -86,7 +86,6 @@ api.stripe.com (real)
 Project configuration is in `agent-creds.toml`. The `adev` tool reads this and generates:
 - `generated/certs/ca.crt` - CA certificate (only generated once)
 - `generated/envoy.json` - Envoy config with TLS termination
-- `generated/hosts` - /etc/hosts entries for container
 - `generated/domains.json` - Domain config for runtime cert generation
 
 ### Adding a New API Service

@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
+	"sort"
 	"sync"
 	"syscall"
 	"time"
@@ -86,7 +88,14 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	browserSockCleanup := filepath.Join(os.TempDir(), fmt.Sprintf("adev-%s-browser.sock", slug))
 	cdpSockCleanup := filepath.Join(os.TempDir(), fmt.Sprintf("adev-%s-cdp.sock", slug))
 
+	// Host filter (set later for firecracker runtime)
+	var hostFilter *HostNetFilter
+
 	cleanup := func() {
+		// Clean up host iptables rules first (if any)
+		if hostFilter != nil {
+			hostFilter.Cleanup()
+		}
 		run("docker", "rm", "-f", sandboxName)
 		run("docker", "rm", "-f", containerName)
 		run("docker", "rm", "-f", envoyName)
@@ -163,8 +172,7 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 			needsBuild = fileNewer("claude-dev/Dockerfile", marker) ||
 				fileNewer("claude-dev/entrypoint.sh", marker) ||
 				fileNewer("generated/aenv", marker) ||
-				fileNewer("generated/certs/ca.crt", marker) ||
-				fileNewer("generated/hosts", marker)
+				fileNewer("generated/certs/ca.crt", marker)
 		}
 		if needsBuild {
 			spinner.Status("building sandbox...")
@@ -254,19 +262,21 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		}
 	}
 
-	// Start sandbox-net on per-sandbox network
-	spinner.Status("starting network filter...")
-	if err := run("docker", "run", "-d", "--rm",
-		"--name", containerName,
-		"--network", networkName,
-		"--cap-add=NET_ADMIN",
-		"sandbox-net"); err != nil {
-		spinner.Stop()
-		fmt.Fprintf(os.Stderr, "Error starting sandbox-net: %v\n", err)
-		os.Exit(1)
+	// Start sandbox-net on per-sandbox network (not needed for firecracker - it runs iptables internally)
+	useInternalNetfilter := cfg.Sandbox.UsesInternalNetfilter()
+	if !useInternalNetfilter {
+		spinner.Status("starting network filter...")
+		if err := run("docker", "run", "-d", "--rm",
+			"--name", containerName,
+			"--network", networkName,
+			"--cap-add=NET_ADMIN",
+			"sandbox-net"); err != nil {
+			spinner.Stop()
+			fmt.Fprintf(os.Stderr, "Error starting sandbox-net: %v\n", err)
+			os.Exit(1)
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
-
-	time.Sleep(500 * time.Millisecond)
 
 	// Forwarder state (protected by mutex for config watcher)
 	var fwdMu sync.Mutex
@@ -292,6 +302,9 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 			fmt.Fprintf(os.Stderr, "Warning: CDP forwarding disabled: %v\n", err)
 		}
 	}
+
+	// Track current upstream hosts for hot-reload detection
+	currentHosts := sortedUpstreamKeys(cfg.Upstream)
 
 	// Watch config file for changes
 	configPath := filepath.Join(workDir, "agent-creds.toml")
@@ -341,6 +354,18 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 							}
 							cdpPort = newCdpPort
 							fwdMu.Unlock()
+
+							// Handle upstream changes: regenerate configs and restart envoy
+							newHosts := sortedUpstreamKeys(newCfg.Upstream)
+							if !slices.Equal(newHosts, currentHosts) {
+								newGen, err := NewGenerator(scriptDir, newCfg)
+								if err == nil {
+									if err := newGen.Generate(); err == nil {
+										run("docker", "restart", envoyName)
+										currentHosts = newHosts
+									}
+								}
+							}
 						}
 					case _, ok := <-watcher.Errors:
 						if !ok {
@@ -352,17 +377,23 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		}
 	}
 
-	// Stop spinner
-	spinner.Stop()
-
-	// Run sandbox
-	args := []string{"run", "-it", "--rm",
+	// Build sandbox args
+	args := []string{"run", "--rm",
 		"--name", sandboxName,
-		"--network=container:" + containerName,
-		"-e", "CLAUDE_CONFIG_DIR=/home/devuser/.claude",
-		"-v", workDir + ":/workspace",
-		"-v", claudeConfigDir + ":/home/devuser/.claude",
 	}
+	// Network configuration depends on runtime:
+	// - runc/gvisor: share network namespace with sandbox-net container
+	// - firecracker: connect directly to network, host iptables handles filtering
+	if useInternalNetfilter {
+		args = append(args, "--network", networkName)
+	} else {
+		args = append(args, "--network=container:"+containerName)
+	}
+	args = append(args,
+		"-e", "CLAUDE_CONFIG_DIR=/home/devuser/.claude",
+		"-v", workDir+":/workspace",
+		"-v", claudeConfigDir+":/home/devuser/.claude",
+	)
 	// Add browser forwarding socket mount (always mount the path, forwarder can be toggled)
 	args = append(args, "-v", browserSockPath+":/run/browser-forward.sock")
 	if browserFwd != nil {
@@ -383,7 +414,7 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		args = append(args, "-v", agentCredsToml+":/workspace/agent-creds.toml:ro")
 	}
 
-	// Add gvisor runtime if configured (only for sandbox, not sandbox-net or envoy)
+	// Add custom runtime if configured (only for sandbox, not sandbox-net or envoy)
 	if rt := cfg.Sandbox.RuntimeArg(); rt != "" {
 		args = append(args, "--runtime="+rt)
 	}
@@ -391,14 +422,76 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	if sandboxImage == "" {
 		sandboxImage = "sandbox"
 	}
-	args = append(args, sandboxImage)
 
-	cmd := exec.Command("docker", args...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Run()
+	// Stop spinner before interactive session
+	spinner.Stop()
+
+	// For firecracker: start detached, setup host iptables, then attach
+	// For runc: run interactively in one step
+	if useInternalNetfilter {
+		// Start sandbox detached
+		detachedArgs := append([]string{}, args...)
+		detachedArgs = append(detachedArgs[:2], append([]string{"-d"}, detachedArgs[2:]...)...)
+		detachedArgs = append(detachedArgs, sandboxImage)
+
+		if err := run("docker", detachedArgs...); err != nil {
+			fmt.Fprintf(os.Stderr, "Error starting sandbox: %v\n", err)
+			cleanup()
+			os.Exit(1)
+		}
+
+		// Get IPs and setup host iptables
+		sandboxIP, err := GetContainerIP(sandboxName, networkName)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error getting sandbox IP: %v\n", err)
+			cleanup()
+			os.Exit(1)
+		}
+		envoyIP, err := GetContainerIP(envoyName, networkName)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error getting envoy IP: %v\n", err)
+			cleanup()
+			os.Exit(1)
+		}
+
+		hostFilter = NewHostNetFilter(slug, sandboxIP, envoyIP)
+		if err := hostFilter.Setup(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error setting up host network filter: %v\n", err)
+			cleanup()
+			os.Exit(1)
+		}
+
+		// Attach to sandbox interactively
+		cmd := exec.Command("docker", "attach", sandboxName)
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Run()
+	} else {
+		// Run sandbox interactively (original behavior)
+		args = append([]string{}, args...)
+		args = append(args[:2], append([]string{"-it"}, args[2:]...)...)
+		args = append(args, sandboxImage)
+
+		cmd := exec.Command("docker", args...)
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Run()
+	}
 
 	// Cleanup (owner responsibility)
+	if hostFilter != nil {
+		hostFilter.Cleanup()
+	}
 	cleanup()
+}
+
+func sortedUpstreamKeys(m map[string]UpstreamConfig) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }

@@ -41,6 +41,8 @@ RUN apt-get update && apt-get install -y \
     jq \
     tree \
     unzip \
+    # Network filtering (for firecracker runtime)
+    iptables \
     && rm -rf /var/lib/apt/lists/* \
     && rm -f /usr/lib/python*/EXTERNALLY-MANAGED
 
@@ -72,9 +74,6 @@ RUN groupadd --gid $USER_GID --force devuser || true \
 # Copy CA cert and add to system trust store
 COPY generated/certs/ca.crt /usr/local/share/ca-certificates/agent-creds-ca.crt
 RUN update-ca-certificates
-
-# Copy hosts file for runtime
-COPY generated/hosts /etc/proxy-hosts
 
 # Copy aenv binary
 COPY generated/aenv /usr/local/bin/aenv

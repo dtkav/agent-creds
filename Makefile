@@ -1,4 +1,6 @@
-.PHONY: up down deploy deploy-vault build test clean-certs binaries
+.PHONY: up down deploy deploy-vault build push build-local test clean-certs binaries
+
+REGISTRY ?= docker.system3.md
 
 # Docker Compose
 up:
@@ -13,8 +15,16 @@ deploy: deploy-vault
 deploy-vault:
 	cd vault && fly deploy --local-only --flycast
 
+# Build and push base sandbox image
 build:
-	docker build -t sandbox --build-arg USER_UID=$$(id -u) --build-arg USER_GID=$$(id -g) -f claude-dev/Dockerfile .
+	docker build -t $(REGISTRY)/sandbox -f claude-dev/Dockerfile .
+
+push: build
+	docker push $(REGISTRY)/sandbox
+
+# Build local customization layer (gitignored)
+build-local:
+	docker build -t sandbox-local -f local/Dockerfile .
 
 test:
 	bin/arun curl -v https://api.stripe.com/v1/customers -H "Authorization: Bearer $$(cat /creds/stripe)"

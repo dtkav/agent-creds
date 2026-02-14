@@ -53,18 +53,6 @@ RUN pip3 install --break-system-packages websockets
 RUN curl -fsSL https://go.dev/dl/go1.23.5.linux-amd64.tar.gz | tar -C /usr/local -xzf -
 ENV PATH="/usr/local/go/bin:${PATH}"
 
-# Build abduco from source
-RUN cd /tmp && \
-    git clone https://github.com/martanne/abduco.git && \
-    cd abduco && \
-    make && \
-    make install && \
-    cd / && rm -rf /tmp/abduco
-
-# Download igit binary (git with inverted .gitignore semantics)
-RUN curl -fsSL https://github.com/dtkav/igit/releases/download/v0.1.0/igit-linux-x64 -o /usr/local/bin/igit && \
-    chmod +x /usr/local/bin/igit
-
 # Create user with matching UID/GID
 RUN groupadd --gid $USER_GID --force devuser || true \
     && useradd --uid $USER_UID --gid $USER_GID -m devuser 2>/dev/null \

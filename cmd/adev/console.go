@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -88,14 +89,7 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	browserSockCleanup := filepath.Join(os.TempDir(), fmt.Sprintf("adev-%s-browser.sock", slug))
 	cdpSockCleanup := filepath.Join(os.TempDir(), fmt.Sprintf("adev-%s-cdp.sock", slug))
 
-	// Host filter (set later for firecracker runtime)
-	var hostFilter *HostNetFilter
-
 	cleanup := func() {
-		// Clean up host iptables rules first (if any)
-		if hostFilter != nil {
-			hostFilter.Cleanup()
-		}
 		run("docker", "rm", "-f", sandboxName)
 		run("docker", "rm", "-f", containerName)
 		run("docker", "rm", "-f", envoyName)
@@ -238,9 +232,10 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		}
 	}
 
-	// Start sandbox-net on per-sandbox network (not needed for firecracker - it runs iptables internally)
-	useInternalNetfilter := cfg.Sandbox.UsesInternalNetfilter()
-	if !useInternalNetfilter {
+	// Start sandbox-net for runc (gvisor starts it later with --network=host)
+	useHostNetfilter := cfg.Sandbox.UsesHostNetfilter()
+	if !useHostNetfilter {
+		// runc mode: sandbox-net on Docker network, sandbox will share its namespace
 		spinner.Status("starting network filter...")
 		if err := run("docker", "run", "-d", "--rm",
 			"--name", containerName,
@@ -359,10 +354,17 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		"--name", sandboxName,
 	}
 	// Network configuration depends on runtime:
-	// - runc/gvisor: share network namespace with sandbox-net container
-	// - firecracker: connect directly to network, host iptables handles filtering
-	if useInternalNetfilter {
+	// - runc: share network namespace with sandbox-net container
+	// - gvisor: connect directly to network, sandbox-net uses --network=host for iptables
+	if useHostNetfilter {
 		args = append(args, "--network", networkName)
+		// gVisor doesn't work with Docker's embedded DNS (127.0.0.11)
+		// Mount custom resolv.conf with external DNS servers
+		resolvConf := filepath.Join(scriptDir, "generated", "resolv.conf")
+		if !fileExists(resolvConf) {
+			os.WriteFile(resolvConf, []byte("nameserver 8.8.8.8\nnameserver 8.8.4.4\n"), 0644)
+		}
+		args = append(args, "-v", resolvConf+":/etc/resolv.conf:ro")
 	} else {
 		args = append(args, "--network=container:"+containerName)
 	}
@@ -400,43 +402,55 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		sandboxImage = "sandbox"
 	}
 
-	// Stop spinner before interactive session
-	spinner.Stop()
-
-	// For firecracker: start detached, setup host iptables, then attach
+	// For gvisor: start detached, start sandbox-net with --network=host, then attach
 	// For runc: run interactively in one step
-	if useInternalNetfilter {
+	if useHostNetfilter {
 		// Start sandbox detached
+		spinner.Status("starting sandbox...")
 		detachedArgs := append([]string{}, args...)
-		detachedArgs = append(detachedArgs[:2], append([]string{"-d"}, detachedArgs[2:]...)...)
+		detachedArgs = append(detachedArgs[:2], append([]string{"-dit"}, detachedArgs[2:]...)...)
 		detachedArgs = append(detachedArgs, sandboxImage)
 
 		if err := run("docker", detachedArgs...); err != nil {
+			spinner.Stop()
 			fmt.Fprintf(os.Stderr, "Error starting sandbox: %v\n", err)
 			cleanup()
 			os.Exit(1)
 		}
 
-		// Get IPs and setup host iptables
+		// Get IPs for host iptables setup
 		sandboxIP, err := GetContainerIP(sandboxName, networkName)
 		if err != nil {
+			spinner.Stop()
 			fmt.Fprintf(os.Stderr, "Error getting sandbox IP: %v\n", err)
 			cleanup()
 			os.Exit(1)
 		}
 		envoyIP, err := GetContainerIP(envoyName, networkName)
 		if err != nil {
+			spinner.Stop()
 			fmt.Fprintf(os.Stderr, "Error getting envoy IP: %v\n", err)
 			cleanup()
 			os.Exit(1)
 		}
 
-		hostFilter = NewHostNetFilter(slug, sandboxIP, envoyIP)
-		if err := hostFilter.Setup(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error setting up host network filter: %v\n", err)
+		// Start sandbox-net with --network=host to setup host iptables
+		spinner.Status("starting network filter...")
+		chainName := "ADEV-" + strings.ToUpper(slug)
+		if err := run("docker", "run", "-d", "--rm",
+			"--name", containerName,
+			"--network=host",
+			"--cap-add=NET_ADMIN",
+			"-v", scriptDir+"/claude-dev/sandbox-net/entrypoint-host.sh:/entrypoint.sh:ro",
+			"alpine", "sh", "-c", fmt.Sprintf("apk add --no-cache iptables && /entrypoint.sh %s %s %s", sandboxIP, envoyIP, chainName)); err != nil {
+			spinner.Stop()
+			fmt.Fprintf(os.Stderr, "Error starting sandbox-net: %v\n", err)
 			cleanup()
 			os.Exit(1)
 		}
+
+		// Stop spinner before interactive session
+		spinner.Stop()
 
 		// Attach to sandbox interactively
 		cmd := exec.Command("docker", "attach", sandboxName)
@@ -445,6 +459,9 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		cmd.Stderr = os.Stderr
 		cmd.Run()
 	} else {
+		// Stop spinner before interactive session
+		spinner.Stop()
+
 		// Run sandbox interactively (original behavior)
 		args = append([]string{}, args...)
 		args = append(args[:2], append([]string{"-it"}, args[2:]...)...)
@@ -457,10 +474,7 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		cmd.Run()
 	}
 
-	// Cleanup (owner responsibility)
-	if hostFilter != nil {
-		hostFilter.Cleanup()
-	}
+	// Cleanup
 	cleanup()
 }
 

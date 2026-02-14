@@ -432,6 +432,11 @@ func killInstance(slug string) {
 	envoyName := "adev-" + slug + "-envoy"
 	networkName := "adev-" + slug
 
+	// Stop containers gracefully (allows cleanup traps to run)
+	exec.Command("docker", "stop", netName).Run()
+	exec.Command("docker", "stop", sandboxName).Run()
+	exec.Command("docker", "stop", envoyName).Run()
+
 	// Remove containers
 	exec.Command("docker", "rm", "-f", sandboxName).Run()
 	exec.Command("docker", "rm", "-f", netName).Run()

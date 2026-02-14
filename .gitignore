@@ -6,6 +6,9 @@
 .igit
 .igitignore
 
+# Dev harness (tracked by igit)
+.claude/
+
 # IDE
 .idea/
 .vscode/
@@ -33,6 +36,9 @@ agent-creds.toml
 
 # Sandbox claude config mount directory
 claude-dev/claude-config/
+
+# Local sandbox customizations
+local/
 
 # Generated files (run `make generate` to create)
 generated/

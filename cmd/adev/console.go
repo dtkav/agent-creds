@@ -162,42 +162,18 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		cmd.Run()
 	}
 
-	// Build sandbox if needed
+	// Get sandbox image (default to registry)
 	sandboxImage := cfg.Sandbox.Image
 	if sandboxImage == "" {
-		sandboxImage = "sandbox"
-		needsBuild := !imageExists(sandboxImage)
-		if !needsBuild {
-			marker := "generated/.sandbox-built"
-			needsBuild = fileNewer("claude-dev/Dockerfile", marker) ||
-				fileNewer("claude-dev/entrypoint.sh", marker) ||
-				fileNewer("generated/aenv", marker) ||
-				fileNewer("generated/certs/ca.crt", marker)
-		}
-		if needsBuild {
-			spinner.Status("building sandbox...")
-			uid := fmt.Sprintf("%d", os.Getuid())
-			gid := fmt.Sprintf("%d", os.Getgid())
-			run("docker", "build", "-q", "-t", sandboxImage,
-				"--build-arg", "USER_UID="+uid,
-				"--build-arg", "USER_GID="+gid,
-				"-f", "claude-dev/Dockerfile", ".")
-			os.WriteFile("generated/.sandbox-built", []byte{}, 0644)
-		}
+		sandboxImage = "docker.system3.md/sandbox"
 	}
-
-	// Build sandbox-net if needed
-	needsNetBuild := !imageExists("sandbox-net")
-	if !needsNetBuild {
-		marker := "generated/.sandbox-net-built"
-		needsNetBuild = fileNewer("claude-dev/sandbox-net/Dockerfile", marker) ||
-			fileNewer("claude-dev/sandbox-net/entrypoint.sh", marker)
-	}
-	if needsNetBuild {
-		spinner.Status("building sandbox-net...")
-		run("docker", "build", "-q", "-t", "sandbox-net",
-			"-f", "claude-dev/sandbox-net/Dockerfile", "claude-dev/sandbox-net")
-		os.WriteFile("generated/.sandbox-net-built", []byte{}, 0644)
+	if !imageExists(sandboxImage) {
+		spinner.Status("pulling sandbox image...")
+		if err := run("docker", "pull", sandboxImage); err != nil {
+			spinner.Stop()
+			fmt.Fprintf(os.Stderr, "Error: image %s not found locally and pull failed: %v\n", sandboxImage, err)
+			os.Exit(1)
+		}
 	}
 
 	// Creds mount
@@ -270,7 +246,8 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 			"--name", containerName,
 			"--network", networkName,
 			"--cap-add=NET_ADMIN",
-			"sandbox-net"); err != nil {
+			"-v", scriptDir+"/claude-dev/sandbox-net/entrypoint.sh:/entrypoint.sh:ro",
+			"alpine", "sh", "-c", "apk add --no-cache iptables ip6tables && /entrypoint.sh"); err != nil {
 			spinner.Stop()
 			fmt.Fprintf(os.Stderr, "Error starting sandbox-net: %v\n", err)
 			os.Exit(1)

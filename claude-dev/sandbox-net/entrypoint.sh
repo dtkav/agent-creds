@@ -1,9 +1,9 @@
 #!/bin/sh
 set -e
 
-# Resolve envoy IPv4 and IPv6 addresses
-PROXY_IP4=$(getent ahostsv4 envoy | head -1 | awk '{print $1}')
-PROXY_IP6=$(getent ahostsv6 envoy | head -1 | awk '{print $1}')
+# Resolve envoy IPv4 and IPv6 addresses using nslookup (available in busybox)
+PROXY_IP4=$(nslookup -type=A envoy 2>/dev/null | awk '/^Address [0-9]+:/ && !/127\.0\.0/ {print $3; exit}')
+PROXY_IP6=$(nslookup -type=AAAA envoy 2>/dev/null | awk '/^Address [0-9]+:/ && /:/ {print $3; exit}')
 
 if [ -z "$PROXY_IP4" ] && [ -z "$PROXY_IP6" ]; then
     echo "ERROR: Could not resolve 'envoy' hostname"

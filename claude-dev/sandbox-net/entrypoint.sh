@@ -1,9 +1,10 @@
 #!/bin/sh
 set -e
 
-# Resolve envoy IPv4 and IPv6 addresses using nslookup (available in busybox)
-PROXY_IP4=$(nslookup -type=A envoy 2>/dev/null | awk '/^Address [0-9]+:/ && !/127\.0\.0/ {print $3; exit}')
-PROXY_IP6=$(nslookup -type=AAAA envoy 2>/dev/null | awk '/^Address [0-9]+:/ && /:/ {print $3; exit}')
+# Resolve envoy addresses using getent (more reliable with Docker's embedded DNS)
+# getent returns lines like: "172.26.0.2  envoy" or "fd42:...::2  envoy"
+PROXY_IP4=$(getent ahostsv4 envoy 2>/dev/null | awk '{print $1; exit}')
+PROXY_IP6=$(getent ahostsv6 envoy 2>/dev/null | awk '{print $1; exit}')
 
 if [ -z "$PROXY_IP4" ] && [ -z "$PROXY_IP6" ]; then
     echo "ERROR: Could not resolve 'envoy' hostname"

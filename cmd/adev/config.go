@@ -43,9 +43,17 @@ func (s SandboxConfig) RuntimeArg() string {
 	switch s.Runtime {
 	case "gvisor":
 		return "runsc"
+	case "firecracker":
+		return "kata-fc"
 	default:
 		return "" // use docker default (runc)
 	}
+}
+
+// UsesInternalNetfilter returns true if the runtime requires iptables inside the container
+// (as opposed to using a separate sandbox-net container with shared network namespace).
+func (s SandboxConfig) UsesInternalNetfilter() bool {
+	return s.Runtime == "firecracker"
 }
 
 type VaultConfig struct {

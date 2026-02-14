@@ -16,13 +16,14 @@ type ContainerInfo struct {
 
 // Instance represents a running adev instance.
 type Instance struct {
-	Name       string
-	Slug       string
-	Status     string // "running", "partial", "stopped"
-	Sandbox    *ContainerInfo
-	Envoy      *ContainerInfo
-	Net        *ContainerInfo
-	HasNetwork bool
+	Name              string
+	Slug              string
+	Status            string // "running", "partial", "stopped"
+	Sandbox           *ContainerInfo
+	Envoy             *ContainerInfo
+	Net               *ContainerInfo
+	HasNetwork        bool
+	UsesInternalNetfilter bool // true if sandbox uses direct network (firecracker), false if it needs net container
 }
 
 // InstanceManager handles instance detection and lifecycle.
@@ -120,12 +121,26 @@ func (m *InstanceManager) ListInstances() []Instance {
 			inst.HasNetwork = true
 		}
 
+		// Detect if sandbox uses internal netfilter (firecracker) by checking network mode
+		// If network mode is "container:X", it needs the net container
+		// If network mode is a network name, it uses internal netfilter
+		if inst.Sandbox != nil {
+			out, err := exec.Command("docker", "inspect", "--format", "{{.HostConfig.NetworkMode}}", inst.Sandbox.Name).Output()
+			if err == nil {
+				networkMode := strings.TrimSpace(string(out))
+				inst.UsesInternalNetfilter = !strings.HasPrefix(networkMode, "container:")
+			}
+		}
+
 		// Determine status
 		sandboxRunning := inst.Sandbox != nil && inst.Sandbox.Status == "running"
 		envoyRunning := inst.Envoy != nil && inst.Envoy.Status == "running"
 		netRunning := inst.Net != nil && inst.Net.Status == "running"
 
-		if sandboxRunning && envoyRunning && netRunning {
+		// For firecracker (internal netfilter), net container is not needed
+		netOK := inst.UsesInternalNetfilter || netRunning
+
+		if sandboxRunning && envoyRunning && netOK {
 			inst.Status = "running"
 		} else if sandboxRunning || envoyRunning || netRunning {
 			inst.Status = "partial"
@@ -153,9 +168,11 @@ func (m *InstanceManager) GetInstance(slug string) *Instance {
 	return nil
 }
 
-// CanAttach returns true if the instance has a running sandbox.
+// CanAttach returns true if the instance is fully healthy and can be attached to.
+// For non-firecracker mode, this requires sandbox, envoy, and net containers all running.
+// For firecracker mode, only sandbox and envoy are needed.
 func (m *InstanceManager) CanAttach(inst *Instance) bool {
-	return inst != nil && inst.Sandbox != nil && inst.Sandbox.Status == "running"
+	return inst != nil && inst.Status == "running"
 }
 
 // AttachToInstance attaches to a running sandbox container.
@@ -171,7 +188,7 @@ func (m *InstanceManager) AttachToInstance(inst *Instance) error {
 	return cmd.Run()
 }
 
-// CleanupInstance removes all containers and network for an instance.
+// CleanupInstance removes all containers, network, and sockets for an instance.
 func (m *InstanceManager) CleanupInstance(inst *Instance) error {
 	sandboxName := "adev-" + inst.Slug + "-sandbox"
 	netName := "adev-" + inst.Slug + "-net"
@@ -185,6 +202,12 @@ func (m *InstanceManager) CleanupInstance(inst *Instance) error {
 
 	// Remove network
 	exec.Command("docker", "network", "rm", networkName).Run()
+
+	// Remove sockets
+	browserSock := fmt.Sprintf("/tmp/adev-%s-browser.sock", inst.Slug)
+	cdpSock := fmt.Sprintf("/tmp/adev-%s-cdp.sock", inst.Slug)
+	os.Remove(browserSock)
+	os.Remove(cdpSock)
 
 	return nil
 }

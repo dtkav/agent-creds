@@ -148,15 +148,26 @@ func startBrowserForward(netContainerName, slug string, targets []BrowserTargetC
 			return
 		}
 
-		// If the URL points to localhost with a port, set up a TCP proxy
+		// If the URL or its redirect_uri points to localhost with a port, set up a TCP proxy
 		// so the host browser's OAuth callback can reach the sandbox container.
 		if parsed, err := url.Parse(rawURL); err == nil {
+			// Check main URL
 			host := parsed.Hostname()
 			port := parsed.Port()
 			if port != "" && (host == "localhost" || host == "127.0.0.1") {
 				go proxyLocalPort(netContainerName, port)
-				// Small delay to let the listener start before the browser navigates back
 				time.Sleep(100 * time.Millisecond)
+			}
+			// Check redirect_uri parameter (for OAuth flows)
+			if redirectURI := parsed.Query().Get("redirect_uri"); redirectURI != "" {
+				if redirectParsed, err := url.Parse(redirectURI); err == nil {
+					host := redirectParsed.Hostname()
+					port := redirectParsed.Port()
+					if port != "" && (host == "localhost" || host == "127.0.0.1") {
+						go proxyLocalPort(netContainerName, port)
+						time.Sleep(100 * time.Millisecond)
+					}
+				}
 			}
 		}
 
@@ -302,6 +313,33 @@ Examples:
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// GetContainerIP returns the IP address of a container on a specific network.
+func GetContainerIP(containerName, networkName string) (string, error) {
+	template := fmt.Sprintf(`{{(index .NetworkSettings.Networks "%s").IPAddress}}`, networkName)
+	out, err := exec.Command("docker", "inspect", "-f", template, containerName).Output()
+	if err != nil {
+		return "", err
+	}
+	ip := strings.TrimSpace(string(out))
+	if ip == "" {
+		return "", fmt.Errorf("no IP found for %s on network %s", containerName, networkName)
+	}
+	return ip, nil
+}
+
+// GetNetworkGateway returns the gateway IP of a Docker network.
+func GetNetworkGateway(networkName string) (string, error) {
+	out, err := exec.Command("docker", "network", "inspect", "-f", "{{(index .IPAM.Config 0).Gateway}}", networkName).Output()
+	if err != nil {
+		return "", err
+	}
+	ip := strings.TrimSpace(string(out))
+	if ip == "" {
+		return "", fmt.Errorf("no gateway found for network %s", networkName)
+	}
+	return ip, nil
 }
 
 func contains(s, substr string) bool {

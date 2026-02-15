@@ -56,12 +56,21 @@ var (
 	config       Config
 	allowedIDs   = make(map[string]bool)
 	allowedMu    sync.RWMutex
-	sockPath     = "/run/cdp-forward.sock"
+	sockPath     string
 	listenPort   int
 	upgrader     = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool { return true },
 	}
 )
+
+func init() {
+	// Check /tmp first (gVisor vsock-bridge), then /run (runc bind mount)
+	if _, err := os.Stat("/tmp/cdp-forward.sock"); err == nil {
+		sockPath = "/tmp/cdp-forward.sock"
+	} else {
+		sockPath = "/run/cdp-forward.sock"
+	}
+}
 
 func main() {
 	listenPort = 9222

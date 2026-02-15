@@ -156,6 +156,16 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		cmd.Run()
 	}
 
+	// Build vsock-bridge if needed (for gVisor mode)
+	vsockBridgeBin := "generated/vsock-bridge"
+	vsockBridgeSrc := "cmd/vsock-bridge/main.go"
+	if !fileExists(vsockBridgeBin) || fileNewer(vsockBridgeSrc, vsockBridgeBin) {
+		spinner.Status("building vsock-bridge...")
+		cmd := exec.Command("go", "build", "-o", "../../generated/vsock-bridge", ".")
+		cmd.Dir = "cmd/vsock-bridge"
+		cmd.Run()
+	}
+
 	// Get sandbox image (default to registry)
 	sandboxImage := cfg.Sandbox.Image
 	if sandboxImage == "" {
@@ -234,6 +244,20 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 
 	// Start sandbox-net for runc (gvisor starts it later with --network=host)
 	useHostNetfilter := cfg.Sandbox.UsesHostNetfilter()
+
+	// Get gateway IP for gVisor mode (browser/cdp forward listens here)
+	var gatewayIP string
+	if useHostNetfilter {
+		var err error
+		gatewayIP, err = GetNetworkGateway(networkName)
+		if err != nil {
+			spinner.Stop()
+			fmt.Fprintf(os.Stderr, "Error getting gateway IP: %v\n", err)
+			cleanup()
+			os.Exit(1)
+		}
+	}
+
 	if !useHostNetfilter {
 		// runc mode: sandbox-net on Docker network, sandbox will share its namespace
 		spinner.Status("starting network filter...")
@@ -257,19 +281,34 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	cdpSockPath := filepath.Join(os.TempDir(), fmt.Sprintf("adev-%s-cdp.sock", slug))
 	cdpPort := int(cfg.Sandbox.UseHostBrowserCDP)
 
-	// Start browser-forward server with instance-based socket path
+	// Allocate TCP ports for gVisor mode (bound to 127.0.0.1, DNAT'd by sandbox-net)
+	tcpBrowserPort, tcpCDPPort := AllocateTCPPorts(slug)
+
+	// Start browser-forward server
 	if cfg.Sandbox.UseHostBrowserEnabled() {
 		spinner.Status("starting browser forward...")
-		browserFwd, err = startBrowserForward(containerName, slug, cfg.BrowserTargets)
+		if useHostNetfilter {
+			// gVisor: use TCP on gateway IP (directly reachable from sandbox)
+			browserFwd, err = startBrowserForwardTCP(sandboxName, gatewayIP, tcpBrowserPort, cfg.BrowserTargets)
+		} else {
+			// runc: use Unix socket
+			browserFwd, err = startBrowserForward(containerName, slug, cfg.BrowserTargets)
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: browser forwarding disabled: %v\n", err)
 		}
 	}
 
-	// Start CDP forward with instance-based socket path
+	// Start CDP forward
 	if cfg.Sandbox.UseHostBrowserCDPEnabled() {
 		spinner.Status("starting CDP forward...")
-		cdpFwd, err = startCDPForward(slug, cdpPort)
+		if useHostNetfilter {
+			// gVisor: use TCP on gateway IP (directly reachable from sandbox)
+			cdpFwd, err = startCDPForwardTCP(gatewayIP, tcpCDPPort, cdpPort)
+		} else {
+			// runc: use Unix socket
+			cdpFwd, err = startCDPForward(slug, cdpPort)
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: CDP forwarding disabled: %v\n", err)
 		}
@@ -304,7 +343,11 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 							wantBrowser := newCfg.Sandbox.UseHostBrowserEnabled()
 							haveBrowser := browserFwd != nil
 							if wantBrowser && !haveBrowser {
-								browserFwd, _ = startBrowserForward(containerName, slug, newCfg.BrowserTargets)
+								if useHostNetfilter {
+									browserFwd, _ = startBrowserForwardTCP(sandboxName, gatewayIP, tcpBrowserPort, newCfg.BrowserTargets)
+								} else {
+									browserFwd, _ = startBrowserForward(containerName, slug, newCfg.BrowserTargets)
+								}
 							} else if !wantBrowser && haveBrowser {
 								browserFwd.Close()
 								browserFwd = nil
@@ -315,14 +358,22 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 							wantCDP := newCfg.Sandbox.UseHostBrowserCDPEnabled()
 							haveCDP := cdpFwd != nil
 							if wantCDP && !haveCDP {
-								cdpFwd, _ = startCDPForward(slug, newCdpPort)
+								if useHostNetfilter {
+									cdpFwd, _ = startCDPForwardTCP(gatewayIP, tcpCDPPort, newCdpPort)
+								} else {
+									cdpFwd, _ = startCDPForward(slug, newCdpPort)
+								}
 							} else if !wantCDP && haveCDP {
 								cdpFwd.Close()
 								cdpFwd = nil
 							} else if wantCDP && haveCDP && newCdpPort != cdpPort {
 								// Port changed, restart
 								cdpFwd.Close()
-								cdpFwd, _ = startCDPForward(slug, newCdpPort)
+								if useHostNetfilter {
+									cdpFwd, _ = startCDPForwardTCP(gatewayIP, tcpCDPPort, newCdpPort)
+								} else {
+									cdpFwd, _ = startCDPForward(slug, newCdpPort)
+								}
 							}
 							cdpPort = newCdpPort
 							fwdMu.Unlock()
@@ -373,15 +424,27 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		"-v", workDir+":/workspace",
 		"-v", claudeConfigDir+":/home/devuser/.claude",
 	)
-	// Add browser forwarding socket mount (always mount the path, forwarder can be toggled)
-	args = append(args, "-v", browserSockPath+":/run/browser-forward.sock")
-	if browserFwd != nil {
-		args = append(args, "-e", "BROWSER=/usr/local/bin/open-browser")
-	}
-	// Add CDP forwarding socket mount (always mount the path, forwarder can be toggled)
-	args = append(args, "-v", cdpSockPath+":/run/cdp-forward.sock")
-	if cdpFwd != nil {
-		args = append(args, "-e", fmt.Sprintf("CDP_PORT=%d", cdpPort))
+	// Browser and CDP forwarding: TCP for gVisor, Unix sockets for runc
+	if useHostNetfilter {
+		// gVisor: use TCP via DNAT (ports passed as env vars for tcp-bridge)
+		if browserFwd != nil {
+			args = append(args, "-e", fmt.Sprintf("TCP_BROWSER_PORT=%d", tcpBrowserPort))
+			args = append(args, "-e", "BROWSER=/usr/local/bin/open-browser")
+		}
+		if cdpFwd != nil {
+			args = append(args, "-e", fmt.Sprintf("TCP_CDP_PORT=%d", tcpCDPPort))
+			args = append(args, "-e", fmt.Sprintf("CDP_PORT=%d", cdpPort))
+		}
+	} else {
+		// runc: mount Unix sockets directly
+		args = append(args, "-v", browserSockPath+":/run/browser-forward.sock")
+		if browserFwd != nil {
+			args = append(args, "-e", "BROWSER=/usr/local/bin/open-browser")
+		}
+		args = append(args, "-v", cdpSockPath+":/run/cdp-forward.sock")
+		if cdpFwd != nil {
+			args = append(args, "-e", fmt.Sprintf("CDP_PORT=%d", cdpPort))
+		}
 	}
 	args = append(args, credsMounts...)
 	args = append(args, pipCacheMounts...)

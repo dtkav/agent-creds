@@ -49,6 +49,10 @@ RUN apt-get update && apt-get install -y \
 # Install Python packages
 RUN pip3 install --break-system-packages websockets
 
+# Install abduco (session management)
+RUN curl -fsSL https://github.com/martanne/abduco/releases/download/v0.6/abduco-0.6.tar.gz | tar -xzf - \
+    && cd abduco-0.6 && make && make install && cd .. && rm -rf abduco-0.6
+
 # Install Go
 RUN curl -fsSL https://go.dev/dl/go1.23.5.linux-amd64.tar.gz | tar -C /usr/local -xzf -
 ENV PATH="/usr/local/go/bin:${PATH}"
@@ -77,6 +81,10 @@ RUN chmod +x /usr/local/bin/open-browser
 # Copy cdp-proxy binary
 COPY generated/cdp-proxy /usr/local/bin/cdp-proxy
 RUN chmod +x /usr/local/bin/cdp-proxy
+
+# Copy vsock-bridge binary (for gVisor mode)
+COPY generated/vsock-bridge /usr/local/bin/vsock-bridge
+RUN chmod +x /usr/local/bin/vsock-bridge
 
 # Create overlay directories
 RUN mkdir -p /src-ro /src-upper /src-work /workspace \

@@ -19,7 +19,14 @@ fi
 NAT_CHAIN="${CHAIN_NAME}-NAT"
 FILTER_CHAIN="${CHAIN_NAME}-FILTER"
 
-echo "Setting up host iptables: sandbox=$SANDBOX_IP envoy=$ENVOY_IP chain=$CHAIN_NAME"
+# Get the gateway IP (first IP on the bridge interface for the sandbox subnet)
+GATEWAY_IP=$(ip route | grep -F "$SANDBOX_IP" | head -1 | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')
+if [ -z "$GATEWAY_IP" ]; then
+    # Fallback: derive from sandbox IP (assume .1 gateway)
+    GATEWAY_IP=$(echo "$SANDBOX_IP" | sed 's/\.[0-9]*$/.1/')
+fi
+
+echo "Setting up host iptables: sandbox=$SANDBOX_IP envoy=$ENVOY_IP gateway=$GATEWAY_IP chain=$CHAIN_NAME"
 
 cleanup() {
     echo "Cleaning up iptables rules..."
@@ -41,8 +48,9 @@ trap cleanup EXIT INT TERM
 # Create NAT chain for DNAT rules
 iptables -t nat -N "$NAT_CHAIN" 2>/dev/null || iptables -t nat -F "$NAT_CHAIN"
 
-# NAT rules: redirect all TCP to envoy (but not if already going to envoy)
+# NAT rules: redirect all TCP to envoy (but not if going to envoy or gateway)
 iptables -t nat -A "$NAT_CHAIN" -d "$ENVOY_IP" -j RETURN
+iptables -t nat -A "$NAT_CHAIN" -d "$GATEWAY_IP" -j RETURN
 iptables -t nat -A "$NAT_CHAIN" -p tcp -j DNAT --to-destination "$ENVOY_IP:443"
 
 # Insert into PREROUTING for traffic from sandbox
@@ -54,7 +62,8 @@ iptables -t nat -A POSTROUTING -s "$SANDBOX_IP" -d "$ENVOY_IP" -j MASQUERADE
 # Create filter chain for DROP rules
 iptables -N "$FILTER_CHAIN" 2>/dev/null || iptables -F "$FILTER_CHAIN"
 
-# Filter rules: allow DNS, envoy, established; drop rest
+# Filter rules: allow gateway (for browser/cdp forward), DNS, envoy, established; drop rest
+iptables -A "$FILTER_CHAIN" -d "$GATEWAY_IP" -j ACCEPT
 iptables -A "$FILTER_CHAIN" -d "$ENVOY_IP" -j ACCEPT
 iptables -A "$FILTER_CHAIN" -p udp --dport 53 -j ACCEPT
 iptables -A "$FILTER_CHAIN" -p tcp --dport 53 -j ACCEPT

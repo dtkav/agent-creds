@@ -7,5 +7,15 @@ if [ -z "$url" ]; then
     exit 1
 fi
 
+# Check /tmp first (gVisor vsock-bridge), then /run (runc bind mount)
+if [ -S /tmp/browser-forward.sock ]; then
+    sock=/tmp/browser-forward.sock
+elif [ -S /run/browser-forward.sock ]; then
+    sock=/run/browser-forward.sock
+else
+    echo "No browser-forward socket found" >&2
+    exit 1
+fi
+
 # Use -G --data-urlencode so curl properly encodes the URL parameter
-curl -sf -G --data-urlencode "url=$url" --unix-socket /run/browser-forward.sock "http://localhost/open" >/dev/null 2>&1 &
+curl -sf -G --data-urlencode "url=$url" --unix-socket "$sock" "http://localhost/open" >/dev/null 2>&1 &

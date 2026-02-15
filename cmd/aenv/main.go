@@ -265,9 +265,13 @@ func renderTokenLine(t TokenInfo) string {
 }
 
 func checkBrowserForward() string {
-	sock := "/run/browser-forward.sock"
+	// Check /tmp first (gVisor vsock-bridge), then /run (runc bind mount)
+	sock := "/tmp/browser-forward.sock"
 	if _, err := os.Stat(sock); err != nil {
-		return ""
+		sock = "/run/browser-forward.sock"
+		if _, err := os.Stat(sock); err != nil {
+			return ""
+		}
 	}
 	// Try connecting to verify it's alive
 	conn, err := net.DialTimeout("unix", sock, 500*time.Millisecond)
@@ -326,14 +330,18 @@ func checkCDP() CDPInfo {
 	}
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	sock := "/run/cdp-forward.sock"
+	// Check /tmp first (gVisor vsock-bridge), then /run (runc bind mount)
+	sock := "/tmp/cdp-forward.sock"
 	if _, err := os.Stat(sock); err != nil {
-		// Also check if cdp-proxy is listening directly
-		conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
-		if err != nil {
-			return CDPInfo{}
+		sock = "/run/cdp-forward.sock"
+		if _, err := os.Stat(sock); err != nil {
+			// Also check if cdp-proxy is listening directly
+			conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+			if err != nil {
+				return CDPInfo{}
+			}
+			conn.Close()
 		}
-		conn.Close()
 	}
 
 	client := &http.Client{Timeout: time.Second}

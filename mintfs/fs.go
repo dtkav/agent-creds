@@ -94,8 +94,8 @@ func attenuateToken(cfg CredentialConfig) (string, error) {
 	// Decode the base token
 	token := strings.TrimSpace(cfg.BaseToken)
 
-	// Strip sk_ prefix and decode
-	if !strings.HasPrefix(token, "sk_") {
+	// Strip prefix and decode
+	if !strings.HasPrefix(token, tokenPrefix) {
 		return "", syscall.EINVAL
 	}
 

@@ -64,7 +64,7 @@ var (
 	indent = lipgloss.NewStyle().PaddingLeft(2)
 )
 
-const TokenPrefix = "sk_"
+const TokenPrefix = "acm_"
 
 const (
 	CavAPIHost   macaroon.CaveatType = 1<<32 + 1

@@ -103,7 +103,7 @@ func (v *Verifier) VerifyRequest(authHeader string, access *Access) *VerifyResul
 }
 
 // extractTokens extracts the main token and any discharge tokens from an Authorization header
-// Supports: "Bearer sk_main,sk_discharge1,sk_discharge2" or just "sk_main,sk_discharge"
+// Supports: "Bearer acm_main,acm_discharge1,acm_discharge2" or just "acm_main,acm_discharge"
 // Returns: main token, slice of discharge tokens, error
 func extractTokens(header string) (string, []string, error) {
 	if header == "" {
@@ -146,7 +146,7 @@ func extractTokens(header string) (string, []string, error) {
 }
 
 // extractToken extracts a single token from an Authorization header (legacy, for simple cases)
-// Supports: "Bearer sk_xxx" or just "sk_xxx"
+// Supports: "Bearer acm_xxx" or just "acm_xxx"
 func extractToken(header string) (string, error) {
 	main, _, err := extractTokens(header)
 	return main, err

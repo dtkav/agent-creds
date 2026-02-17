@@ -9,7 +9,7 @@ import (
 // Token represents a stored token (.akey content)
 type Token struct {
 	ID          string // Token name (e.g., "stripe-prod")
-	Macaroon    string // The sk_xxx token
+	Macaroon    string // The acm_xxx token
 	Description string
 	CreatedAt   time.Time
 	CreatedBy   []byte // User ID who created it

@@ -235,7 +235,8 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		}
 	}
 
-	// Start sandbox-net for runc (gvisor starts it later with --network=host)
+	// gVisor (default): sandbox-net starts later with --network=host
+	// runc: sandbox-net starts now, sandbox shares its network namespace
 	useHostNetfilter := cfg.Sandbox.UsesHostNetfilter()
 
 	// Get gateway IP (browser/cdp forward listens here, reachable from containers)
@@ -367,8 +368,8 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		"--name", sandboxName,
 	}
 	// Network configuration depends on runtime:
+	// - gvisor (default): connect directly to network, sandbox-net uses --network=host
 	// - runc: share network namespace with sandbox-net container
-	// - gvisor: connect directly to network, sandbox-net uses --network=host for iptables
 	if useHostNetfilter {
 		args = append(args, "--network", networkName)
 		// gVisor doesn't work with Docker's embedded DNS (127.0.0.11)
@@ -414,8 +415,8 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		sandboxImage = "sandbox"
 	}
 
-	// For gvisor: start detached, start sandbox-net with --network=host, then attach
-	// For runc: run interactively in one step
+	// gvisor (default): start detached, start sandbox-net with --network=host, then attach
+	// runc: run interactively in one step
 	if useHostNetfilter {
 		// Start sandbox detached
 		spinner.Status("starting sandbox...")

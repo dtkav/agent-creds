@@ -30,7 +30,7 @@ func (c *CDPPort) UnmarshalTOML(data any) error {
 type SandboxConfig struct {
 	Name              string  `toml:"name"`
 	Image             string  `toml:"image"`
-	Runtime           string  `toml:"runtime"` // "", "runc", or "gvisor"
+	Runtime           string  `toml:"runtime"` // "runc" or "gvisor" (default: gvisor)
 	UseHostBrowser    *bool   `toml:"use_host_browser"`     // default true
 	UseHostBrowserCDP CDPPort `toml:"use_host_browser_cdp"` // 0=disabled, port number=enabled
 }
@@ -38,20 +38,20 @@ type SandboxConfig struct {
 func (s SandboxConfig) UseHostBrowserEnabled() bool    { return s.UseHostBrowser == nil || *s.UseHostBrowser }
 func (s SandboxConfig) UseHostBrowserCDPEnabled() bool { return s.UseHostBrowserCDP > 0 }
 
-// RuntimeArg returns the --runtime flag value for docker, or empty if default.
+// RuntimeArg returns the --runtime flag value for docker.
+// Default is gVisor (runsc), explicit "runc" uses docker default.
 func (s SandboxConfig) RuntimeArg() string {
-	switch s.Runtime {
-	case "gvisor":
-		return "runsc"
-	default:
-		return "" // use docker default (runc)
+	if s.Runtime == "runc" {
+		return "" // use docker default
 	}
+	return "runsc" // gvisor is default
 }
 
-// UsesHostNetfilter returns true if the runtime requires host-side iptables
-// (gVisor can't share network namespace, so sandbox-net runs with --network=host).
+// UsesHostNetfilter returns true if the runtime requires host-side iptables.
+// gVisor can't share network namespace, so sandbox-net runs with --network=host.
+// Only runc can share network namespace with sandbox-net container.
 func (s SandboxConfig) UsesHostNetfilter() bool {
-	return s.Runtime == "gvisor"
+	return s.Runtime != "runc"
 }
 
 type VaultConfig struct {

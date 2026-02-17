@@ -18,7 +18,7 @@ fi
 
 # Start tcp-bridge if in gVisor mode (creates Unix sockets that proxy to TCP)
 if [ -n "$TCP_BROWSER_PORT" ] || [ -n "$TCP_CDP_PORT" ]; then
-    vsock-bridge &
+    tcp-bridge &
     sleep 0.2  # Wait for sockets to be created
 fi
 

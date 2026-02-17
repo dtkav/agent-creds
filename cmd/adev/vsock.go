@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
 	"time"
 )
@@ -14,7 +15,7 @@ import (
 // AllocateTCPPorts returns deterministic TCP ports for an instance.
 // Browser: 50000 + (hash(slug) % 1000)
 // CDP: 51000 + (hash(slug) % 1000)
-func AllocateTCPPorts(slug string) (browser int, cdp int) {
+func AllocateTCPPorts(slug string) (browser, cdp int) {
 	h := fnv.New32a()
 	h.Write([]byte(slug))
 	offset := int(h.Sum32() % 1000)
@@ -23,7 +24,8 @@ func AllocateTCPPorts(slug string) (browser int, cdp int) {
 
 // startBrowserForwardTCP listens on a TCP port for browser forward requests.
 // In gVisor mode, binds to gateway IP so sandbox can reach it directly.
-// sandboxContainerName is used for OAuth callback proxying (to reach the sandbox).
+// sandboxContainerName is used for OAuth callback proxying on the host side.
+// tcp-bridge inside the container handles the container side (0.0.0.0 -> localhost).
 func startBrowserForwardTCP(sandboxContainerName string, bindIP string, port int, targets []BrowserTargetConfig) (*ForwardState, error) {
 	addr := fmt.Sprintf("%s:%d", bindIP, port)
 	listener, err := net.Listen("tcp", addr)
@@ -51,24 +53,29 @@ func startBrowserForwardTCP(sandboxContainerName string, bindIP string, port int
 			return
 		}
 
-		// If the URL or its redirect_uri points to localhost with a port, set up a TCP proxy
-		// so the host browser's OAuth callback can reach the sandbox container.
+		// Extract localhost callback ports and set up host-side proxy.
+		// tcp-bridge inside the container sets up the container-side proxy.
 		if parsed, err := url.Parse(rawURL); err == nil {
 			// Check main URL
-			host := parsed.Hostname()
-			port := parsed.Port()
-			if port != "" && (host == "localhost" || host == "127.0.0.1") {
-				go proxyLocalPort(sandboxContainerName, port)
-				time.Sleep(100 * time.Millisecond)
+			if port := parsed.Port(); port != "" {
+				host := parsed.Hostname()
+				if host == "localhost" || host == "127.0.0.1" {
+					fmt.Fprintf(os.Stderr, "[browser-fwd] main URL has localhost:%s\n", port)
+					go proxyLocalPort(sandboxContainerName, port)
+					time.Sleep(100 * time.Millisecond)
+				}
 			}
-			// Check redirect_uri parameter (for OAuth flows)
+			// Check redirect_uri parameter (OAuth flows)
 			if redirectURI := parsed.Query().Get("redirect_uri"); redirectURI != "" {
+				fmt.Fprintf(os.Stderr, "[browser-fwd] found redirect_uri: %s\n", redirectURI)
 				if redirectParsed, err := url.Parse(redirectURI); err == nil {
-					host := redirectParsed.Hostname()
-					port := redirectParsed.Port()
-					if port != "" && (host == "localhost" || host == "127.0.0.1") {
-						go proxyLocalPort(sandboxContainerName, port)
-						time.Sleep(100 * time.Millisecond)
+					if port := redirectParsed.Port(); port != "" {
+						host := redirectParsed.Hostname()
+						fmt.Fprintf(os.Stderr, "[browser-fwd] redirect_uri host=%s port=%s\n", host, port)
+						if host == "localhost" || host == "127.0.0.1" {
+							go proxyLocalPort(sandboxContainerName, port)
+							time.Sleep(100 * time.Millisecond)
+						}
 					}
 				}
 			}

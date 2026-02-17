@@ -82,9 +82,9 @@ RUN chmod +x /usr/local/bin/open-browser
 COPY generated/cdp-proxy /usr/local/bin/cdp-proxy
 RUN chmod +x /usr/local/bin/cdp-proxy
 
-# Copy vsock-bridge binary (for gVisor mode)
-COPY generated/vsock-bridge /usr/local/bin/vsock-bridge
-RUN chmod +x /usr/local/bin/vsock-bridge
+# Copy tcp-bridge binary (for gVisor mode)
+COPY generated/tcp-bridge /usr/local/bin/tcp-bridge
+RUN chmod +x /usr/local/bin/tcp-bridge
 
 # Create overlay directories
 RUN mkdir -p /src-ro /src-upper /src-work /workspace \

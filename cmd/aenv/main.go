@@ -265,7 +265,7 @@ func renderTokenLine(t TokenInfo) string {
 }
 
 func checkBrowserForward() string {
-	// Check /tmp first (gVisor vsock-bridge), then /run (runc bind mount)
+	// Check /tmp first (gVisor tcp-bridge), then /run (runc bind mount)
 	sock := "/tmp/browser-forward.sock"
 	if _, err := os.Stat(sock); err != nil {
 		sock = "/run/browser-forward.sock"
@@ -330,7 +330,7 @@ func checkCDP() CDPInfo {
 	}
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	// Check /tmp first (gVisor vsock-bridge), then /run (runc bind mount)
+	// Check /tmp first (gVisor tcp-bridge), then /run (runc bind mount)
 	sock := "/tmp/cdp-forward.sock"
 	if _, err := os.Stat(sock); err != nil {
 		sock = "/run/cdp-forward.sock"

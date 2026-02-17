@@ -156,13 +156,13 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		cmd.Run()
 	}
 
-	// Build vsock-bridge if needed (for gVisor mode)
-	vsockBridgeBin := "generated/vsock-bridge"
-	vsockBridgeSrc := "cmd/vsock-bridge/main.go"
-	if !fileExists(vsockBridgeBin) || fileNewer(vsockBridgeSrc, vsockBridgeBin) {
-		spinner.Status("building vsock-bridge...")
-		cmd := exec.Command("go", "build", "-o", "../../generated/vsock-bridge", ".")
-		cmd.Dir = "cmd/vsock-bridge"
+	// Build tcp-bridge if needed (for gVisor mode)
+	tcpBridgeBin := "generated/tcp-bridge"
+	tcpBridgeSrc := "cmd/tcp-bridge/main.go"
+	if !fileExists(tcpBridgeBin) || fileNewer(tcpBridgeSrc, tcpBridgeBin) {
+		spinner.Status("building tcp-bridge...")
+		cmd := exec.Command("go", "build", "-o", "../../generated/tcp-bridge", ".")
+		cmd.Dir = "cmd/tcp-bridge"
 		cmd.Run()
 	}
 

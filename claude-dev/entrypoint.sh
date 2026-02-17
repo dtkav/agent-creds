@@ -16,7 +16,7 @@ if [ -d /src-ro ] && [ "$(ls -A /src-ro 2>/dev/null)" ]; then
         /workspace
 fi
 
-# Start tcp-bridge if in gVisor mode (creates Unix sockets that proxy to TCP)
+# Start tcp-bridge (creates Unix sockets that proxy to TCP on host)
 if [ -n "$TCP_BROWSER_PORT" ] || [ -n "$TCP_CDP_PORT" ]; then
     tcp-bridge &
     sleep 0.2  # Wait for sockets to be created

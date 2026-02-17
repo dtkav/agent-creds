@@ -4,11 +4,8 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -101,121 +98,15 @@ func imageExists(name string) bool {
 	return run("docker", "image", "inspect", name) == nil
 }
 
-// ForwardState tracks a forwarder's listener and socket path for cleanup.
+// ForwardState tracks a forwarder's listener for cleanup.
 type ForwardState struct {
 	Listener net.Listener
-	SockPath string
 }
 
 func (f *ForwardState) Close() {
 	if f.Listener != nil {
 		f.Listener.Close()
 	}
-	if f.SockPath != "" {
-		os.Remove(f.SockPath)
-	}
-}
-
-func startBrowserForward(netContainerName, slug string, targets []BrowserTargetConfig) (*ForwardState, error) {
-	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("adev-%s-browser.sock", slug))
-	os.Remove(sockPath) // clean up stale socket
-
-	listener, err := net.Listen("unix", sockPath)
-	if err != nil {
-		return nil, err
-	}
-
-	// Make socket accessible from container (runs as different uid)
-	os.Chmod(sockPath, 0666)
-
-	go http.Serve(listener, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		rawURL := r.URL.Query().Get("url")
-		if rawURL == "" {
-			http.Error(w, "missing url parameter", http.StatusBadRequest)
-			return
-		}
-
-		// Check URL against allow-list (empty list = all blocked)
-		allowed := false
-		for _, t := range targets {
-			if MatchGlob(t.URL, rawURL) {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
-			http.Error(w, "url not allowed", http.StatusForbidden)
-			return
-		}
-
-		// If the URL or its redirect_uri points to localhost with a port, set up a TCP proxy
-		// so the host browser's OAuth callback can reach the sandbox container.
-		if parsed, err := url.Parse(rawURL); err == nil {
-			// Check main URL
-			host := parsed.Hostname()
-			port := parsed.Port()
-			if port != "" && (host == "localhost" || host == "127.0.0.1") {
-				go proxyLocalPort(netContainerName, port)
-				time.Sleep(100 * time.Millisecond)
-			}
-			// Check redirect_uri parameter (for OAuth flows)
-			if redirectURI := parsed.Query().Get("redirect_uri"); redirectURI != "" {
-				if redirectParsed, err := url.Parse(redirectURI); err == nil {
-					host := redirectParsed.Hostname()
-					port := redirectParsed.Port()
-					if port != "" && (host == "localhost" || host == "127.0.0.1") {
-						go proxyLocalPort(netContainerName, port)
-						time.Sleep(100 * time.Millisecond)
-					}
-				}
-			}
-		}
-
-		cmd := exec.Command("xdg-open", rawURL)
-		if err := cmd.Start(); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		go cmd.Wait()
-
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok"))
-	}))
-
-	return &ForwardState{Listener: listener, SockPath: sockPath}, nil
-}
-
-func startCDPForward(slug string, port int) (*ForwardState, error) {
-	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("adev-%s-cdp.sock", slug))
-	os.Remove(sockPath)
-
-	listener, err := net.Listen("unix", sockPath)
-	if err != nil {
-		return nil, err
-	}
-	os.Chmod(sockPath, 0666)
-
-	addr := fmt.Sprintf("localhost:%d", port)
-	go func() {
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				upstream, err := net.Dial("tcp", addr)
-				if err != nil {
-					return
-				}
-				defer upstream.Close()
-				go io.Copy(upstream, c)
-				io.Copy(c, upstream)
-			}(conn)
-		}
-	}()
-
-	return &ForwardState{Listener: listener, SockPath: sockPath}, nil
 }
 
 // proxyLocalPort creates a temporary TCP listener on the host at the given port,

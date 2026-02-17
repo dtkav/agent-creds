@@ -64,12 +64,8 @@ var (
 )
 
 func init() {
-	// Check /tmp first (gVisor tcp-bridge), then /run (runc bind mount)
-	if _, err := os.Stat("/tmp/cdp-forward.sock"); err == nil {
-		sockPath = "/tmp/cdp-forward.sock"
-	} else {
-		sockPath = "/run/cdp-forward.sock"
-	}
+	// tcp-bridge creates this socket
+	sockPath = "/tmp/cdp-forward.sock"
 }
 
 func main() {

@@ -7,9 +7,9 @@ import (
 	"github.com/superfly/macaroon"
 )
 
-const tokenPrefix = "sk_"
+const tokenPrefix = "acm_"
 
-// decodeToken decodes a sk_ prefixed token string
+// decodeToken decodes a prefixed token string
 func decodeToken(token string) (*macaroon.Macaroon, error) {
 	if len(token) < len(tokenPrefix) {
 		return nil, fmt.Errorf("token too short")
@@ -27,7 +27,7 @@ func decodeToken(token string) (*macaroon.Macaroon, error) {
 	return macaroon.Decode(decoded)
 }
 
-// encodeToken encodes a macaroon to a string with the sk_ prefix
+// encodeToken encodes a macaroon to a string with the token prefix
 func encodeToken(m *macaroon.Macaroon) (string, error) {
 	encoded, err := m.Encode()
 	if err != nil {

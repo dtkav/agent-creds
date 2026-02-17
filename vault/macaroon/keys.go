@@ -13,7 +13,7 @@ const (
 	TokenLocation = "agent-creds"
 
 	// DefaultTokenPrefix is the default prefix for encoded tokens
-	DefaultTokenPrefix = "sk_"
+	DefaultTokenPrefix = "acm_"
 )
 
 // TokenPrefix is the current prefix for encoded tokens (can be overridden via env)
@@ -70,7 +70,7 @@ func LoadKeyStore() (*KeyStore, error) {
 		keyID = []byte("primary")
 	}
 
-	// TOKEN_PREFIX: optional token prefix (default: "sk_")
+	// TOKEN_PREFIX: optional token prefix (default: "acm_")
 	tokenPrefix := os.Getenv("TOKEN_PREFIX")
 	if tokenPrefix == "" {
 		tokenPrefix = DefaultTokenPrefix
@@ -91,7 +91,7 @@ func (ks *KeyStore) NewToken() (*macaroon.Macaroon, error) {
 	return macaroon.New(ks.KeyID, TokenLocation, ks.SigningKey)
 }
 
-// EncodeToken encodes a macaroon to a string with the sk_ prefix
+// EncodeToken encodes a macaroon to a string with the token prefix
 func EncodeToken(m *macaroon.Macaroon) (string, error) {
 	encoded, err := m.Encode()
 	if err != nil {
@@ -100,7 +100,7 @@ func EncodeToken(m *macaroon.Macaroon) (string, error) {
 	return TokenPrefix + base64.RawURLEncoding.EncodeToString(encoded), nil
 }
 
-// DecodeToken decodes a sk_ prefixed token string
+// DecodeToken decodes a prefixed token string
 func DecodeToken(token string) (*macaroon.Macaroon, error) {
 	if len(token) < len(TokenPrefix) {
 		return nil, fmt.Errorf("token too short")

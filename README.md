@@ -5,8 +5,6 @@ Agent sandbox with integrated credential injection proxy. Allows unmodified code
 ![agent-creds sandbox](agent-creds.png)
 
 
-**Status: Experimental** — The API and architecture may change significantly. Not recommended for production use.
-
 ## Threat Model
 
 This project addresses two security concerns when running AI agents with API access:
@@ -37,7 +35,7 @@ This turns "full API access" into precisely scoped capabilities that match the a
 │  │  (your app) │─────▶│  (TLS term) │─────▶│  (tokens)   │ │
 │  └─────────────┘      └─────────────┘      └─────────────┘ │
 │   iptables NAT:           │                                 │
-│   :443 → envoy            │                                 │
+│   all TCP → envoy         │                                 │
 │                           ▼                                 │
 └───────────────────────────┼─────────────────────────────────┘
                             │ HTTPS
@@ -45,7 +43,7 @@ This turns "full API access" into precisely scoped capabilities that match the a
                     api.stripe.com (real)
 ```
 
-- **sandbox**: Container running your code, with iptables redirecting all :443 traffic to envoy
+- **sandbox**: Container running your code, with iptables redirecting all outbound TCP to envoy
 - **envoy**: Terminates TLS with runtime-generated certs, calls vault for token validation
 - **vault**: Validates macaroon tokens, injects real API keys into requests
 
@@ -55,16 +53,26 @@ This turns "full API access" into precisely scoped capabilities that match the a
 
 - Docker and Docker Compose
 - Go 1.21+ (for building tools)
+- **gVisor runsc** (default sandbox runtime): https://gvisor.dev/docs/user_guide/install/
+  - To use docker without gVisor set `runtime = "runc"` in `agent-creds.toml`
 
 ### Setup
 
 ```bash
-# Create project config
+# Create project config (or copy agent-creds.example.toml)
 cat > agent-creds.toml << 'EOF'
 [sandbox]
 name = "myproject"
 
-[upstream."api.stripe.com"]
+[upstream."api.anthropic.com"]
+[upstream."claude.ai"]
+[upstream."platform.claude.com"]
+
+[[browser_target]]
+url = "https://claude.ai/oauth/authorize*"
+
+[[browser_target]]
+url = "http://localhost:*"
 EOF
 
 # Set environment variables for vault
@@ -95,83 +103,22 @@ adev stop foo     # Stop sandbox named "foo"
 - Mounts your current directory at `/workspace` inside the container
 - **Blocks all network traffic by default** — the sandbox has no internet access except through the proxy
 - Routes only the domains listed in `agent-creds.toml` through envoy
+- **Hot-reloads** when you edit `agent-creds.toml` (add/remove upstreams without restart)
 - Starts vault service if not running
 - Attaches to existing instances instead of creating duplicates
 
 Multiple named sandboxes can run concurrently.
 
-### Browser Forwarding
+### actl
 
-Code inside the sandbox can open URLs in your host's default browser:
+`actl` is a control utility for monitoring and managing sandbox instances.
 
 ```bash
-xdg-open https://accounts.google.com/oauth/authorize?...
+actl              # Interactive TUI showing all instances
+actl status       # Show status for current project (containers, vault connectivity)
 ```
 
-This enables OAuth flows where:
-1. Sandbox code calls `xdg-open` with auth URL → browser opens on host
-2. User authenticates in host browser
-3. OAuth callback to `localhost:PORT` routes back into the sandbox
-
-The callback routing works automatically—adev detects localhost URLs with ports and proxies incoming connections from the host back to the sandbox.
-
-Configure in `agent-creds.toml`:
-```toml
-[sandbox]
-use_host_browser = true  # default
-
-# URL allow-list (required - empty = all blocked)
-[[browser_target]]
-url = "*accounts.google.com/o/oauth*"
-
-[[browser_target]]
-url = "http://localhost:*"
-```
-
-Only URLs matching a `[[browser_target]]` pattern will be opened. All others return 403.
-
-### Chrome DevTools Protocol (CDP)
-
-Control your host's Chrome browser from inside the sandbox. Playwright, Puppeteer, and other automation tools connect to `localhost:9222` which forwards to Chrome on your host.
-
-```python
-# Inside sandbox - controls host Chrome
-from playwright.sync_api import sync_playwright
-with sync_playwright() as p:
-    browser = p.chromium.connect_over_cdp("http://localhost:9222")
-    page = browser.new_page()
-    page.goto("https://example.com")
-```
-
-Start Chrome on your host with remote debugging enabled:
-```bash
-google-chrome --remote-debugging-port=9222
-```
-
-The `aenv` dashboard shows CDP connection status (e.g., "cdp → Chrome 127.0.1").
-
-Configure in `agent-creds.toml`:
-```toml
-[sandbox]
-use_host_browser_cdp = true  # default
-
-# Target allow-list (required - empty = all blocked)
-[[cdp_target]]
-type = "page"
-title = "*My App*"
-
-[[cdp_target]]
-url = "*github.com*"
-```
-
-Only browser tabs matching a `[[cdp_target]]` pattern will be accessible. This prevents agents from accessing sensitive tabs (email, banking, etc.).
-
-**CDP target fields** (all optional, empty = match any):
-- `type`: Target type (`page`, `background_page`, `service_worker`, etc.)
-- `title`: Glob pattern matching page title
-- `url`: Glob pattern matching page URL
-
-When multiple fields are specified, all must match.
+The TUI shows all running adev instances with their status (running/partial/stopped).
 
 ### Network Isolation
 
@@ -186,9 +133,9 @@ curl https://api.stripe.com/v1/customers \
 curl https://example.com  # connection refused
 ```
 
-### Credential Swap
+### Credential Injection
 
-The core feature: your code uses an opaque macaroon token, and the proxy swaps it for the real API key before forwarding to the upstream.
+Envoy replaces macaroons for the real API key before forwarding to the upstream.
 
 ```bash
 # 1. Mint a token (on host, before launching sandbox)
@@ -229,15 +176,37 @@ bin/mint --hosts api.stripe.com --methods GET --paths "/v1/customers/*" --valid-
 
 Tokens without restrictions (no `--hosts`, `--methods`, `--paths`) have full access to all configured APIs.
 
+### Passthrough Mode
+
+Not all requests need credential injection. The vault checks the `Authorization` header:
+
+- **Macaroon tokens** (prefix `acm_`): Validated and swapped for real credentials
+- **Other tokens / no auth**: Passed through unchanged to the upstream
+
+Passthrough allows the proxy to handle APIs that don't require credentials, or that use different auth schemes. To require macaroons for all requests, set `STRICT_MODE=true` on the vault service.
+
+### Error Responses
+
+When token validation fails, the vault returns specific HTTP errors:
+
+| Status | Cause | Example |
+|--------|-------|---------|
+| **401 Unauthorized** | Invalid/expired macaroon, bad signature | `Unauthorized: token expired` |
+| **403 Forbidden** | Valid token but caveat violation | `Unauthorized: host not allowed` |
+| **403 Forbidden** | No credentials configured for host | `No credentials configured for this host` |
+
+The response body includes a message explaining the failure. Check vault logs for detailed diagnostics.
+
 ## Configuration
 
 ### agent-creds.toml (per-project)
 
-Controls which domains are routed through the proxy:
+Controls the sandbox configuration, and which domains are routed through the proxy:
 
 ```toml
 [sandbox]
 name = "myproject"
+# runtime = "runc"  # default is gVisor; use runc if runsc not installed
 
 [upstream."api.stripe.com"]
 [upstream."pocketbase.example.com"]
@@ -268,6 +237,8 @@ password = { provider = "env", name = "PB_PASSWORD" }
 ### Environment Variables
 
 - `MACAROON_SIGNING_KEY`: Base64-encoded 32+ byte key for signing/verifying tokens
+- `TOKEN_PREFIX`: Macaroon token prefix (default: `acm_`)
+- `STRICT_MODE`: Set to `true` to reject non-macaroon requests (disables passthrough)
 - Plus any env vars referenced in `vault.toml`
 
 ## Development Commands
@@ -319,7 +290,80 @@ make clean-certs  # Remove generated certs (forces regeneration)
 
 1. **CA Generation**: `adev` creates a CA cert once in `generated/certs/`
 2. **Runtime Certs**: `envoy-entrypoint.sh` generates domain certs at startup using the CA
-3. **Traffic Interception**: iptables NAT rules redirect all :443 traffic to envoy
+3. **Traffic Interception**: iptables NAT rules redirect all outbound TCP to envoy
 4. **TLS Termination**: Envoy terminates TLS using SNI to select the right certificate, so `https://api.stripe.com` works with unmodified code
 5. **Token Verification**: Vault verifies the macaroon token signature and checks caveats (host, method, path, validity)
 6. **Credential Injection**: On successful verification, vault injects the real API key before forwarding to upstream
+
+## Advanced Features
+
+### Browser Forwarding
+
+Code inside the sandbox can open URLs in your host's default browser:
+
+```bash
+xdg-open https://accounts.google.com/oauth/authorize?...
+```
+
+This enables OAuth flows where:
+1. Sandbox code calls `xdg-open` with auth URL → browser opens on host
+2. User authenticates in host browser
+3. OAuth callback to `localhost:PORT` routes back into the sandbox
+
+The callback routing works automatically—adev detects localhost URLs with ports and proxies incoming connections from the host back to the sandbox.
+
+Configure in `agent-creds.toml`:
+```toml
+[sandbox]
+use_host_browser = true  # default
+
+# URL allow-list (required - empty = all blocked)
+[[browser_target]]
+url = "*accounts.google.com/o/oauth*"
+
+[[browser_target]]
+url = "http://localhost:*"
+```
+
+Only URLs matching a `[[browser_target]]` pattern will be opened. All others are blocked.
+
+### Chrome DevTools Protocol (CDP)
+
+Control your host's Chrome browser from inside the sandbox. Playwright, Puppeteer, and other automation tools connect to `localhost:9222` which forwards to Chrome on your host.
+
+```python
+# Inside sandbox - controls host Chrome
+from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    browser = p.chromium.connect_over_cdp("http://localhost:9222")
+    page = browser.new_page()
+    page.goto("https://example.com")
+```
+
+Start Chrome on your host with remote debugging enabled:
+```bash
+google-chrome --remote-debugging-port=9222
+```
+
+Configure in `agent-creds.toml`:
+```toml
+[sandbox]
+use_host_browser_cdp = true  # default
+
+# Target allow-list (required - empty = all blocked)
+[[cdp_target]]
+type = "page"
+title = "*My App*"
+
+[[cdp_target]]
+url = "*github.com*"
+```
+
+Only browser tabs matching a `[[cdp_target]]` pattern will be accessible. This prevents agents from accessing sensitive tabs (email, banking, etc.).
+
+**CDP target fields** (all optional, empty = match any):
+- `type`: Target type (`page`, `background_page`, `service_worker`, etc.)
+- `title`: Glob pattern matching page title
+- `url`: Glob pattern matching page URL
+
+When multiple fields are specified, all must match.

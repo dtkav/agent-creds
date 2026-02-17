@@ -25,7 +25,11 @@ name = "myproject"
 # akey = "stripe.akey"  # optional: credential file for token-based auth
 
 [upstream."api.github.com"]
+
+# Claude Code requires these endpoints for API and OAuth
 [upstream."api.anthropic.com"]
+[upstream."claude.ai"]
+[upstream."platform.claude.com"]
 
 # =============================================================================
 # Browser Target Allowlist
@@ -34,7 +38,7 @@ name = "myproject"
 # Empty = all URLs blocked. Patterns use glob syntax (* matches any chars).
 
 [[browser_target]]
-url = "*accounts.google.com/o/oauth*"  # Google OAuth
+url = "https://claude.ai/oauth/authorize*"  # Claude Code OAuth
 
 [[browser_target]]
 url = "*github.com/login/oauth*"  # GitHub OAuth

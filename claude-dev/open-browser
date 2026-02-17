@@ -7,7 +7,7 @@ if [ -z "$url" ]; then
     exit 1
 fi
 
-# Check /tmp first (gVisor vsock-bridge), then /run (runc bind mount)
+# Check /tmp first (gVisor tcp-bridge), then /run (runc bind mount)
 if [ -S /tmp/browser-forward.sock ]; then
     sock=/tmp/browser-forward.sock
 elif [ -S /run/browser-forward.sock ]; then

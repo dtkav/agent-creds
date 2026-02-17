@@ -30,7 +30,7 @@ test:
 	bin/arun curl -v https://api.stripe.com/v1/customers -H "Authorization: Bearer $$(cat /creds/stripe)"
 
 # Build all binaries
-binaries: bin/actl bin/adev bin/aenv bin/arun bin/odev bin/cdp-proxy bin/vsock-bridge bin/mint bin/mintfs bin/vault-admin bin/vault-ssh
+binaries: bin/actl bin/adev bin/aenv bin/arun bin/odev bin/cdp-proxy bin/tcp-bridge bin/mint bin/mintfs bin/vault-admin bin/vault-ssh
 
 # Root-level cmd binaries
 bin/actl: cmd/actl/main.go cmd/actl/go.mod
@@ -51,8 +51,8 @@ bin/odev: cmd/odev/main.go cmd/odev/go.mod
 bin/cdp-proxy: cmd/cdp-proxy/main.go cmd/cdp-proxy/go.mod
 	cd cmd/cdp-proxy && go build -o ../../bin/cdp-proxy .
 
-bin/vsock-bridge: cmd/vsock-bridge/main.go cmd/vsock-bridge/go.mod
-	cd cmd/vsock-bridge && go build -o ../../bin/vsock-bridge .
+bin/tcp-bridge: cmd/tcp-bridge/main.go cmd/tcp-bridge/go.mod
+	cd cmd/tcp-bridge && go build -o ../../bin/tcp-bridge .
 
 # Vault binaries (share vault/go.mod)
 bin/mint: vault/cmd/mint/main.go vault/go.mod

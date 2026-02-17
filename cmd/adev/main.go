@@ -236,6 +236,7 @@ func proxyLocalPort(containerName, port string) {
 	if err != nil {
 		return
 	}
+	fmt.Fprintf(os.Stderr, "[oauth-proxy] localhost:%s -> %s:%s\n", port, containerIP, port)
 
 	// Auto-close after 5 minutes
 	go func() {
@@ -246,7 +247,7 @@ func proxyLocalPort(containerName, port string) {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			return // listener closed
+			return
 		}
 		go func(c net.Conn) {
 			defer c.Close()
@@ -255,12 +256,25 @@ func proxyLocalPort(containerName, port string) {
 				return
 			}
 			defer upstream.Close()
-			go io.Copy(upstream, c)
-			io.Copy(c, upstream)
+
+			done := make(chan struct{}, 2)
+			go func() {
+				io.Copy(upstream, c)
+				if tc, ok := upstream.(*net.TCPConn); ok {
+					tc.CloseWrite()
+				}
+				done <- struct{}{}
+			}()
+			go func() {
+				io.Copy(c, upstream)
+				if tc, ok := c.(*net.TCPConn); ok {
+					tc.CloseWrite()
+				}
+				done <- struct{}{}
+			}()
+			<-done
+			<-done
 		}(conn)
-		// Close listener after first connection completes
-		ln.Close()
-		return
 	}
 }
 

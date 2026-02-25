@@ -1,4 +1,4 @@
-.PHONY: up down deploy deploy-vault build push build-local build-nix test clean-certs binaries
+.PHONY: up down deploy deploy-vault build push build-local build-nix build-nix-base build-nix-env test clean-certs binaries
 
 REGISTRY ?= docker.system3.md
 
@@ -26,11 +26,16 @@ push: build
 build-local:
 	docker build -t sandbox-local -f local/Dockerfile .
 
-# Build sandbox image using Nix (no local Nix install required)
+# Build sandbox using Nix (no local Nix install required)
 # Note: `adev console` does this automatically when config changes
-build-nix:
+build-nix: build-nix-base build-nix-env
+
+build-nix-base:
+	./scripts/build-nix.sh base
+
+build-nix-env: bin/adev
 	bin/adev generate-nix
-	./scripts/build-nix.sh sandbox-local
+	./scripts/build-nix.sh env
 
 test:
 	bin/arun curl -v https://api.stripe.com/v1/customers -H "Authorization: Bearer $$(cat /creds/stripe)"

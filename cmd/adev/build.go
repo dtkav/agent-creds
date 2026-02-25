@@ -11,10 +11,51 @@ import (
 	"strings"
 )
 
-// configHash returns a hash of the current config (agent + plugins + packages).
-// Used to detect when rebuild is needed.
-func configHash(cfg ProjectConfig) string {
+// nixDir returns the persistent host Nix store directory.
+func nixDir() string {
+	configDir := os.Getenv("XDG_CONFIG_HOME")
+	if configDir == "" {
+		home, _ := os.UserHomeDir()
+		configDir = filepath.Join(home, ".config")
+	}
+	return filepath.Join(configDir, "agent-creds", "nix")
+}
+
+// baseImageHash returns a hash of inputs that affect the base Docker image.
+// This changes rarely — only when flake.nix structure or claude-dev/ scripts change.
+func baseImageHash(scriptDir string) string {
 	h := sha256.New()
+
+	// Hash flake.nix
+	if data, err := os.ReadFile(filepath.Join(scriptDir, "flake.nix")); err == nil {
+		h.Write(data)
+	}
+
+	// Hash claude-dev/ files (entrypoint, bashrc, etc.)
+	claudeDevDir := filepath.Join(scriptDir, "claude-dev")
+	entries, _ := os.ReadDir(claudeDevDir)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if data, err := os.ReadFile(filepath.Join(claudeDevDir, e.Name())); err == nil {
+			h.Write([]byte(e.Name()))
+			h.Write(data)
+		}
+	}
+
+	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+// envHash returns a hash of inputs that affect the sandbox env (packages).
+// This changes when plugins add/remove packages, nix expressions, or basePackages in flake.nix.
+func envHash(cfg ProjectConfig, scriptDir string) string {
+	h := sha256.New()
+
+	// Hash flake.nix (basePackages are defined there)
+	if data, err := os.ReadFile(filepath.Join(scriptDir, "flake.nix")); err == nil {
+		h.Write(data)
+	}
 
 	// Hash agent name
 	h.Write([]byte(cfg.Sandbox.Agent))
@@ -35,24 +76,53 @@ func configHash(cfg ProjectConfig) string {
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
-// needsRebuild checks if the sandbox image needs to be rebuilt.
-func needsRebuild(cfg ProjectConfig, scriptDir string) bool {
-	hashFile := filepath.Join(scriptDir, "generated", ".config-hash")
-	currentHash := configHash(cfg)
+// needsBaseRebuild checks if the base image needs to be rebuilt.
+func needsBaseRebuild(scriptDir string) bool {
+	hashFile := filepath.Join(scriptDir, "generated", ".base-hash")
+	currentHash := baseImageHash(scriptDir)
 
-	// Read stored hash
 	stored, err := os.ReadFile(hashFile)
 	if err != nil {
-		return true // No hash file = needs build
+		return true
 	}
 
-	return strings.TrimSpace(string(stored)) != currentHash
+	if strings.TrimSpace(string(stored)) != currentHash {
+		return true
+	}
+
+	// Also check that the image exists
+	return !imageExists("sandbox-base")
 }
 
-// saveConfigHash saves the current config hash after successful build.
-func saveConfigHash(cfg ProjectConfig, scriptDir string) error {
-	hashFile := filepath.Join(scriptDir, "generated", ".config-hash")
-	return os.WriteFile(hashFile, []byte(configHash(cfg)), 0644)
+// needsEnvRebuild checks if the sandbox env needs to be rebuilt.
+func needsEnvRebuild(cfg ProjectConfig, scriptDir string) bool {
+	hashFile := filepath.Join(scriptDir, "generated", ".env-hash")
+	currentHash := envHash(cfg, scriptDir)
+
+	stored, err := os.ReadFile(hashFile)
+	if err != nil {
+		return true
+	}
+
+	if strings.TrimSpace(string(stored)) != currentHash {
+		return true
+	}
+
+	// Also check that current-env file exists
+	envFile := filepath.Join(nixDir(), "current-env")
+	return !fileExists(envFile)
+}
+
+// saveBaseHash saves the base image hash after successful build.
+func saveBaseHash(scriptDir string) error {
+	hashFile := filepath.Join(scriptDir, "generated", ".base-hash")
+	return os.WriteFile(hashFile, []byte(baseImageHash(scriptDir)), 0644)
+}
+
+// saveEnvHash saves the env hash after successful build.
+func saveEnvHash(cfg ProjectConfig, scriptDir string) error {
+	hashFile := filepath.Join(scriptDir, "generated", ".env-hash")
+	return os.WriteFile(hashFile, []byte(envHash(cfg, scriptDir)), 0644)
 }
 
 // buildGoBinaries builds the Go binaries needed for the sandbox image.
@@ -77,18 +147,10 @@ func buildGoBinaries(scriptDir string) error {
 	return nil
 }
 
-// ensureSandboxImage builds the sandbox image if needed.
-func ensureSandboxImage(cfg ProjectConfig, scriptDir string, spinner *Spinner) error {
-	if !needsRebuild(cfg, scriptDir) {
-		return nil // Image is up to date
-	}
-
-	spinner.Status("generating packages.nix...")
-
-	// Generate packages.nix
-	outputPath := filepath.Join(scriptDir, "generated", "packages.nix")
-	if err := GeneratePackagesNix(cfg, outputPath); err != nil {
-		return fmt.Errorf("generating packages.nix: %w", err)
+// ensureBaseImage builds the base Docker image if needed.
+func ensureBaseImage(scriptDir string, spinner *Spinner) error {
+	if !needsBaseRebuild(scriptDir) {
+		return nil
 	}
 
 	spinner.Status("building Go binaries...")
@@ -96,23 +158,69 @@ func ensureSandboxImage(cfg ProjectConfig, scriptDir string, spinner *Spinner) e
 		return fmt.Errorf("building Go binaries: %w", err)
 	}
 
-	spinner.Status("building sandbox image (this may take a while on first run)...")
+	spinner.Status("building base image (this may take a while on first run)...")
 
-	// Run the Nix build script
 	buildScript := filepath.Join(scriptDir, "scripts", "build-nix.sh")
-	cmd := exec.Command(buildScript, "sandbox-local")
+	cmd := exec.Command(buildScript, "base", "sandbox-base")
 	cmd.Dir = scriptDir
-	cmd.Stdout = nil // Suppress output during spinner
+	cmd.Stdout = nil
 	cmd.Stderr = nil
 
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("building sandbox image: %w", err)
+		return fmt.Errorf("building base image: %w", err)
 	}
 
-	// Save hash on success
-	if err := saveConfigHash(cfg, scriptDir); err != nil {
-		return fmt.Errorf("saving config hash: %w", err)
+	if err := saveBaseHash(scriptDir); err != nil {
+		return fmt.Errorf("saving base hash: %w", err)
 	}
 
 	return nil
+}
+
+// ensureSandboxEnv builds the sandbox env if needed.
+// Returns the env store path (e.g. /nix/store/xxx-sandbox-env).
+func ensureSandboxEnv(cfg ProjectConfig, scriptDir string, spinner *Spinner) (string, error) {
+	if !needsEnvRebuild(cfg, scriptDir) {
+		// Read existing env path
+		envFile := filepath.Join(nixDir(), "current-env")
+		data, err := os.ReadFile(envFile)
+		if err != nil {
+			return "", fmt.Errorf("reading current-env: %w", err)
+		}
+		return strings.TrimSpace(string(data)), nil
+	}
+
+	spinner.Status("generating packages.nix...")
+
+	// Generate packages.nix
+	outputPath := filepath.Join(scriptDir, "generated", "packages.nix")
+	if err := GeneratePackagesNix(cfg, outputPath); err != nil {
+		return "", fmt.Errorf("generating packages.nix: %w", err)
+	}
+
+	spinner.Status("building sandbox env (this may take a while on first run)...")
+
+	buildScript := filepath.Join(scriptDir, "scripts", "build-nix.sh")
+	cmd := exec.Command(buildScript, "env")
+	cmd.Dir = scriptDir
+	cmd.Stderr = nil
+
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("building sandbox env: %w", err)
+	}
+
+	// The last line of output is the env path
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	envPath := lines[len(lines)-1]
+
+	if !strings.HasPrefix(envPath, "/nix/store/") {
+		return "", fmt.Errorf("unexpected env path: %s", envPath)
+	}
+
+	if err := saveEnvHash(cfg, scriptDir); err != nil {
+		return "", fmt.Errorf("saving env hash: %w", err)
+	}
+
+	return envPath, nil
 }

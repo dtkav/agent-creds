@@ -88,6 +88,7 @@ func startBrowserForwardTCP(sandboxContainerName string, bindIP string, port int
 		}
 		go cmd.Wait()
 
+		w.Header().Set("Connection", "close")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
 	}))

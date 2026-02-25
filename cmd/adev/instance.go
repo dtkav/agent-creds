@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -168,20 +169,39 @@ func (m *InstanceManager) GetInstance(slug string) *Instance {
 	return nil
 }
 
-// CanAttach returns true if the instance is fully healthy and can be attached to.
-// For non-firecracker mode, this requires sandbox, envoy, and net containers all running.
-// For firecracker mode, only sandbox and envoy are needed.
+// CanAttach returns true if the instance is fully healthy and can be SSHed into.
 func (m *InstanceManager) CanAttach(inst *Instance) bool {
 	return inst != nil && inst.Status == "running"
 }
 
-// AttachToInstance attaches to a running sandbox container.
+// AttachToInstance SSHes into the running sandbox container.
 func (m *InstanceManager) AttachToInstance(inst *Instance) error {
 	if inst.Sandbox == nil {
 		return fmt.Errorf("no sandbox container found")
 	}
+	networkName := "adev-" + inst.Slug
 
-	cmd := exec.Command("docker", "exec", "-it", inst.Sandbox.Name, "/bin/bash")
+	var ip string
+	var err error
+	if inst.UsesInternalNetfilter {
+		ip, err = GetContainerIP(inst.Sandbox.Name, networkName)
+	} else {
+		netName := "adev-" + inst.Slug + "-net"
+		ip, err = GetContainerIP(netName, networkName)
+	}
+	if err != nil {
+		return fmt.Errorf("getting container IP: %w", err)
+	}
+
+	keyPath := filepath.Join(m.scriptDir, "generated", "sandbox-key")
+	cmd := exec.Command("ssh",
+		"-i", keyPath,
+		"-p", "2222",
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=/dev/null",
+		"-o", "LogLevel=ERROR",
+		"-o", "ConnectTimeout=10",
+		"devuser@"+ip)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

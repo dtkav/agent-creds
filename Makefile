@@ -1,4 +1,4 @@
-.PHONY: up down deploy deploy-vault build push build-local test clean-certs binaries
+.PHONY: up down deploy deploy-vault build push build-local build-nix test clean-certs binaries
 
 REGISTRY ?= docker.system3.md
 
@@ -26,17 +26,24 @@ push: build
 build-local:
 	docker build -t sandbox-local -f local/Dockerfile .
 
+# Build sandbox image using Nix (no local Nix install required)
+# Note: `adev console` does this automatically when config changes
+build-nix:
+	bin/adev generate-nix
+	./scripts/build-nix.sh sandbox-local
+
 test:
 	bin/arun curl -v https://api.stripe.com/v1/customers -H "Authorization: Bearer $$(cat /creds/stripe)"
 
 # Build all binaries
 binaries: bin/actl bin/adev bin/aenv bin/arun bin/odev bin/cdp-proxy bin/tcp-bridge bin/mint bin/mintfs bin/vault-admin bin/vault-ssh
 
+
 # Root-level cmd binaries
 bin/actl: cmd/actl/main.go cmd/actl/go.mod
 	cd cmd/actl && go build -o ../../bin/actl .
 
-bin/adev: cmd/adev/main.go cmd/adev/go.mod
+bin/adev: $(wildcard cmd/adev/*.go) cmd/adev/go.mod
 	cd cmd/adev && go build -o ../../bin/adev .
 
 bin/arun: cmd/arun/main.go cmd/arun/go.mod

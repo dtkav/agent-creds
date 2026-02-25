@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -28,11 +29,14 @@ func (c *CDPPort) UnmarshalTOML(data any) error {
 }
 
 type SandboxConfig struct {
-	Name              string  `toml:"name"`
-	Image             string  `toml:"image"`
-	Runtime           string  `toml:"runtime"` // "runc" or "gvisor" (default: gvisor)
-	UseHostBrowser    *bool   `toml:"use_host_browser"`     // default true
-	UseHostBrowserCDP CDPPort `toml:"use_host_browser_cdp"` // 0=disabled, port number=enabled
+	Name              string   `toml:"name"`
+	Image             string   `toml:"image"`
+	Runtime           string   `toml:"runtime"` // "runc" or "gvisor" (default: gvisor)
+	UseHostBrowser    *bool    `toml:"use_host_browser"`     // default true
+	UseHostBrowserCDP CDPPort  `toml:"use_host_browser_cdp"` // 0=disabled, port number=enabled
+	Agent             string   `toml:"agent"`                // agent to use (e.g., "claude")
+	Plugins           []string `toml:"plugins"`              // additional plugins to enable
+	DisabledPlugins   []string `toml:"disabled_plugins"`     // plugins to disable
 }
 
 func (s SandboxConfig) UseHostBrowserEnabled() bool    { return s.UseHostBrowser == nil || *s.UseHostBrowser }
@@ -92,12 +96,59 @@ type BrowserTargetConfig struct {
 	URL string `toml:"url"` // glob pattern matching URL to open
 }
 
+// MountConfig defines a bind mount from host to container.
+type MountConfig struct {
+	Source   string `toml:"source"`   // host path (~ expanded, ./ relative to project)
+	Target   string `toml:"target"`   // container path
+	Readonly bool   `toml:"readonly"` // default: false
+}
+
+// EnvConfig defines an environment variable to set in the container.
+type EnvConfig struct {
+	Name  string `toml:"name"`  // environment variable name
+	Value string `toml:"value"` // literal value or "from-file:path"
+}
+
+// PluginConfig represents a plugin's configuration.
+type PluginConfig struct {
+	Name           string                     `toml:"name"`
+	Description    string                     `toml:"description"`
+	Packages       []string                   `toml:"packages"`      // system packages to install
+	Nix            string                     `toml:"nix"`           // inline nix expression (list of derivations, pkgs in scope)
+	Upstream       map[string]UpstreamConfig  `toml:"upstream"`
+	BrowserTargets []BrowserTargetConfig      `toml:"browser_target"`
+	CDPTargets     []CDPTargetConfig          `toml:"cdp_target"`
+	Mounts         []MountConfig              `toml:"mount"`
+	Env            []EnvConfig                `toml:"env"`
+}
+
+// AgentConfig represents an agent's configuration.
+// Agents are like plugins but also define entrypoint and can require plugins.
+type AgentConfig struct {
+	Name           string                     `toml:"name"`
+	Description    string                     `toml:"description"`
+	Entrypoint     string                     `toml:"entrypoint"`    // command to run
+	Packages       []string                   `toml:"packages"`      // system packages to install
+	Nix            string                     `toml:"nix"`           // inline nix expression (list of derivations, pkgs in scope)
+	Plugins        []string                   `toml:"plugins"`       // plugins this agent requires
+	Upstream       map[string]UpstreamConfig  `toml:"upstream"`
+	BrowserTargets []BrowserTargetConfig      `toml:"browser_target"`
+	CDPTargets     []CDPTargetConfig          `toml:"cdp_target"`
+	Mounts         []MountConfig              `toml:"mount"`
+	Env            []EnvConfig                `toml:"env"`
+}
+
 type ProjectConfig struct {
 	Sandbox        SandboxConfig              `toml:"sandbox"`
 	Vault          VaultConfig                `toml:"vault"`
+	Entrypoint     string                     // set by agent
+	Packages       []string                   // aggregated from agent + plugins
+	NixExprs       []string                   // inline nix expressions from plugins/agents
 	Upstream       map[string]UpstreamConfig  `toml:"upstream"`
 	CDPTargets     []CDPTargetConfig          `toml:"cdp_target"`
 	BrowserTargets []BrowserTargetConfig      `toml:"browser_target"`
+	Mounts         []MountConfig              `toml:"mount"`
+	Env            []EnvConfig                `toml:"env"`
 }
 
 // MatchGlob performs simple glob matching where * matches any characters.
@@ -128,6 +179,70 @@ func LoadProjectConfig(dir string) (ProjectConfig, error) {
 	if err := toml.Unmarshal(data, &cfg); err != nil {
 		return cfg, err
 	}
+	return cfg, nil
+}
+
+// LoadProjectConfigWithPlugins loads the project config, agent, and plugins.
+// projectDir is where agent-creds.toml lives, scriptDir is the agent-creds installation.
+func LoadProjectConfigWithPlugins(projectDir, scriptDir string) (ProjectConfig, error) {
+	cfg, err := LoadProjectConfig(projectDir)
+	if err != nil {
+		return cfg, err
+	}
+
+	// Collect plugins to enable (agent plugins + explicit plugins)
+	var agentPlugins []string
+
+	// Load agent if specified
+	if cfg.Sandbox.Agent != "" {
+		agents := DiscoverAgents(projectDir, scriptDir)
+		agentPath, ok := agents[cfg.Sandbox.Agent]
+		if !ok {
+			return cfg, fmt.Errorf("agent %q not found", cfg.Sandbox.Agent)
+		}
+		agent, err := LoadAgent(agentPath)
+		if err != nil {
+			return cfg, fmt.Errorf("loading agent %s: %w", cfg.Sandbox.Agent, err)
+		}
+		// Merge agent config
+		MergeAgent(&cfg, agent, projectDir)
+		// Collect agent's required plugins
+		agentPlugins = agent.Plugins
+	}
+
+	// Discover all plugins
+	discovered := DiscoverPlugins(projectDir, scriptDir)
+
+	// Auto-include project-local plugins (if you put it in your plugins/ dir, you want it)
+	projectPluginDir := filepath.Join(projectDir, "plugins")
+	var projectPlugins []string
+	for name, path := range discovered {
+		if strings.HasPrefix(path, projectPluginDir+string(filepath.Separator)) {
+			projectPlugins = append(projectPlugins, name)
+		}
+	}
+
+	// Combine agent plugins + explicit plugins + project-local plugins
+	allPlugins := append(agentPlugins, cfg.Sandbox.Plugins...)
+	allPlugins = append(allPlugins, projectPlugins...)
+
+	// Filter: if no explicit list, use agent plugins only (not all discovered)
+	var enabled []string
+	if len(allPlugins) > 0 {
+		for _, name := range allPlugins {
+			if _, ok := discovered[name]; ok {
+				if !sliceContains(cfg.Sandbox.DisabledPlugins, name) && !sliceContains(enabled, name) {
+					enabled = append(enabled, name)
+				}
+			}
+		}
+	}
+
+	// Merge enabled plugins
+	if err := MergePlugins(&cfg, discovered, enabled, projectDir); err != nil {
+		return cfg, err
+	}
+
 	return cfg, nil
 }
 

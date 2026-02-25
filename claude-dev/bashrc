@@ -1,0 +1,29 @@
+HISTCONTROL=ignoreboth
+HISTSIZE=1000
+HISTFILESIZE=2000
+shopt -s histappend checkwinsize
+
+# Agent-creds CA cert setup (written by entrypoint when CA is mounted)
+. /tmp/adev-env.sh 2>/dev/null
+
+[ -f /etc/bash_completion ] && . /etc/bash_completion
+
+# Smart prompt: starship if available, else basic fallback
+if command -v starship >/dev/null 2>&1; then
+  eval "$(starship init bash)"
+else
+  export PS1='\u@sandbox:\w\$ '
+fi
+
+# Smart cd: z <fuzzy-dir> jumps to frecent directories
+command -v zoxide >/dev/null 2>&1 && eval "$(zoxide init bash)"
+
+# Auto-load .envrc files per project directory
+command -v direnv >/dev/null 2>&1 && eval "$(direnv hook bash)"
+
+# First login: show session info, cd to workspace
+if [ -z "${ADEV_SESSION_INIT:-}" ]; then
+  export ADEV_SESSION_INIT=1
+  cd /workspace 2>/dev/null
+  aenv 2>/dev/null || true
+fi

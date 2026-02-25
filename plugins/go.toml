@@ -1,0 +1,11 @@
+# Go Plugin
+# Go toolchain with module proxy access
+
+name = "go"
+description = "Go with module proxy access"
+
+packages = ["go"]
+
+[upstream."proxy.golang.org"]
+[upstream."sum.golang.org"]
+[upstream."storage.googleapis.com"]

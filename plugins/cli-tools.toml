@@ -1,0 +1,18 @@
+# CLI Tools Plugin
+# Modern CLI utilities
+
+name = "cli-tools"
+description = "Modern CLI tools (ripgrep, fd, bat, fzf, etc.)"
+
+packages = [
+    "ripgrep",
+    "fd-find",
+    "bat",
+    "eza",
+    "fzf",
+    "jq",
+    "httpie",
+    "tree",
+    "unzip",
+    "neovim",
+]

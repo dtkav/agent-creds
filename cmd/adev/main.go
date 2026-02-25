@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -65,8 +66,13 @@ func (s *Spinner) Status(msg string) {
 }
 
 func (s *Spinner) Stop() {
-	close(s.stop)
-	time.Sleep(50 * time.Millisecond) // Let goroutine clean up
+	select {
+	case <-s.stop:
+		// already stopped
+	default:
+		close(s.stop)
+		time.Sleep(50 * time.Millisecond) // Let goroutine clean up
+	}
 }
 
 func run(name string, args ...string) error {
@@ -185,6 +191,8 @@ func main() {
 		runConsole(args)
 	case "stop":
 		runStop(args)
+	case "generate-nix", "nix":
+		runGenerateNix(args)
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -220,18 +228,31 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
-// GetContainerIP returns the IP address of a container on a specific network.
+// GetContainerIP returns the IPv4 address of a container on a specific network.
+// Uses `with` to handle missing network keys without template errors.
 func GetContainerIP(containerName, networkName string) (string, error) {
-	template := fmt.Sprintf(`{{(index .NetworkSettings.Networks "%s").IPAddress}}`, networkName)
-	out, err := exec.Command("docker", "inspect", "-f", template, containerName).Output()
+	// Prefer network-specific lookup; `with` avoids nil dereference if key is absent.
+	tmpl := fmt.Sprintf(`{{with (index .NetworkSettings.Networks "%s")}}{{.IPAddress}}{{end}}`, networkName)
+	out, err := exec.Command("docker", "inspect", "-f", tmpl, containerName).Output()
+	if err == nil {
+		if ip := strings.TrimSpace(string(out)); ip != "" {
+			return ip, nil
+		}
+	}
+	// Fallback: pick first IPv4 from any network (handles renamed/ID-keyed networks).
+	out, err = exec.Command("docker", "inspect",
+		"--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}}\n{{end}}",
+		containerName).Output()
 	if err != nil {
 		return "", err
 	}
-	ip := strings.TrimSpace(string(out))
-	if ip == "" {
-		return "", fmt.Errorf("no IP found for %s on network %s", containerName, networkName)
+	for _, line := range strings.Split(string(out), "\n") {
+		ip := strings.TrimSpace(line)
+		if ip != "" && !strings.Contains(ip, ":") { // skip IPv6
+			return ip, nil
+		}
 	}
-	return ip, nil
+	return "", fmt.Errorf("no IPv4 address found for %s on network %s", containerName, networkName)
 }
 
 // GetNetworkGateway returns the gateway IP of a Docker network.
@@ -245,6 +266,95 @@ func GetNetworkGateway(networkName string) (string, error) {
 		return "", fmt.Errorf("no gateway found for network %s", networkName)
 	}
 	return ip, nil
+}
+
+// GetNetworkSubnet returns the subnet CIDR of a Docker network (e.g. "172.20.0.0/16").
+func GetNetworkSubnet(networkName string) (string, error) {
+	out, err := exec.Command("docker", "network", "inspect", networkName).Output()
+	if err != nil {
+		return "", fmt.Errorf("docker network inspect: %w", err)
+	}
+	// Parse JSON to get IPAM subnet (IPv4 only)
+	var networks []struct {
+		IPAM struct {
+			Config []struct {
+				Subnet  string `json:"Subnet"`
+				Gateway string `json:"Gateway"`
+			} `json:"Config"`
+		} `json:"IPAM"`
+	}
+	if err := json.Unmarshal(out, &networks); err != nil {
+		return "", fmt.Errorf("parse network inspect: %w", err)
+	}
+	if len(networks) == 0 {
+		return "", fmt.Errorf("no network info for %s", networkName)
+	}
+	for _, cfg := range networks[0].IPAM.Config {
+		// Skip IPv6 subnets (contain ':')
+		if cfg.Subnet != "" && !strings.Contains(cfg.Subnet, ":") {
+			return cfg.Subnet, nil
+		}
+	}
+	return "", fmt.Errorf("no IPv4 subnet found for network %s", networkName)
+}
+
+// GetNetworkSubnet6 returns the IPv6 subnet CIDR of a Docker network, or "" if none.
+func GetNetworkSubnet6(networkName string) string {
+	out, err := exec.Command("docker", "network", "inspect", networkName).Output()
+	if err != nil {
+		return ""
+	}
+	var networks []struct {
+		IPAM struct {
+			Config []struct {
+				Subnet string `json:"Subnet"`
+			} `json:"Config"`
+		} `json:"IPAM"`
+	}
+	if err := json.Unmarshal(out, &networks); err != nil || len(networks) == 0 {
+		return ""
+	}
+	for _, cfg := range networks[0].IPAM.Config {
+		if cfg.Subnet != "" && strings.Contains(cfg.Subnet, ":") {
+			return cfg.Subnet
+		}
+	}
+	return ""
+}
+
+// GetContainerIP6 returns the IPv6 address of a container on a given network, or "" if none.
+func GetContainerIP6(containerName, networkName string) string {
+	tmpl := fmt.Sprintf(`{{with (index .NetworkSettings.Networks "%s")}}{{.GlobalIPv6Address}}{{end}}`, networkName)
+	out, err := exec.Command("docker", "inspect", "-f", tmpl, containerName).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// GetNetworkGateway6 returns the IPv6 gateway of a Docker network, or "" if none.
+func GetNetworkGateway6(networkName string) string {
+	out, err := exec.Command("docker", "network", "inspect", networkName).Output()
+	if err != nil {
+		return ""
+	}
+	var networks []struct {
+		IPAM struct {
+			Config []struct {
+				Subnet  string `json:"Subnet"`
+				Gateway string `json:"Gateway"`
+			} `json:"Config"`
+		} `json:"IPAM"`
+	}
+	if err := json.Unmarshal(out, &networks); err != nil || len(networks) == 0 {
+		return ""
+	}
+	for _, cfg := range networks[0].IPAM.Config {
+		if cfg.Gateway != "" && strings.Contains(cfg.Gateway, ":") {
+			return cfg.Gateway
+		}
+	}
+	return ""
 }
 
 func contains(s, substr string) bool {

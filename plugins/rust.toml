@@ -1,0 +1,11 @@
+# Rust Plugin
+# Rust toolchain with crates.io access
+
+name = "rust"
+description = "Rust with crates.io access"
+
+packages = ["rustup"]
+
+[upstream."crates.io"]
+[upstream."static.crates.io"]
+[upstream."static.rust-lang.org"]

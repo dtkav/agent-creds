@@ -16,14 +16,24 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
+
 func runConsole(args []string) {
 	// Get directories
 	workDir, _ := os.Getwd()
 
-	// Load per-project config
-	cfg, err := LoadProjectConfig(workDir)
+	// Get the actual executable path (resolves symlinks)
+	exe, err := os.Executable()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading agent-creds.toml: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error finding executable: %v\n", err)
+		os.Exit(1)
+	}
+	exe, _ = filepath.EvalSymlinks(exe)
+	scriptDir := filepath.Dir(filepath.Dir(exe)) // go up from bin/
+
+	// Load per-project config with plugins
+	cfg, err := LoadProjectConfigWithPlugins(workDir, scriptDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -37,15 +47,6 @@ func runConsole(args []string) {
 		name = args[0]
 	}
 	slug := Slug(name)
-
-	// Get the actual executable path (resolves symlinks)
-	exe, err := os.Executable()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error finding executable: %v\n", err)
-		os.Exit(1)
-	}
-	exe, _ = filepath.EvalSymlinks(exe)
-	scriptDir := filepath.Dir(filepath.Dir(exe)) // go up from bin/
 
 	mgr := NewInstanceManager(scriptDir)
 	inst := mgr.GetInstance(slug)
@@ -129,13 +130,14 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		}
 	}
 
-	// Build aenv if needed
+	// Build aenv if needed (CGO_ENABLED=0 for static binary, required by Nix-based image)
 	aenvBin := "generated/aenv"
 	aenvSrc := "cmd/aenv/main.go"
 	if !fileExists(aenvBin) || fileNewer(aenvSrc, aenvBin) {
 		spinner.Status("building aenv...")
 		cmd := exec.Command("go", "build", "-o", "../../generated/aenv", ".")
 		cmd.Dir = "cmd/aenv"
+		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 		cmd.Run()
 	}
 
@@ -146,6 +148,7 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		spinner.Status("building cdp-proxy...")
 		cmd := exec.Command("go", "build", "-o", "../../generated/cdp-proxy", ".")
 		cmd.Dir = "cmd/cdp-proxy"
+		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 		cmd.Run()
 	}
 
@@ -156,6 +159,16 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		spinner.Status("building tcp-bridge...")
 		cmd := exec.Command("go", "build", "-o", "../../generated/tcp-bridge", ".")
 		cmd.Dir = "cmd/tcp-bridge"
+		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+		cmd.Run()
+	}
+
+	// Generate SSH key pair if not present (used by adev console to SSH into sandbox)
+	sshKeyPath := filepath.Join(scriptDir, "generated", "sandbox-key")
+	sshPubKeyPath := sshKeyPath + ".pub"
+	if !fileExists(sshKeyPath) {
+		spinner.Status("generating SSH key...")
+		cmd := exec.Command("ssh-keygen", "-t", "ed25519", "-f", sshKeyPath, "-N", "", "-C", "adev-sandbox")
 		cmd.Run()
 	}
 
@@ -164,7 +177,14 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	if sandboxImage == "" {
 		sandboxImage = "docker.system3.md/sandbox"
 	}
-	if !imageExists(sandboxImage) {
+	if sandboxImage == "sandbox-local" {
+		// Build locally from Nix if config changed (packages, inline nix, etc.)
+		if err := ensureSandboxImage(cfg, scriptDir, spinner); err != nil {
+			spinner.Stop()
+			fmt.Fprintf(os.Stderr, "Error building sandbox image: %v\n", err)
+			os.Exit(1)
+		}
+	} else if !imageExists(sandboxImage) {
 		spinner.Status("pulling sandbox image...")
 		if err := run("docker", "pull", sandboxImage); err != nil {
 			spinner.Stop()
@@ -179,16 +199,9 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		credsMounts = []string{"-v", scriptDir + "/creds:/creds:ro"}
 	}
 
-	// Pip cache mount (speeds up pip installs)
-	var pipCacheMounts []string
-	homeDir, _ := os.UserHomeDir()
-	pipCache := filepath.Join(homeDir, ".cache", "pip")
-	if fileExists(pipCache) {
-		pipCacheMounts = []string{"-v", pipCache + ":/home/devuser/.cache/pip"}
-	}
-
 	// Git config mount (preserves git identity for commits)
 	var gitConfigMounts []string
+	homeDir, _ := os.UserHomeDir()
 	gitConfig := filepath.Join(homeDir, ".gitconfig")
 	if fileExists(gitConfig) {
 		gitConfigMounts = []string{"-v", gitConfig + ":/home/devuser/.gitconfig:ro"}
@@ -198,10 +211,10 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	claudeConfigDir := filepath.Join(scriptDir, "claude-dev/claude-config")
 	os.MkdirAll(claudeConfigDir, 0755)
 
-	// Create per-sandbox network
+	// Create per-sandbox network (remove stale one first if it exists without containers)
 	spinner.Status("creating network...")
-	createNetArgs := []string{"network", "create", "--ipv6", networkName}
-	if err := run("docker", createNetArgs...); err != nil {
+	run("docker", "network", "rm", networkName) // ignore error - may not exist
+	if err := run("docker", "network", "create", "--ipv6", networkName); err != nil {
 		spinner.Stop()
 		fmt.Fprintf(os.Stderr, "Error creating network %s: %v\n", networkName, err)
 		os.Exit(1)
@@ -213,6 +226,7 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		"--name", envoyName,
 		"--network", networkName,
 		"--network-alias", "envoy",
+		"--ulimit", "nofile=65536:65536",
 		"-v", scriptDir+"/generated/certs/ca.crt:/certs/ca.crt:ro",
 		"-v", scriptDir+"/generated/certs/ca.key:/certs/ca.key:ro",
 		"-v", scriptDir+"/generated/domains.json:/etc/envoy/domains.json:ro",
@@ -308,8 +322,8 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 							return
 						}
 						if event.Op&(fsnotify.Write|fsnotify.Create) != 0 {
-							// Reload config
-							newCfg, err := LoadProjectConfig(workDir)
+							// Reload config with plugins
+							newCfg, err := LoadProjectConfigWithPlugins(workDir, scriptDir)
 							if err != nil {
 								continue
 							}
@@ -366,6 +380,8 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	// Build sandbox args
 	args := []string{"run", "--rm",
 		"--name", sandboxName,
+		"--tmpfs", "/run:exec",  // s6-svscan creates service dirs here
+		"--tmpfs", "/tmp:exec",  // dropbear host key, ready signal, etc.
 	}
 	// Network configuration depends on runtime:
 	// - gvisor (default): connect directly to network, sandbox-net uses --network=host
@@ -386,6 +402,15 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		"-e", "CLAUDE_CONFIG_DIR=/home/devuser/.claude",
 		"-v", workDir+":/workspace",
 		"-v", claudeConfigDir+":/home/devuser/.claude",
+		// Mount agent-creds CA so proxy TLS is trusted system-wide
+		"-v", scriptDir+"/generated/certs/ca.crt:/etc/ssl/agent-creds-ca.crt:ro",
+		// Mount entrypoint and binaries so changes take effect without image rebuild
+		"-v", scriptDir+"/claude-dev/entrypoint.sh:/entrypoint.sh:ro",
+		"-v", scriptDir+"/generated/aenv:/usr/local/bin/aenv:ro",
+		"-v", scriptDir+"/generated/cdp-proxy:/usr/local/bin/cdp-proxy:ro",
+		"-v", scriptDir+"/generated/tcp-bridge:/usr/local/bin/tcp-bridge:ro",
+		// SSH public key for passwordless login (mounted to /etc/adev/ so tmpfs on /tmp doesn't hide it)
+		"-v", sshPubKeyPath+":/etc/adev/pubkey:ro",
 	)
 	// Browser and CDP forwarding via TCP (tcp-bridge creates Unix sockets in container)
 	if browserFwd != nil {
@@ -397,13 +422,39 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		args = append(args, "-e", fmt.Sprintf("CDP_PORT=%d", cdpPort))
 	}
 	args = append(args, credsMounts...)
-	args = append(args, pipCacheMounts...)
 	args = append(args, gitConfigMounts...)
-	// Mount project config for aenv (read-only, well-known path and in workspace)
+	// Mount merged config for aenv display (includes agent + plugin upstreams),
+	// and raw project config in workspace for user reference.
+	mergedConfigToml := filepath.Join(scriptDir, "generated", "merged-config.toml")
 	agentCredsToml := filepath.Join(workDir, "agent-creds.toml")
-	if fileExists(agentCredsToml) {
+	if fileExists(mergedConfigToml) {
+		args = append(args, "-v", mergedConfigToml+":/etc/aenv/agent-creds.toml:ro")
+	} else if fileExists(agentCredsToml) {
 		args = append(args, "-v", agentCredsToml+":/etc/aenv/agent-creds.toml:ro")
+	}
+	if fileExists(agentCredsToml) {
 		args = append(args, "-v", agentCredsToml+":/workspace/agent-creds.toml:ro")
+	}
+
+	// Plugin mounts
+	for _, mount := range cfg.Mounts {
+		if !fileExists(mount.Source) {
+			fmt.Fprintf(os.Stderr, "Warning: mount source %s does not exist, skipping\n", mount.Source)
+			continue
+		}
+		mountStr := mount.Source + ":" + mount.Target
+		if mount.Readonly {
+			mountStr += ":ro"
+		}
+		args = append(args, "-v", mountStr)
+	}
+
+	// Plugin environment variables
+	for _, env := range cfg.Env {
+		value := resolveEnvValue(env.Value)
+		if value != "" {
+			args = append(args, "-e", env.Name+"="+value)
+		}
 	}
 
 	// Add custom runtime if configured (only for sandbox, not sandbox-net or envoy)
@@ -415,27 +466,23 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		sandboxImage = "sandbox"
 	}
 
-	// gvisor (default): start detached, start sandbox-net with --network=host, then attach
-	// runc: run interactively in one step
+	// Start sandbox
+	spinner.Status("starting sandbox...")
+	detachedArgs := append([]string{"run", "-dit", "--rm"}, args[2:]...)
+	detachedArgs = append(detachedArgs, sandboxImage)
+	if err := run("docker", detachedArgs...); err != nil {
+		spinner.Stop()
+		fmt.Fprintf(os.Stderr, "Error starting sandbox: %v\n", err)
+		cleanup()
+		os.Exit(1)
+	}
+
 	if useHostNetfilter {
-		// Start sandbox detached
-		spinner.Status("starting sandbox...")
-		detachedArgs := append([]string{}, args...)
-		detachedArgs = append(detachedArgs[:2], append([]string{"-dit"}, detachedArgs[2:]...)...)
-		detachedArgs = append(detachedArgs, sandboxImage)
-
-		if err := run("docker", detachedArgs...); err != nil {
-			spinner.Stop()
-			fmt.Fprintf(os.Stderr, "Error starting sandbox: %v\n", err)
-			cleanup()
-			os.Exit(1)
-		}
-
-		// Get IPs for host iptables setup
-		sandboxIP, err := GetContainerIP(sandboxName, networkName)
+		// gVisor: get subnet from Docker network (no need to wait for sandbox IP)
+		subnet, err := GetNetworkSubnet(networkName)
 		if err != nil {
 			spinner.Stop()
-			fmt.Fprintf(os.Stderr, "Error getting sandbox IP: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error getting network subnet: %v\n", err)
 			cleanup()
 			os.Exit(1)
 		}
@@ -447,48 +494,64 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 			os.Exit(1)
 		}
 
-		// Start sandbox-net with --network=host to setup host iptables
+		// Get IPv6 addresses for dual-stack DNAT
+		subnet6 := GetNetworkSubnet6(networkName)
+		envoyIP6 := GetContainerIP6(envoyName, networkName)
+		gatewayIP6 := GetNetworkGateway6(networkName)
+
 		spinner.Status("starting network filter...")
 		chainName := "ADEV-" + strings.ToUpper(slug)
-		if err := run("docker", "run", "-d", "--rm",
+		entrypointArgs := fmt.Sprintf("%s %s %s %s %s %s %s", subnet, envoyIP, chainName, gatewayIP, subnet6, envoyIP6, gatewayIP6)
+		if err := runQuiet("docker", "run", "-d", "--rm",
 			"--name", containerName,
 			"--network=host",
 			"--cap-add=NET_ADMIN",
 			"-v", scriptDir+"/claude-dev/sandbox-net/entrypoint-host.sh:/entrypoint.sh:ro",
-			"alpine", "sh", "-c", fmt.Sprintf("apk add --no-cache iptables && /entrypoint.sh %s %s %s", sandboxIP, envoyIP, chainName)); err != nil {
+			"alpine", "sh", "-c", fmt.Sprintf("apk add --no-cache iptables ip6tables && /entrypoint.sh %s", entrypointArgs)); err != nil {
 			spinner.Stop()
 			fmt.Fprintf(os.Stderr, "Error starting sandbox-net: %v\n", err)
 			cleanup()
 			os.Exit(1)
 		}
-
-		// Stop spinner before interactive session
-		spinner.Stop()
-
-		// Attach to sandbox interactively
-		cmd := exec.Command("docker", "attach", sandboxName)
-		cmd.Stdin = os.Stdin
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		cmd.Run()
-	} else {
-		// Stop spinner before interactive session
-		spinner.Stop()
-
-		// Run sandbox interactively (original behavior)
-		args = append([]string{}, args...)
-		args = append(args[:2], append([]string{"-it"}, args[2:]...)...)
-		args = append(args, sandboxImage)
-
-		cmd := exec.Command("docker", args...)
-		cmd.Stdin = os.Stdin
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		cmd.Run()
 	}
 
-	// Cleanup
-	cleanup()
+	// Wait for entrypoint to finish (touches /tmp/adev-ready when sshd is up)
+	spinner.Status("waiting for sandbox...")
+	waitCmd := exec.Command("docker", "exec", sandboxName,
+		"bash", "-c", "until [ -f /tmp/adev-ready ]; do sleep 0.1; done")
+	waitCmd.Run()
+
+	// Get container IP for SSH
+	var sshIP string
+	if useHostNetfilter {
+		sshIP, err = GetContainerIP(sandboxName, networkName)
+	} else {
+		sshIP, err = GetContainerIP(containerName, networkName)
+	}
+	if err != nil {
+		spinner.Stop()
+		fmt.Fprintf(os.Stderr, "Error getting container IP: %v\n", err)
+		cleanup()
+		os.Exit(1)
+	}
+
+	spinner.Stop()
+	signal.Stop(sigChan)
+
+	// SSH into the sandbox (dropbear runs as devuser on port 2222)
+	sshCmd := exec.Command("ssh",
+		"-i", sshKeyPath,
+		"-p", "2222",
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=/dev/null",
+		"-o", "LogLevel=ERROR",
+		"-o", "ConnectTimeout=10",
+		"devuser@"+sshIP)
+	sshCmd.Stdin = os.Stdin
+	sshCmd.Stdout = os.Stdout
+	sshCmd.Stderr = os.Stderr
+	sshCmd.Run()
+	// No cleanup: use 'adev stop' to stop.
 }
 
 func sortedUpstreamKeys(m map[string]UpstreamConfig) []string {

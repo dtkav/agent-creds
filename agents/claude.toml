@@ -1,0 +1,14 @@
+# Claude Agent
+# Claude Code with OAuth authentication
+
+name = "claude"
+description = "Claude Code AI assistant"
+packages = ["claude-code"]
+plugins = ["python", "nodejs", "go", "rust", "cli-tools", "build-tools", "github"]
+
+[upstream."api.anthropic.com"]
+[upstream."claude.ai"]
+[upstream."platform.claude.com"]
+
+[[browser_target]]
+url = "https://claude.ai/oauth/authorize*"

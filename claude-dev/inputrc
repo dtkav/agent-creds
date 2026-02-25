@@ -1,0 +1,4 @@
+set input-meta on
+set convert-meta off
+"\e[1;5C": forward-word
+"\e[1;5D": backward-word

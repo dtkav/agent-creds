@@ -1,0 +1,12 @@
+# Build Tools Plugin
+# Compilation toolchain
+
+name = "build-tools"
+description = "Build essentials and development libraries"
+
+packages = [
+    "build-essential",
+    "libcurl4-openssl-dev",
+    "libssl-dev",
+    "zlib1g-dev",
+]

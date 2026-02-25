@@ -1,0 +1,10 @@
+# Node.js Plugin
+# Node.js toolchain with npm registry access
+
+name = "nodejs"
+description = "Node.js with npm and registry access"
+
+packages = ["nodejs", "npm"]
+
+[upstream."registry.npmjs.org"]
+

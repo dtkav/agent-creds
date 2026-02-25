@@ -1,0 +1,10 @@
+# GitHub Plugin
+# GitHub API access for git operations and GitHub CLI
+
+name = "github"
+description = "GitHub and GitHub API access"
+
+packages = ["git"]
+
+[upstream."github.com"]
+[upstream."api.github.com"]

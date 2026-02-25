@@ -19,6 +19,7 @@ type Generator struct {
 	vaultHost string
 	vaultPort int
 	vaultDNS  string // optional DNS server for resolving vault host
+	cfg       ProjectConfig // full merged config for aenv display
 }
 
 func NewGenerator(rootDir string, cfg ProjectConfig) (*Generator, error) {
@@ -31,6 +32,7 @@ func NewGenerator(rootDir string, cfg ProjectConfig) (*Generator, error) {
 		vaultHost: vaultHost,
 		vaultPort: vaultPort,
 		vaultDNS:  cfg.Vault.DNS,
+		cfg:       cfg,
 	}
 
 	for host := range cfg.Upstream {
@@ -61,8 +63,62 @@ func (g *Generator) Generate() error {
 	if err := g.generateDomainsJSON(); err != nil {
 		return err
 	}
+	if err := g.generateMergedConfig(); err != nil {
+		return err
+	}
 
 	return nil
+}
+
+// generateMergedConfig writes the fully-merged project config (with agent/plugin
+// upstreams) as TOML. This is mounted into the sandbox at /etc/aenv/agent-creds.toml
+// so the aenv display shows the complete allowlist, not just the project-level upstreams.
+func (g *Generator) generateMergedConfig() error {
+	var sb strings.Builder
+	sb.WriteString("# Auto-generated merged config (project + agent + plugins)\n")
+	sb.WriteString("# Do not edit — regenerated on every adev start\n\n")
+
+	// [sandbox] section
+	sb.WriteString("[sandbox]\n")
+	if g.cfg.Sandbox.Name != "" {
+		sb.WriteString(fmt.Sprintf("name = %q\n", g.cfg.Sandbox.Name))
+	}
+	if g.cfg.Sandbox.Agent != "" {
+		sb.WriteString(fmt.Sprintf("agent = %q\n", g.cfg.Sandbox.Agent))
+	}
+	sb.WriteString("\n")
+
+	// [vault] section
+	if g.cfg.Vault.Host != "" {
+		sb.WriteString("[vault]\n")
+		sb.WriteString(fmt.Sprintf("host = %q\n\n", g.cfg.Vault.Host))
+	}
+
+	// [upstream."host"] sections — sorted for stable output
+	for _, host := range g.hosts {
+		sb.WriteString(fmt.Sprintf("[upstream.%q]\n", host))
+	}
+
+	// [[browser_target]] sections
+	for _, bt := range g.cfg.BrowserTargets {
+		sb.WriteString(fmt.Sprintf("\n[[browser_target]]\nurl = %q\n", bt.URL))
+	}
+
+	// [[cdp_target]] sections
+	for _, ct := range g.cfg.CDPTargets {
+		sb.WriteString("\n[[cdp_target]]\n")
+		if ct.Type != "" {
+			sb.WriteString(fmt.Sprintf("type = %q\n", ct.Type))
+		}
+		if ct.Title != "" {
+			sb.WriteString(fmt.Sprintf("title = %q\n", ct.Title))
+		}
+		if ct.URL != "" {
+			sb.WriteString(fmt.Sprintf("url = %q\n", ct.URL))
+		}
+	}
+
+	return writeIfChanged(filepath.Join(g.genDir, "merged-config.toml"), []byte(sb.String()), 0644)
 }
 
 func (g *Generator) generateCA() error {

@@ -43,15 +43,18 @@ RUN apt-get update && apt-get install -y \
     unzip \
     # Network filtering (for firecracker runtime)
     iptables \
+    # SSH server for adev console
+    openssh-server \
     && rm -rf /var/lib/apt/lists/* \
     && rm -f /usr/lib/python*/EXTERNALLY-MANAGED
 
+# sshd runtime dir + minimal config (pubkey only, no passwords)
+RUN mkdir -p /var/run/sshd \
+    && echo 'PubkeyAuthentication yes\nPasswordAuthentication no\nUsePAM no\nAcceptEnv LANG LC_* TERM COLORTERM' \
+       > /etc/ssh/sshd_config.d/adev.conf
+
 # Install Python packages
 RUN pip3 install --break-system-packages websockets
-
-# Install abduco (session management)
-RUN curl -fsSL https://github.com/martanne/abduco/releases/download/v0.6/abduco-0.6.tar.gz | tar -xzf - \
-    && cd abduco-0.6 && make && make install && cd .. && rm -rf abduco-0.6
 
 # Install Go
 RUN curl -fsSL https://go.dev/dl/go1.23.5.linux-amd64.tar.gz | tar -C /usr/local -xzf -
@@ -117,5 +120,9 @@ ENV NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/agent-creds-ca.crt
 # Terminal settings
 ENV TERMINFO=/usr/share/terminfo
 
+# Run as root so sshd can bind port 22 and manage devuser sessions.
+# SSH sessions authenticate as devuser (PermitRootLogin no in sshd_config).
+USER root
+
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["claude"]
+CMD ["bash"]

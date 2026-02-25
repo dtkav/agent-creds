@@ -174,16 +174,25 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 
 	// Get sandbox image (default to registry)
 	sandboxImage := cfg.Sandbox.Image
+	var envPath string // Nix store path for sandbox-env (only for local builds)
 	if sandboxImage == "" {
 		sandboxImage = "docker.system3.md/sandbox"
 	}
 	if sandboxImage == "sandbox-local" {
-		// Build locally from Nix if config changed (packages, inline nix, etc.)
-		if err := ensureSandboxImage(cfg, scriptDir, spinner); err != nil {
+		// Build base image + env separately (env rebuilds are fast)
+		if err := ensureBaseImage(scriptDir, spinner); err != nil {
 			spinner.Stop()
-			fmt.Fprintf(os.Stderr, "Error building sandbox image: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error building base image: %v\n", err)
 			os.Exit(1)
 		}
+		var err error
+		envPath, err = ensureSandboxEnv(cfg, scriptDir, spinner)
+		if err != nil {
+			spinner.Stop()
+			fmt.Fprintf(os.Stderr, "Error building sandbox env: %v\n", err)
+			os.Exit(1)
+		}
+		sandboxImage = "sandbox-base"
 	} else if !imageExists(sandboxImage) {
 		spinner.Status("pulling sandbox image...")
 		if err := run("docker", "pull", sandboxImage); err != nil {
@@ -412,6 +421,13 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		// SSH public key for passwordless login (mounted to /etc/adev/ so tmpfs on /tmp doesn't hide it)
 		"-v", sshPubKeyPath+":/etc/adev/pubkey:ro",
 	)
+	// Mount host Nix store for sandbox-env (local builds only)
+	if envPath != "" {
+		args = append(args,
+			"-v", nixDir()+":/nix:ro",
+			"-e", "SANDBOX_ENV="+envPath,
+		)
+	}
 	// Browser and CDP forwarding via TCP (tcp-bridge creates Unix sockets in container)
 	if browserFwd != nil {
 		args = append(args, "-e", fmt.Sprintf("TCP_BROWSER_PORT=%d", tcpBrowserPort))
@@ -518,7 +534,7 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	// Wait for entrypoint to finish (touches /tmp/adev-ready when sshd is up)
 	spinner.Status("waiting for sandbox...")
 	waitCmd := exec.Command("docker", "exec", sandboxName,
-		"bash", "-c", "until [ -f /tmp/adev-ready ]; do sleep 0.1; done")
+		"sh", "-c", "until [ -f /tmp/adev-ready ]; do sleep 0.1; done")
 	waitCmd.Run()
 
 	// Get container IP for SSH

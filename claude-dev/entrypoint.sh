@@ -1,32 +1,77 @@
-#!/bin/bash
+#!/bin/sh
 # Runs as root (gVisor doesn't honor setuid — dropbear needs root for PTY allocation).
 # s6-svscan supervises dropbear (SSH), tcp-bridge, and cdp-proxy.
 # SSH sessions run as devuser (dropbear handles user switching).
+#
+# Two modes:
+# 1. SANDBOX_ENV set: base image is a thin skeleton (busybox only). All packages
+#    live in $SANDBOX_ENV, a Nix buildEnv store path mounted from host at /nix.
+# 2. SANDBOX_ENV unset: registry image with packages baked in (legacy).
 set -e
+
+# --- Bootstrap from $SANDBOX_ENV (local Nix builds only) ---
+if [ -n "$SANDBOX_ENV" ]; then
+    # The base image has only busybox. Create symlinks and config files pointing
+    # to the real packages in the mounted Nix store.
+
+    # /bin/bash — needed by everything (s6 run scripts, .bashrc, interactive shells)
+    ln -sf "$SANDBOX_ENV/bin/bash" /bin/bash
+
+    # /etc/shells: dropbear validates user shells against this list.
+    # Without it, dropbear rejects logins with "invalid shell".
+    printf '%s\n' "$SANDBOX_ENV/bin/bash" "/bin/bash" "/bin/sh" > /etc/shells
+
+    # PAM config for sudo: pam_permit allows everything (dev sandbox, no real auth needed).
+    # Use full store paths since /lib/security/ doesn't exist in the base image.
+    pamlib="$SANDBOX_ENV/lib/security"
+    mkdir -p /etc/pam.d
+    printf 'auth     sufficient %s/pam_permit.so\naccount  sufficient %s/pam_permit.so\nsession  sufficient %s/pam_permit.so\n' \
+        "$pamlib" "$pamlib" "$pamlib" > /etc/pam.d/sudo
+
+    # bash-completion: symlink to stable path sourced by .bashrc
+    ln -sf "$SANDBOX_ENV/share/bash-completion/bash_completion" /etc/bash_completion
+
+    # sudo: Nix store is read-only, can't set setuid there. Copy to writable location.
+    cp "$SANDBOX_ENV/bin/sudo" /usr/local/bin/sudo
+    chmod u+s /usr/local/bin/sudo
+
+    # sudoers: copy from the env so sudo can find its config
+    cp "$SANDBOX_ENV/etc/sudoers" /etc/sudoers 2>/dev/null || true
+    chmod 440 /etc/sudoers 2>/dev/null || true
+
+    # Set environment from $SANDBOX_ENV
+    export PATH="$SANDBOX_ENV/bin:/usr/local/bin:/bin:/usr/bin:/home/devuser/.local/bin:/home/devuser/.cargo/bin:/home/devuser/go/bin"
+    export TERMINFO_DIRS="$SANDBOX_ENV/share/terminfo:/usr/share/terminfo"
+    export XDG_DATA_DIRS="$SANDBOX_ENV/share:/usr/share:/share"
+    export SSL_CERT_FILE="$SANDBOX_ENV/etc/ssl/certs/ca-bundle.crt"
+    export NIX_SSL_CERT_FILE="$SANDBOX_ENV/etc/ssl/certs/ca-bundle.crt"
+fi
 
 export TERM=xterm-256color
 export COLORTERM=truecolor
 
-# --- One-time setup (runs before s6 takes over as PID 1) ---
-
-# Export container env vars for SSH sessions.
-# dropbear creates a clean environment, so SSH shells lose Docker-level env vars.
+# --- Export env vars for SSH sessions ---
+# dropbear creates a clean environment, so SSH shells lose all env vars above.
 # Write them to /tmp/adev-env.sh which .bashrc sources.
 {
-    # Env vars set by Docker (flake.nix config.Env) that SSH sessions need
-    for var in TERMINFO_DIRS XDG_DATA_DIRS SSL_CERT_FILE NIX_SSL_CERT_FILE NODE_EXTRA_CA_CERTS COLORTERM BROWSER TCP_BROWSER_PORT TCP_CDP_PORT CDP_PORT; do
-        val="${!var:-}"
+    for var in PATH TERMINFO_DIRS XDG_DATA_DIRS SSL_CERT_FILE NIX_SSL_CERT_FILE SANDBOX_ENV COLORTERM BROWSER TCP_BROWSER_PORT TCP_CDP_PORT CDP_PORT NODE_EXTRA_CA_CERTS; do
+        eval "val=\${$var:-}"
         [ -n "$val" ] && printf 'export %s="%s"\n' "$var" "$val"
     done
 } > /tmp/adev-env.sh
 
 # Build combined CA bundle so tools (including Node.js) trust the proxy CA.
 # Overrides SSL_CERT_FILE/NIX_SSL_CERT_FILE written above.
-SSL_CERT_FILE="${SSL_CERT_FILE:-}"
 if [ -f /etc/ssl/agent-creds-ca.crt ] && [ -n "$SSL_CERT_FILE" ]; then
     cat "$SSL_CERT_FILE" /etc/ssl/agent-creds-ca.crt > /tmp/ca-bundle.crt
-    printf 'export SSL_CERT_FILE=/tmp/ca-bundle.crt\nexport NIX_SSL_CERT_FILE=/tmp/ca-bundle.crt\nexport NODE_OPTIONS="--use-openssl-ca"\n' \
-        >> /tmp/adev-env.sh
+    cat >> /tmp/adev-env.sh <<'CAEOF'
+export SSL_CERT_FILE=/tmp/ca-bundle.crt
+export NIX_SSL_CERT_FILE=/tmp/ca-bundle.crt
+export NODE_OPTIONS="--use-openssl-ca"
+export REQUESTS_CA_BUNDLE=/tmp/ca-bundle.crt
+export PIP_CERT=/tmp/ca-bundle.crt
+export CURL_CA_BUNDLE=/tmp/ca-bundle.crt
+CAEOF
 fi
 
 # Generate dropbear host key

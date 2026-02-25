@@ -79,7 +79,9 @@
           dropbear         # lightweight SSH server — runs as devuser (no root needed)
           s6               # process supervisor (PID 1, replaces sleep infinity)
           execline         # s6 scripting language for service run scripts
-          sudo             # devuser can sudo inside sessions (needs setuid set in build-nix.sh)
+          sudo             # devuser can sudo inside sessions (needs setuid set in entrypoint)
+          linux-pam        # PAM modules for sudo (pam_permit)
+          cacert           # CA certificates
           # Always-present dev utilities (ubuntu parity)
           curl
           wget
@@ -126,18 +128,45 @@
 
         allPackages = basePackages ++ pluginPackages;
 
-        # Base sandbox image
-        sandboxImage = pkgs.dockerTools.buildLayeredImage {
-          name = "sandbox";
+        # --- sandbox-base: thin Docker image, no Nix packages ---
+        # Only busybox (for /bin/sh), user setup, scripts, config placeholders.
+        # All real packages come from sandbox-env mounted at /nix at runtime.
+        sandboxBase = pkgs.dockerTools.buildLayeredImage {
+          name = "sandbox-base";
           tag = "latest";
 
-          # fakeRootCommands runs after contents are merged, with fakeroot + fakechroot.
-          # Use the shadow suite to properly create users/groups (no manual passwd editing).
-          # Note: groupadd/useradd print nscd-flush warnings (no nscd in build env) — harmless.
           enableFakechroot = true;
           fakeRootCommands = ''
+            # Install busybox as a REAL binary, not a Nix store symlink.
+            # /nix gets mounted over at runtime with the host Nix store,
+            # so anything that symlinks into /nix/store/ would break.
+            # fakeRootCommands writes directly to the image filesystem.
+            cp ${pkgs.busybox}/bin/busybox /bin/busybox
+            chmod +x /bin/busybox
+            for cmd in $(${pkgs.busybox}/bin/busybox --list); do
+              ln -sf busybox "/bin/$cmd"
+            done
+
+            # Copy entrypoint (must survive /nix mount)
+            cp ${./claude-dev/entrypoint.sh} /entrypoint.sh
+            chmod +x /entrypoint.sh
+
+            # Copy helper scripts
+            mkdir -p /usr/local/bin
+            cp ${./claude-dev/open-browser} /usr/local/bin/open-browser
+            chmod +x /usr/local/bin/open-browser
+
+            # readline config
+            cp ${./claude-dev/inputrc} /etc/inputrc
+
+            # Sudoers drop-in
+            mkdir -p /etc/sudoers.d
+            printf 'devuser ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/devuser
+            chmod 440 /etc/sudoers.d/devuser
+
             # Initialize shadow database with root only
-            printf 'root:x:0:0:root:/root:${pkgs.bashInteractive}/bin/bash\n' > /etc/passwd
+            # Use /bin/bash as shell — entrypoint creates symlink to $SANDBOX_ENV/bin/bash
+            printf 'root:x:0:0:root:/root:/bin/bash\n' > /etc/passwd
             printf 'root:!:19000::::::\n' > /etc/shadow
             printf 'root:x:0:\n' > /etc/group
             printf 'root::::\n' > /etc/gshadow
@@ -148,7 +177,7 @@
             ${pkgs.shadow}/bin/useradd \
               -u 1000 -g devuser \
               -d /home/devuser \
-              -s ${pkgs.bashInteractive}/bin/bash \
+              -s /bin/bash \
               -M devuser
 
             # Home directory with devuser ownership
@@ -161,44 +190,17 @@
             chown -R 1000:1000 /home/devuser
           '';
 
-          contents = allPackages ++ [
-            # Create filesystem structure and copy scripts
+          contents = [
+            # Minimal filesystem skeleton. No Nix packages in contents because
+            # buildLayeredImage puts them in /nix/store/ which gets mounted over.
+            # Everything that needs to survive is placed by fakeRootCommands above.
             (pkgs.runCommand "base-system" {} ''
               mkdir -p $out/etc $out/tmp $out/workspace
-              mkdir -p $out/usr/local/bin
+              mkdir -p $out/bin $out/sbin $out/usr/local/bin
               chmod 1777 $out/tmp
 
-              # Copy entrypoint
-              cp ${./claude-dev/entrypoint.sh} $out/entrypoint.sh
-              chmod +x $out/entrypoint.sh
-
-              # Copy open-browser helper
-              cp ${./claude-dev/open-browser} $out/usr/local/bin/open-browser
-              chmod +x $out/usr/local/bin/open-browser
-
-              # readline config (enables 8-bit input, UTF-8, word movement)
-              cp ${./claude-dev/inputrc} $out/etc/inputrc
-
-              # Symlink bash-completion main script to a stable path
-              ln -s ${pkgs.bash-completion}/share/bash-completion/bash_completion $out/etc/bash_completion
-
-              # Sudoers drop-in: devuser can run anything without password (dev sandbox).
-              # Note: /etc/sudoers itself comes from pkgs.sudo (includes @includedir /etc/sudoers.d).
-              # The sudo setuid bit is set in build-nix.sh's Dockerfile layer (Nix store is immutable).
-              mkdir -p $out/etc/sudoers.d
-              printf 'devuser ALL=(ALL) NOPASSWD: ALL\n' > $out/etc/sudoers.d/devuser
-              chmod 440 $out/etc/sudoers.d/devuser
-
-              # PAM config for sudo: pam_permit allows everything (dev sandbox, no real auth needed)
-              # Use full Nix store paths since /lib/security/ doesn't exist in this image.
-              mkdir -p $out/etc/pam.d
-              pamlib="${pkgs.linux-pam}/lib/security"
-              printf 'auth     sufficient %s/pam_permit.so\naccount  sufficient %s/pam_permit.so\nsession  sufficient %s/pam_permit.so\n' \
-                "$pamlib" "$pamlib" "$pamlib" > $out/etc/pam.d/sudo
-
-              # /etc/shells: dropbear validates user shells against this list.
-              # Without it, dropbear rejects logins with "invalid shell".
-              printf '%s\n' "${pkgs.bashInteractive}/bin/bash" "/bin/sh" > $out/etc/shells
+              # Note: /etc/shells, /etc/pam.d/sudo, /etc/bash_completion are created
+              # by entrypoint.sh at runtime from $SANDBOX_ENV paths.
 
               # Note: Go binaries (aenv, cdp-proxy, tcp-bridge) are added
               # as a Docker layer after the Nix build - see build-nix.sh
@@ -208,17 +210,9 @@
           config = {
             WorkingDir = "/workspace";
             Env = [
-              "PATH=/usr/local/bin:/bin:/usr/bin:/home/devuser/.local/bin:/home/devuser/.cargo/bin:/home/devuser/go/bin"
               "HOME=/home/devuser"
               "USER=devuser"
-              "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
-              "NIX_SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
               "TERM=xterm-256color"
-              # Nix puts terminfo in the store path; set dirs so ncurses programs find it
-              "TERMINFO_DIRS=${pkgs.ncurses}/share/terminfo:/usr/share/terminfo"
-              # bash-completion finds completion scripts by searching XDG_DATA_DIRS for
-              # share/bash-completion/completions/. Include all package share dirs.
-              "XDG_DATA_DIRS=${pkgs.lib.makeSearchPath "share" allPackages}:/usr/share:/share"
               # Trust the agent-creds proxy CA for Node.js (file is mounted at runtime)
               "NODE_EXTRA_CA_CERTS=/etc/ssl/agent-creds-ca.crt"
             ];
@@ -230,10 +224,20 @@
           };
         };
 
+        # --- sandbox-env: all packages merged into one store path ---
+        # Mounted from host at /nix, passed via SANDBOX_ENV env var.
+        # Fast rebuild when only plugins change — Nix caches unchanged store paths.
+        sandboxEnv = pkgs.buildEnv {
+          name = "sandbox-env";
+          paths = allPackages;
+          ignoreCollisions = true;  # multiple packages may provide same file
+        };
+
       in {
         packages = {
-          default = sandboxImage;
-          sandbox = sandboxImage;
+          default = sandboxBase;
+          sandbox-base = sandboxBase;
+          sandbox-env = sandboxEnv;
         };
 
         # Development shell for working on agent-creds itself

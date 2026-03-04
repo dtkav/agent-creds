@@ -20,12 +20,15 @@ func usage() {
 	fmt.Println("  (none)    Launch interactive TUI (default)")
 	fmt.Println("  status    Show container, connectivity, and identity status")
 	fmt.Println("  ssh       Connect to authz SSH server (pass args through)")
+	fmt.Println("  secrets   Manage SOPS-encrypted vault secrets")
 	fmt.Println()
 	fmt.Println("Examples:")
 	fmt.Println("  actl                  # interactive TUI")
 	fmt.Println("  actl status")
 	fmt.Println("  actl ssh whoami")
 	fmt.Println("  actl ssh mint api.stripe.com")
+	fmt.Println("  actl secrets init")
+	fmt.Println("  actl secrets set STRIPE_API_KEY=sk_test_xxx")
 }
 
 func main() {
@@ -48,6 +51,8 @@ func main() {
 		runStatus(cfg)
 	case "ssh":
 		runSSH(cfg, os.Args[2:])
+	case "secrets":
+		runSecrets(os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 	default:

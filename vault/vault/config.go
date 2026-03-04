@@ -11,7 +11,7 @@ import (
 
 // Config represents the vault.yaml configuration
 type Config struct {
-	Secrets       map[string]string            `yaml:"secrets,omitempty"`
+	Secrets       map[string]map[string]string `yaml:"secrets,omitempty"`
 	SigningKey    string                       `yaml:"signing_key"`
 	EncryptionKey string                      `yaml:"encryption_key,omitempty"`
 	Credentials  map[string]CredentialConfig  `yaml:"credentials"`
@@ -62,51 +62,96 @@ type PocketBaseResolvedConfig struct {
 	Password   string
 }
 
-// Load reads and parses a vault.yaml file, resolving ${...} secret references.
+// Load reads and parses a vault.yaml file, resolving $secret references.
+//
+// $secret uses path#KEY syntax:
+//
+//	token:
+//	  $secret: '/home/user/project/auth.env#API_KEY'
+//
+// The path before # is a key in the secrets map (populated by actl vault import).
+// The fragment after # is the env var name within that group.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read vault config: %w", err)
 	}
 
-	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	// First pass: extract the secrets map
+	var raw struct {
+		Secrets map[string]map[string]string `yaml:"secrets"`
+	}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("failed to parse vault config: %w", err)
 	}
 
-	// Resolve ${...} references from secrets map
-	cfg.resolveRefs()
+	// Second pass: resolve $secret refs in the YAML tree
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("failed to parse vault config: %w", err)
+	}
+
+	if len(raw.Secrets) > 0 && len(doc.Content) > 0 {
+		resolveSecretRefs(doc.Content[0], raw.Secrets)
+	}
+
+	// Marshal resolved tree and unmarshal into Config
+	resolved, err := yaml.Marshal(&doc)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize resolved config: %w", err)
+	}
+
+	var cfg Config
+	if err := yaml.Unmarshal(resolved, &cfg); err != nil {
+		return nil, fmt.Errorf("failed to parse resolved config: %w", err)
+	}
+
 	return &cfg, nil
 }
 
-// resolveRefs expands ${SECRET_NAME} references using the secrets map.
-func (c *Config) resolveRefs() {
-	if len(c.Secrets) == 0 {
-		return
-	}
-
-	resolve := func(s string) string {
-		if !strings.Contains(s, "${") {
-			return s
+// resolveSecretRefs walks a YAML mapping node, replacing $secret nodes with
+// resolved scalar values. A $secret node is a mapping with a single key "$secret"
+// whose value is "path#KEY".
+func resolveSecretRefs(node *yaml.Node, secrets map[string]map[string]string) {
+	if node.Kind == yaml.MappingNode {
+		for i := 0; i < len(node.Content)-1; i += 2 {
+			val := node.Content[i+1]
+			if isSecretRef(val) {
+				ref := val.Content[1].Value
+				resolved := lookupSecret(ref, secrets)
+				node.Content[i+1] = &yaml.Node{
+					Kind:  yaml.ScalarNode,
+					Value: resolved,
+				}
+			} else {
+				resolveSecretRefs(val, secrets)
+			}
 		}
-		for k, v := range c.Secrets {
-			s = strings.ReplaceAll(s, "${"+k+"}", v)
+	} else if node.Kind == yaml.SequenceNode {
+		for _, child := range node.Content {
+			resolveSecretRefs(child, secrets)
 		}
-		return s
 	}
+}
 
-	c.SigningKey = resolve(c.SigningKey)
-	c.EncryptionKey = resolve(c.EncryptionKey)
+// isSecretRef returns true if the node is a mapping like {$secret: "path#KEY"}.
+func isSecretRef(node *yaml.Node) bool {
+	return node.Kind == yaml.MappingNode &&
+		len(node.Content) == 2 &&
+		node.Content[0].Value == "$secret"
+}
 
-	for domain, cc := range c.Credentials {
-		cc.Token = resolve(cc.Token)
-		cc.Username = resolve(cc.Username)
-		cc.Password = resolve(cc.Password)
-		cc.AccessKeyID = resolve(cc.AccessKeyID)
-		cc.SecretAccessKey = resolve(cc.SecretAccessKey)
-		cc.Email = resolve(cc.Email)
-		c.Credentials[domain] = cc
+// lookupSecret resolves a "path#KEY" reference against the secrets map.
+func lookupSecret(ref string, secrets map[string]map[string]string) string {
+	path, key, ok := strings.Cut(ref, "#")
+	if !ok {
+		return ""
 	}
+	group, exists := secrets[path]
+	if !exists {
+		return ""
+	}
+	return group[key]
 }
 
 // Validate checks that the config is well-formed and all credentials have required fields.

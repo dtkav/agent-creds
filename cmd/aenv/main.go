@@ -379,7 +379,9 @@ func main() {
 	for host := range cfg.Upstream {
 		hosts = append(hosts, host)
 	}
-	sort.Strings(hosts)
+	sort.Slice(hosts, func(i, j int) bool {
+		return reverseDomain(hosts[i]) < reverseDomain(hosts[j])
+	})
 
 	var allTokens []TokenInfo
 	for _, path := range findAkeyFiles() {
@@ -400,12 +402,20 @@ func main() {
 		}
 	}
 
-	// Build left column: Allowlist (all accessible hosts)
+	// Build left column: Allowlist (grouped by base domain)
 	var leftLines []string
 	leftLines = append(leftLines, sectionStyle.Render("Allowlist"))
 	leftLines = append(leftLines, "")
-	for _, host := range hosts {
-		leftLines = append(leftLines, fmt.Sprintf("  %s %s", okStyle.Render("◉"), dimStyle.Render(host)))
+	for _, group := range groupByBaseDomain(hosts) {
+		if len(group.subs) == 0 {
+			// Standalone domain
+			leftLines = append(leftLines, fmt.Sprintf("  %s %s", okStyle.Render("◉"), dimStyle.Render(group.base)))
+		} else {
+			// Base domain with subdomains listed inline
+			leftLines = append(leftLines, fmt.Sprintf("  %s %s  %s",
+				okStyle.Render("◉"), dimStyle.Render(group.base),
+				dimStyle.Render(strings.Join(group.subs, ", "))))
+		}
 	}
 
 	// Build right column: Credentials
@@ -537,4 +547,58 @@ func main() {
 	fmt.Println()
 	fmt.Println(lipgloss.JoinHorizontal(lipgloss.Top, leftContent, rightContent, thirdContent))
 	fmt.Println()
+}
+
+type domainGroup struct {
+	base string   // e.g. "anthropic.com"
+	subs []string // e.g. ["api", "events", "statsig"]
+}
+
+// groupByBaseDomain groups a sorted domain list by base domain.
+// The input must already be sorted by reverseDomain.
+func groupByBaseDomain(hosts []string) []domainGroup {
+	var groups []domainGroup
+	groupIdx := make(map[string]int) // base domain → index in groups
+
+	for _, host := range hosts {
+		base := baseDomain(host)
+		if base == host {
+			// This is the base domain itself
+			if idx, ok := groupIdx[base]; ok {
+				// Already have a group from a subdomain seen earlier — weird but handle it
+				_ = idx
+			} else {
+				groupIdx[base] = len(groups)
+				groups = append(groups, domainGroup{base: base})
+			}
+		} else {
+			// Subdomain — find or create the group
+			sub := strings.TrimSuffix(host, "."+base)
+			if idx, ok := groupIdx[base]; ok {
+				groups[idx].subs = append(groups[idx].subs, sub)
+			} else {
+				groupIdx[base] = len(groups)
+				groups = append(groups, domainGroup{base: base, subs: []string{sub}})
+			}
+		}
+	}
+	return groups
+}
+
+// baseDomain extracts the registrable domain (last two labels, or three for known TLDs).
+func baseDomain(host string) string {
+	parts := strings.Split(host, ".")
+	if len(parts) <= 2 {
+		return host
+	}
+	return strings.Join(parts[len(parts)-2:], ".")
+}
+
+// reverseDomain reverses domain labels for sorting: "api.stripe.com" → "com.stripe.api"
+func reverseDomain(domain string) string {
+	parts := strings.Split(domain, ".")
+	for l, r := 0, len(parts)-1; l < r; l, r = l+1, r-1 {
+		parts[l], parts[r] = parts[r], parts[l]
+	}
+	return strings.Join(parts, ".")
 }

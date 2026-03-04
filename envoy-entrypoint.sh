@@ -33,8 +33,10 @@ done
 
 # Start dns-responder if binary is present (returns envoy's IP for all DNS queries)
 if [ -x /usr/local/bin/dns-responder ]; then
-    OWN_IP=$(hostname -i | awk '{print $1}')
+    OWN_IP=$(hostname -i | tr ' ' '\n' | grep -v ':' | head -1)
+    OWN_IP6=$(hostname -i | tr ' ' '\n' | grep ':' | head -1)
     DNS_ARGS="-ip $OWN_IP"
+    [ -n "$OWN_IP6" ] && DNS_ARGS="$DNS_ARGS -ip6 $OWN_IP6"
     [ -f /etc/envoy/domains.json ] && DNS_ARGS="$DNS_ARGS -domains /etc/envoy/domains.json"
     [ -d /var/log/adev ] && DNS_ARGS="$DNS_ARGS -log /var/log/adev/network.log"
     /usr/local/bin/dns-responder $DNS_ARGS &

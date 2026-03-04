@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -109,6 +110,58 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 				},
 			},
 		}, nil
+	}
+
+	// Validate upstream restrictions (methods/paths from envoy context_extensions)
+	contextExtensions := req.GetAttributes().GetContextExtensions()
+	if allowedMethods, ok := contextExtensions["allowed_methods"]; ok && allowedMethods != "" {
+		method := strings.ToUpper(httpReq.GetMethod())
+		allowed := false
+		for _, m := range strings.Split(allowedMethods, ",") {
+			if strings.ToUpper(strings.TrimSpace(m)) == method {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			log.Printf("Upstream restriction: method %s not allowed for %s (allowed: %s)", method, host, allowedMethods)
+			return &authv3.CheckResponse{
+				Status: &status.Status{Code: int32(codes.PermissionDenied)},
+				HttpResponse: &authv3.CheckResponse_DeniedResponse{
+					DeniedResponse: &authv3.DeniedHttpResponse{
+						Status: &typev3.HttpStatus{Code: typev3.StatusCode_Forbidden},
+						Body:   fmt.Sprintf("Method %s not allowed for %s (allowed: %s)", method, host, allowedMethods),
+					},
+				},
+			}, nil
+		}
+	}
+	if allowedPaths, ok := contextExtensions["allowed_paths"]; ok && allowedPaths != "" {
+		reqPath := httpReq.GetPath()
+		// Strip query string for matching
+		if idx := strings.IndexByte(reqPath, '?'); idx >= 0 {
+			reqPath = reqPath[:idx]
+		}
+		matched := false
+		patterns := strings.Split(allowedPaths, ",")
+		for _, pattern := range patterns {
+			if macaroon.MatchPath(strings.TrimSpace(pattern), reqPath) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			log.Printf("Upstream restriction: path %s not allowed for %s (allowed: %s)", httpReq.GetPath(), host, allowedPaths)
+			return &authv3.CheckResponse{
+				Status: &status.Status{Code: int32(codes.PermissionDenied)},
+				HttpResponse: &authv3.CheckResponse_DeniedResponse{
+					DeniedResponse: &authv3.DeniedHttpResponse{
+						Status: &typev3.HttpStatus{Code: typev3.StatusCode_Forbidden},
+						Body:   fmt.Sprintf("Path %s not allowed for %s (allowed: %s)", httpReq.GetPath(), host, allowedPaths),
+					},
+				},
+			}, nil
+		}
 	}
 
 	// Look up credential config for this host

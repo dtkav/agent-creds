@@ -97,6 +97,13 @@ func (g *Generator) generateMergedConfig() error {
 	// [upstream."host"] sections — sorted for stable output
 	for _, host := range g.hosts {
 		sb.WriteString(fmt.Sprintf("[upstream.%q]\n", host))
+		ucfg := g.upstream[host]
+		if len(ucfg.Methods) > 0 {
+			sb.WriteString(fmt.Sprintf("methods = [%s]\n", quotedList(ucfg.Methods)))
+		}
+		if len(ucfg.Paths) > 0 {
+			sb.WriteString(fmt.Sprintf("paths = [%s]\n", quotedList(ucfg.Paths)))
+		}
 	}
 
 	// [[browser_target]] sections
@@ -160,6 +167,7 @@ func (g *Generator) generateEnvoyJSON() error {
 	for _, host := range g.hosts {
 		safeName := strings.ReplaceAll(host, ".", "_")
 		clusterName := safeName + "_cluster"
+		upstreamCfg := g.upstream[host]
 
 		// All domains go through ext_authz for token validation
 		// Credential injection is controlled by vault.toml in vault
@@ -190,6 +198,33 @@ func (g *Generator) generateEnvoyJSON() error {
 			},
 		}
 
+		// Build route config — add context_extensions if methods/paths are restricted
+		route := map[string]interface{}{
+			"match": map[string]string{"prefix": "/"},
+			"route": map[string]interface{}{
+				"cluster":              clusterName,
+				"host_rewrite_literal": host,
+				"timeout":              "300s",
+			},
+		}
+		if len(upstreamCfg.Methods) > 0 || len(upstreamCfg.Paths) > 0 {
+			contextExtensions := map[string]string{}
+			if len(upstreamCfg.Methods) > 0 {
+				contextExtensions["allowed_methods"] = strings.Join(upstreamCfg.Methods, ",")
+			}
+			if len(upstreamCfg.Paths) > 0 {
+				contextExtensions["allowed_paths"] = strings.Join(upstreamCfg.Paths, ",")
+			}
+			route["typed_per_filter_config"] = map[string]interface{}{
+				"envoy.filters.http.ext_authz": map[string]interface{}{
+					"@type": "type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute",
+					"check_settings": map[string]interface{}{
+						"context_extensions": contextExtensions,
+					},
+				},
+			}
+		}
+
 		filterChains = append(filterChains, map[string]interface{}{
 			"filter_chain_match": map[string]interface{}{
 				"server_names": []string{host},
@@ -211,33 +246,40 @@ func (g *Generator) generateEnvoyJSON() error {
 				"typed_config": map[string]interface{}{
 					"@type":       "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
 					"stat_prefix": "ingress_http",
-					"access_log": []map[string]interface{}{{
-						"name": "envoy.access_loggers.stdout",
-						"typed_config": map[string]interface{}{
-							"@type": "type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog",
+					"access_log": []map[string]interface{}{
+						{
+							"name": "envoy.access_loggers.stdout",
+							"typed_config": map[string]interface{}{
+								"@type": "type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog",
+							},
 						},
-					}},
+						{
+							"name": "envoy.access_loggers.file",
+							"typed_config": map[string]interface{}{
+								"@type": "type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog",
+								"path":  "/var/log/adev/access.log",
+								"log_format": map[string]interface{}{
+									"text_format_source": map[string]interface{}{
+										"inline_string": "%START_TIME(%Y-%m-%dT%H:%M:%SZ)% %REQ(:METHOD)% %REQ(:AUTHORITY)%%REQ(:PATH)% %RESPONSE_CODE% %RESPONSE_CODE_DETAILS%\n",
+									},
+								},
+							},
+						},
+					},
 					"http_filters": httpFilters,
 					"route_config": map[string]interface{}{
 						"name": "local_route",
 						"virtual_hosts": []map[string]interface{}{{
 							"name":    safeName + "_vhost",
 							"domains": []string{"*"},
-							"routes": []map[string]interface{}{{
-								"match": map[string]string{"prefix": "/"},
-								"route": map[string]interface{}{
-									"cluster":              clusterName,
-									"host_rewrite_literal": host,
-									"timeout":              "300s",
-								},
-							}},
+							"routes":  []map[string]interface{}{route},
 						}},
 					},
 				},
 			}},
 		})
 
-		clusters = append(clusters, map[string]interface{}{
+		cluster := map[string]interface{}{
 			"name":              clusterName,
 			"type":              "LOGICAL_DNS",
 			"dns_lookup_family": "V4_ONLY",
@@ -355,6 +397,14 @@ func writeIfChanged(path string, data []byte, perm os.FileMode) error {
 		return nil
 	}
 	return os.WriteFile(path, data, perm)
+}
+
+func quotedList(items []string) string {
+	quoted := make([]string, len(items))
+	for i, s := range items {
+		quoted[i] = fmt.Sprintf("%q", s)
+	}
+	return strings.Join(quoted, ", ")
 }
 
 func runCmd(name string, args ...string) error {

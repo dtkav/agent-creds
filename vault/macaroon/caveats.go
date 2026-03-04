@@ -97,9 +97,13 @@ func (c *PathCaveat) Prohibits(f macaroon.Access) error {
 	return fmt.Errorf("path %q does not match allowed patterns %v", path, c.Patterns)
 }
 
-// matchPath matches a path against a glob-style pattern
+// MatchPath matches a path against a glob-style pattern.
 // * matches a single path segment (no slashes)
 // ** matches zero or more path segments (including empty)
+func MatchPath(pattern, path string) bool {
+	return matchPath(pattern, path)
+}
+
 func matchPath(pattern, path string) bool {
 	// Convert glob pattern to regex
 	// Escape regex special chars except * which we handle specially

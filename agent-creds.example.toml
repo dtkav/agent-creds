@@ -22,9 +22,12 @@ name = "myproject"
 # Only these domains are reachable from the sandbox. All other traffic is blocked.
 
 [upstream."api.stripe.com"]
-# akey = "stripe.akey"  # optional: credential file for token-based auth
+# methods = ["GET", "POST"]       # restrict to specific HTTP methods
+# paths = ["/v1/customers/*"]     # restrict to specific path patterns (* = segment, ** = multi-segment)
 
 [upstream."api.github.com"]
+# methods = ["GET"]
+# paths = ["/repos/myorg/**"]
 
 # Claude Code requires these endpoints for API and OAuth
 [upstream."api.anthropic.com"]

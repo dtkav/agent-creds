@@ -40,7 +40,7 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Println(`vault-admin - Admin CLI for authz service
+	fmt.Print(`vault-admin - Admin CLI for authz service
 
 Usage:
   vault-admin user <command>   Manage users

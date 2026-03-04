@@ -48,7 +48,7 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Println(`mint - Token minting and .akey file management
+	fmt.Print(`mint - Token minting and .akey file management
 
 Usage:
   mint create [flags]          Create a new token or .akey file

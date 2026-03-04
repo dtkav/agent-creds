@@ -40,7 +40,7 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Println(`mintfs - FUSE filesystem for session-based token generation
+	fmt.Print(`mintfs - FUSE filesystem for session-based token generation
 
 Usage:
   mintfs start <mountpoint> [options]   Mount the filesystem

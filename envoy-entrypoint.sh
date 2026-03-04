@@ -31,4 +31,13 @@ grep '"host"' /etc/envoy/domains.json | sed 's/.*"host": *"//;s/".*//' | while r
     rm -f "$csrfile" "$extfile"
 done
 
+# Start dns-responder if binary is present (returns envoy's IP for all DNS queries)
+if [ -x /usr/local/bin/dns-responder ]; then
+    OWN_IP=$(hostname -i | awk '{print $1}')
+    DNS_ARGS="-ip $OWN_IP"
+    [ -f /etc/envoy/domains.json ] && DNS_ARGS="$DNS_ARGS -domains /etc/envoy/domains.json"
+    [ -d /var/log/adev ] && DNS_ARGS="$DNS_ARGS -log /var/log/adev/network.log"
+    /usr/local/bin/dns-responder $DNS_ARGS &
+fi
+
 exec envoy "$@"

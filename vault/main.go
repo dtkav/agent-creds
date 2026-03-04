@@ -24,18 +24,27 @@ import (
 	"vault/db"
 	"vault/macaroon"
 	"vault/oauth2"
+	"vault/pocketbase"
+	"vault/sigv4"
 	"vault/vault"
 )
 
 type domainCredential struct {
-	// Static API key (for auth_type="static")
-	apiKey       string
+	authType     string
 	headerName   string
 	headerPrefix string
 
-	// OAuth2 config (for auth_type="oauth2")
-	authType     string
+	// Static API key (for authType="static")
+	apiKey string
+
+	// OAuth2 config (for authType="oauth2")
 	oauth2Config *oauth2.OAuth2Config
+
+	// SigV4 config (for authType="sigv4")
+	sigv4Config *sigv4.Config
+
+	// PocketBase config (for authType="pocketbase")
+	pocketbaseConfig *pocketbase.Config
 }
 
 type authServer struct {
@@ -45,6 +54,8 @@ type authServer struct {
 	credentials map[string]domainCredential
 	// OAuth2 token manager for handling token refresh
 	tokenManager *oauth2.TokenManager
+	// PocketBase token manager for handling PB auth
+	pbTokenManager *pocketbase.TokenManager
 	// StrictMode requires macaroon tokens for all requests (no passthrough)
 	strictMode bool
 }
@@ -73,12 +84,14 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 	// Check for authorization header
 	authHeader := headers["authorization"]
 
-	// Check if this looks like a macaroon token (configurable prefix)
+	// Detect macaroon token: either Bearer acm_xxx or SigV4 Credential=acm_xxx/...
 	tokenPrefix := s.verifier.GetTokenPrefix()
-	isMacaroon := macaroon.IsMacaroonAuth(authHeader, tokenPrefix)
+	isBearerMacaroon := macaroon.IsMacaroonAuth(authHeader, tokenPrefix)
+	sigv4Macaroon := sigv4.ExtractAccessKey(authHeader)
+	isSigV4Macaroon := strings.HasPrefix(sigv4Macaroon, tokenPrefix)
 
 	// Passthrough: unrecognized token format (unless strict mode)
-	if !isMacaroon {
+	if !isBearerMacaroon && !isSigV4Macaroon {
 		if s.strictMode {
 			log.Printf("Strict mode: rejected non-macaroon request to %s %s", host, access.Path)
 			return &authv3.CheckResponse{
@@ -97,8 +110,15 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 		}, nil
 	}
 
+	// Normalize auth header for macaroon verification
+	// For SigV4: extract the macaroon from Credential field and wrap as Bearer
+	verifyAuth := authHeader
+	if isSigV4Macaroon {
+		verifyAuth = "Bearer " + sigv4Macaroon
+	}
+
 	// Macaroon token: validate and inject credentials
-	result := s.verifier.VerifyRequest(authHeader, access)
+	result := s.verifier.VerifyRequest(verifyAuth, access)
 	if !result.Valid {
 		log.Printf("Auth failed: %s", result.Error)
 		return &authv3.CheckResponse{
@@ -179,27 +199,19 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 		}, nil
 	}
 
-	// Get the API key/token to inject
-	var apiToken string
-	if cred.authType == "oauth2" {
-		// OAuth2: get fresh access token
-		token, err := s.tokenManager.GetAccessToken(host, cred.oauth2Config)
-		if err != nil {
-			log.Printf("OAuth2 token refresh failed for %s: %v", host, err)
-			return &authv3.CheckResponse{
-				Status: &status.Status{Code: int32(codes.Internal)},
-				HttpResponse: &authv3.CheckResponse_DeniedResponse{
-					DeniedResponse: &authv3.DeniedHttpResponse{
-						Status: &typev3.HttpStatus{Code: typev3.StatusCode_InternalServerError},
-						Body:   "Failed to refresh OAuth2 token",
-					},
+	// Resolve credential headers based on type
+	respHeaders, err := s.resolveCredentialHeaders(cred, host, httpReq)
+	if err != nil {
+		log.Printf("Credential resolution failed for %s: %v", host, err)
+		return &authv3.CheckResponse{
+			Status: &status.Status{Code: int32(codes.Internal)},
+			HttpResponse: &authv3.CheckResponse_DeniedResponse{
+				DeniedResponse: &authv3.DeniedHttpResponse{
+					Status: &typev3.HttpStatus{Code: typev3.StatusCode_InternalServerError},
+					Body:   "Failed to resolve credentials",
 				},
-			}, nil
-		}
-		apiToken = token
-	} else {
-		// Static: use configured API key
-		apiToken = cred.apiKey
+			},
+		}, nil
 	}
 
 	log.Printf("Auth successful for %s %s %s", access.Method, host, access.Path)
@@ -207,16 +219,78 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 		Status: &status.Status{Code: int32(codes.OK)},
 		HttpResponse: &authv3.CheckResponse_OkResponse{
 			OkResponse: &authv3.OkHttpResponse{
-				Headers: []*corev3.HeaderValueOption{{
-					Header: &corev3.HeaderValue{
-						Key:   cred.headerName,
-						Value: cred.headerPrefix + apiToken,
-					},
-					AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
-				}},
+				Headers: respHeaders,
 			},
 		},
 	}, nil
+}
+
+// resolveCredentialHeaders returns the headers to inject based on credential type
+func (s *authServer) resolveCredentialHeaders(cred domainCredential, host string, httpReq interface{ GetMethod() string; GetPath() string; GetHeaders() map[string]string }) ([]*corev3.HeaderValueOption, error) {
+	switch cred.authType {
+	case "static":
+		return []*corev3.HeaderValueOption{{
+			Header: &corev3.HeaderValue{
+				Key:   cred.headerName,
+				Value: cred.headerPrefix + cred.apiKey,
+			},
+			AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
+		}}, nil
+
+	case "oauth2":
+		token, err := s.tokenManager.GetAccessToken(host, cred.oauth2Config)
+		if err != nil {
+			return nil, fmt.Errorf("oauth2 token refresh: %w", err)
+		}
+		return []*corev3.HeaderValueOption{{
+			Header: &corev3.HeaderValue{
+				Key:   cred.headerName,
+				Value: cred.headerPrefix + token,
+			},
+			AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
+		}}, nil
+
+	case "sigv4":
+		cfg := cred.sigv4Config
+		headers := httpReq.GetHeaders()
+		signed, err := sigv4.SignRequest(
+			cfg,
+			httpReq.GetMethod(),
+			host,
+			httpReq.GetPath(),
+			headers,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("sigv4 signing: %w", err)
+		}
+		var result []*corev3.HeaderValueOption
+		for k, v := range signed {
+			result = append(result, &corev3.HeaderValueOption{
+				Header: &corev3.HeaderValue{
+					Key:   k,
+					Value: v,
+				},
+				AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
+			})
+		}
+		return result, nil
+
+	case "pocketbase":
+		token, err := s.pbTokenManager.GetToken(host, cred.pocketbaseConfig)
+		if err != nil {
+			return nil, fmt.Errorf("pocketbase auth: %w", err)
+		}
+		return []*corev3.HeaderValueOption{{
+			Header: &corev3.HeaderValue{
+				Key:   cred.headerName,
+				Value: token,
+			},
+			AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
+		}}, nil
+
+	default:
+		return nil, fmt.Errorf("unknown auth type: %s", cred.authType)
+	}
 }
 
 func main() {
@@ -229,6 +303,7 @@ func main() {
 
 	verifier := macaroon.NewVerifier(keyStore)
 	tokenManager := oauth2.NewTokenManager()
+	pbTokenManager := pocketbase.NewTokenManager()
 
 	// Load credentials from vault.toml
 	credentials := make(map[string]domainCredential)
@@ -246,12 +321,31 @@ func main() {
 			log.Printf("Warning: Failed to resolve vault credentials: %v", err)
 		} else {
 			for host, cred := range resolved {
-				credentials[host] = domainCredential{
-					apiKey:       cred.Value,
-					headerName:   cred.HeaderName,
-					headerPrefix: "", // Value already includes prefix
-					authType:     "static",
+				dc := domainCredential{
+					headerName: cred.HeaderName,
 				}
+				switch cred.Type {
+				case "sigv4":
+					dc.authType = "sigv4"
+					dc.sigv4Config = &sigv4.Config{
+						Region:         cred.SigV4Config.Region,
+						Service:        cred.SigV4Config.Service,
+						AccessKeyID:    cred.SigV4Config.AccessKeyID,
+						SecretAccessKey: cred.SigV4Config.SecretAccessKey,
+					}
+				case "pocketbase":
+					dc.authType = "pocketbase"
+					dc.pocketbaseConfig = &pocketbase.Config{
+						URL:        cred.PocketBaseConfig.URL,
+						Collection: cred.PocketBaseConfig.Collection,
+						Email:      cred.PocketBaseConfig.Email,
+						Password:   cred.PocketBaseConfig.Password,
+					}
+				default:
+					dc.authType = "static"
+					dc.apiKey = cred.Value
+				}
+				credentials[host] = dc
 				log.Printf("Loaded %s credentials for %s", cred.Type, host)
 			}
 		}
@@ -351,10 +445,11 @@ func main() {
 
 	grpcServer := grpc.NewServer()
 	authv3.RegisterAuthorizationServer(grpcServer, &authServer{
-		verifier:     verifier,
-		credentials:  credentials,
-		tokenManager: tokenManager,
-		strictMode:   strictMode,
+		verifier:       verifier,
+		credentials:    credentials,
+		tokenManager:   tokenManager,
+		pbTokenManager: pbTokenManager,
+		strictMode:     strictMode,
 	})
 
 	// Handle graceful shutdown

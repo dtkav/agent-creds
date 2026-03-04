@@ -5,6 +5,7 @@ services:
       - "8080:8080"
       - "2222:2222"
     environment:
+      # Env var fallback (used when vault.yaml is not configured)
       - MACAROON_SIGNING_KEY=${MACAROON_SIGNING_KEY}
       - MACAROON_ENCRYPTION_KEY=${MACAROON_ENCRYPTION_KEY}
       - STRIPE_API_KEY=${STRIPE_API_KEY}
@@ -22,7 +23,7 @@ services:
       - WEBAUTHN_RP_NAME=${WEBAUTHN_RP_NAME:-Agent Credentials}
     volumes:
       - vault-data:/data
-      - ./vault/vault.toml:/app/vault.toml:ro
+      - ./generated/vault.yaml:/app/vault.yaml:ro
     networks:
       - agent-creds
 

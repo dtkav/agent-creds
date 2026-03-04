@@ -34,6 +34,40 @@ type KeyStore struct {
 	TokenPrefix string
 }
 
+// LoadKeyStoreFromConfig loads keys from config values (base64-encoded strings)
+func LoadKeyStoreFromConfig(signingKeyB64, encryptionKeyB64 string) (*KeyStore, error) {
+	if signingKeyB64 == "" {
+		return nil, fmt.Errorf("signing_key is required")
+	}
+
+	signingKey, err := base64.StdEncoding.DecodeString(signingKeyB64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid signing_key: %w", err)
+	}
+	if len(signingKey) < 32 {
+		return nil, fmt.Errorf("signing_key must be at least 32 bytes")
+	}
+
+	var encryptionKey macaroon.EncryptionKey
+	if encryptionKeyB64 != "" {
+		encKey, err := base64.StdEncoding.DecodeString(encryptionKeyB64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid encryption_key: %w", err)
+		}
+		if len(encKey) != macaroon.EncryptionKeySize {
+			return nil, fmt.Errorf("encryption_key must be %d bytes", macaroon.EncryptionKeySize)
+		}
+		encryptionKey = macaroon.EncryptionKey(encKey)
+	}
+
+	return &KeyStore{
+		SigningKey:    macaroon.SigningKey(signingKey),
+		EncryptionKey: encryptionKey,
+		KeyID:         []byte("primary"),
+		TokenPrefix:   DefaultTokenPrefix,
+	}, nil
+}
+
 // LoadKeyStore loads keys from environment variables
 func LoadKeyStore() (*KeyStore, error) {
 	// MACAROON_SIGNING_KEY: base64-encoded 32-byte key

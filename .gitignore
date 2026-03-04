@@ -1,8 +1,6 @@
 # Environment files
 .env
 *.env
-# SOPS-encrypted secrets (values encrypted, safe to commit)
-!vault/secrets.env
 
 # igit
 .igit

@@ -294,65 +294,89 @@ func (s *authServer) resolveCredentialHeaders(cred domainCredential, host string
 }
 
 func main() {
-	// Load macaroon keys
-	keyStore, err := macaroon.LoadKeyStore()
+	// Load vault config (vault.yaml preferred, env vars as fallback)
+	vaultPath := os.Getenv("VAULT_CONFIG")
+	if vaultPath == "" {
+		vaultPath = "vault.yaml"
+	}
+
+	vaultCfg, err := vault.Load(vaultPath)
 	if err != nil {
-		log.Fatalf("Failed to load macaroon keys: %v", err)
+		// Fallback: construct config from env vars for backward compatibility
+		log.Printf("No vault.yaml found, falling back to env vars")
+		vaultCfg = &vault.Config{
+			SigningKey:    os.Getenv("MACAROON_SIGNING_KEY"),
+			EncryptionKey: os.Getenv("MACAROON_ENCRYPTION_KEY"),
+			Credentials:  make(map[string]vault.CredentialConfig),
+		}
+	}
+
+	// Load macaroon keys: from config, or fall back to env vars
+	var keyStore *macaroon.KeyStore
+	if vaultCfg.SigningKey != "" {
+		keyStore, err = macaroon.LoadKeyStoreFromConfig(vaultCfg.SigningKey, vaultCfg.EncryptionKey)
+		if err != nil {
+			log.Fatalf("Failed to load macaroon keys from config: %v", err)
+		}
+	} else {
+		keyStore, err = macaroon.LoadKeyStore()
+		if err != nil {
+			log.Fatalf("Failed to load macaroon keys: %v", err)
+		}
 	}
 	log.Printf("Loaded macaroon signing key")
+
+	warnings, err := vaultCfg.Validate()
+	if err != nil {
+		// Validation failure is non-fatal when using env var fallback
+		log.Printf("Warning: vault config validation: %v", err)
+	}
+	for _, w := range warnings {
+		log.Printf("Warning: %s", w)
+	}
 
 	verifier := macaroon.NewVerifier(keyStore)
 	tokenManager := oauth2.NewTokenManager()
 	pbTokenManager := pocketbase.NewTokenManager()
 
-	// Load credentials from vault.toml
+	// Resolve credentials
 	credentials := make(map[string]domainCredential)
 
-	vaultPath := os.Getenv("VAULT_CONFIG")
-	if vaultPath == "" {
-		vaultPath = "vault.toml"
+	resolved, err := vaultCfg.Resolve()
+	if err != nil {
+		log.Printf("Warning: failed to resolve credentials: %v", err)
 	}
-
-	if vaultCfg, err := vault.Load(vaultPath); err != nil {
-		log.Printf("Warning: Failed to load vault.toml: %v", err)
-	} else {
-		resolved, err := vaultCfg.Resolve()
-		if err != nil {
-			log.Printf("Warning: Failed to resolve vault credentials: %v", err)
-		} else {
-			for host, cred := range resolved {
-				dc := domainCredential{
-					headerName: cred.HeaderName,
-				}
-				switch cred.Type {
-				case "sigv4":
-					dc.authType = "sigv4"
-					dc.sigv4Config = &sigv4.Config{
-						Region:         cred.SigV4Config.Region,
-						Service:        cred.SigV4Config.Service,
-						AccessKeyID:    cred.SigV4Config.AccessKeyID,
-						SecretAccessKey: cred.SigV4Config.SecretAccessKey,
-					}
-				case "pocketbase":
-					dc.authType = "pocketbase"
-					dc.pocketbaseConfig = &pocketbase.Config{
-						URL:        cred.PocketBaseConfig.URL,
-						Collection: cred.PocketBaseConfig.Collection,
-						Email:      cred.PocketBaseConfig.Email,
-						Password:   cred.PocketBaseConfig.Password,
-					}
-				default:
-					dc.authType = "static"
-					dc.apiKey = cred.Value
-				}
-				credentials[host] = dc
-				log.Printf("Loaded %s credentials for %s", cred.Type, host)
-			}
+	for host, cred := range resolved {
+		dc := domainCredential{
+			headerName: cred.HeaderName,
 		}
+		switch cred.Type {
+		case "sigv4":
+			dc.authType = "sigv4"
+			dc.sigv4Config = &sigv4.Config{
+				Region:         cred.SigV4Config.Region,
+				Service:        cred.SigV4Config.Service,
+				AccessKeyID:    cred.SigV4Config.AccessKeyID,
+				SecretAccessKey: cred.SigV4Config.SecretAccessKey,
+			}
+		case "pocketbase":
+			dc.authType = "pocketbase"
+			dc.pocketbaseConfig = &pocketbase.Config{
+				URL:        cred.PocketBaseConfig.URL,
+				Collection: cred.PocketBaseConfig.Collection,
+				Email:      cred.PocketBaseConfig.Email,
+				Password:   cred.PocketBaseConfig.Password,
+			}
+		default:
+			dc.authType = "static"
+			dc.apiKey = cred.Value
+		}
+		credentials[host] = dc
+		log.Printf("Loaded %s credentials for %s", cred.Type, host)
 	}
 
 	if len(credentials) == 0 {
-		log.Printf("Warning: No credentials configured. Create vault.toml or set VAULT_CONFIG.")
+		log.Printf("Warning: No credentials configured in %s", vaultPath)
 	}
 
 	// Open database

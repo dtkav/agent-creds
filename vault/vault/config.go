@@ -4,38 +4,46 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"strings"
 
-	"github.com/BurntSushi/toml"
+	"gopkg.in/yaml.v3"
 )
 
-// Config represents the vault.toml configuration
+// Config represents the vault.yaml configuration
 type Config struct {
-	Credentials map[string]CredentialConfig `toml:"credentials"`
+	Secrets       map[string]string            `yaml:"secrets,omitempty"`
+	SigningKey    string                       `yaml:"signing_key"`
+	EncryptionKey string                      `yaml:"encryption_key,omitempty"`
+	Credentials  map[string]CredentialConfig  `yaml:"credentials"`
 }
 
 // CredentialConfig defines how to inject credentials for a domain
 type CredentialConfig struct {
-	Type     string          `toml:"type"` // "bearer", "basic", "sigv4", or "pocketbase"
-	Token    *ProviderConfig `toml:"token,omitempty"`
-	Username *ProviderConfig `toml:"username,omitempty"`
-	Password *ProviderConfig `toml:"password,omitempty"`
+	Type     string `yaml:"type"` // "bearer", "basic", "sigv4", or "pocketbase"
+	Token    string `yaml:"token,omitempty"`
+	Username string `yaml:"username,omitempty"`
+	Password string `yaml:"password,omitempty"`
 
 	// SigV4 fields
-	Region         string          `toml:"region,omitempty"`
-	Service        string          `toml:"service,omitempty"`
-	AccessKeyID    *ProviderConfig `toml:"access_key_id,omitempty"`
-	SecretAccessKey *ProviderConfig `toml:"secret_access_key,omitempty"`
+	Region         string `yaml:"region,omitempty"`
+	Service        string `yaml:"service,omitempty"`
+	AccessKeyID    string `yaml:"access_key_id,omitempty"`
+	SecretAccessKey string `yaml:"secret_access_key,omitempty"`
 
 	// PocketBase fields
-	URL        string          `toml:"url,omitempty"`
-	Collection string          `toml:"collection,omitempty"`
-	Email      *ProviderConfig `toml:"email,omitempty"`
+	URL        string `yaml:"url,omitempty"`
+	Collection string `yaml:"collection,omitempty"`
+	Email      string `yaml:"email,omitempty"`
 }
 
-// ProviderConfig defines where a credential value comes from
-type ProviderConfig struct {
-	Provider string `toml:"provider"` // "env" for now
-	Name     string `toml:"name"`     // env var name, file path, etc.
+// Credential holds a resolved credential ready for injection
+type Credential struct {
+	Type       string // "bearer", "basic", "sigv4", or "pocketbase"
+	HeaderName string // "authorization"
+	Value      string // The full header value (for bearer/basic)
+
+	SigV4Config      *SigV4ResolvedConfig
+	PocketBaseConfig *PocketBaseResolvedConfig
 }
 
 // SigV4ResolvedConfig holds resolved SigV4 credentials
@@ -54,33 +62,125 @@ type PocketBaseResolvedConfig struct {
 	Password   string
 }
 
-// Credential holds a resolved credential ready for injection
-type Credential struct {
-	Type       string // "bearer", "basic", "sigv4", or "pocketbase"
-	HeaderName string // "Authorization"
-	Value      string // The full header value (for bearer/basic)
-
-	SigV4Config      *SigV4ResolvedConfig      // populated for sigv4
-	PocketBaseConfig *PocketBaseResolvedConfig  // populated for pocketbase
-}
-
-// Load reads and parses a vault.toml file
+// Load reads and parses a vault.yaml file, resolving ${...} secret references.
 func Load(path string) (*Config, error) {
-	var cfg Config
-	if _, err := toml.DecodeFile(path, &cfg); err != nil {
-		return nil, fmt.Errorf("failed to parse vault.toml: %w", err)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read vault config: %w", err)
 	}
+
+	var cfg Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("failed to parse vault config: %w", err)
+	}
+
+	// Resolve ${...} references from secrets map
+	cfg.resolveRefs()
 	return &cfg, nil
 }
 
-// Resolve resolves all credentials from their providers
+// resolveRefs expands ${SECRET_NAME} references using the secrets map.
+func (c *Config) resolveRefs() {
+	if len(c.Secrets) == 0 {
+		return
+	}
+
+	resolve := func(s string) string {
+		if !strings.Contains(s, "${") {
+			return s
+		}
+		for k, v := range c.Secrets {
+			s = strings.ReplaceAll(s, "${"+k+"}", v)
+		}
+		return s
+	}
+
+	c.SigningKey = resolve(c.SigningKey)
+	c.EncryptionKey = resolve(c.EncryptionKey)
+
+	for domain, cc := range c.Credentials {
+		cc.Token = resolve(cc.Token)
+		cc.Username = resolve(cc.Username)
+		cc.Password = resolve(cc.Password)
+		cc.AccessKeyID = resolve(cc.AccessKeyID)
+		cc.SecretAccessKey = resolve(cc.SecretAccessKey)
+		cc.Email = resolve(cc.Email)
+		c.Credentials[domain] = cc
+	}
+}
+
+// Validate checks that the config is well-formed and all credentials have required fields.
+// Returns a list of warnings (e.g. empty values) and an error for structural problems.
+func (c *Config) Validate() (warnings []string, err error) {
+	if c.SigningKey == "" {
+		return nil, fmt.Errorf("signing_key is required")
+	}
+
+	for domain, cc := range c.Credentials {
+		w, e := cc.validate(domain)
+		warnings = append(warnings, w...)
+		if e != nil {
+			return warnings, fmt.Errorf("credentials.%s: %w", domain, e)
+		}
+	}
+	return warnings, nil
+}
+
+func (cc *CredentialConfig) validate(domain string) (warnings []string, err error) {
+	switch cc.Type {
+	case "bearer":
+		if cc.Token == "" {
+			warnings = append(warnings, fmt.Sprintf("%s: token is empty", domain))
+		}
+	case "basic":
+		if cc.Username == "" {
+			warnings = append(warnings, fmt.Sprintf("%s: username is empty", domain))
+		}
+		if cc.Password == "" {
+			warnings = append(warnings, fmt.Sprintf("%s: password is empty", domain))
+		}
+	case "sigv4":
+		if cc.Region == "" {
+			return nil, fmt.Errorf("sigv4 requires 'region'")
+		}
+		if cc.Service == "" {
+			return nil, fmt.Errorf("sigv4 requires 'service'")
+		}
+		if cc.AccessKeyID == "" {
+			warnings = append(warnings, fmt.Sprintf("%s: access_key_id is empty", domain))
+		}
+		if cc.SecretAccessKey == "" {
+			warnings = append(warnings, fmt.Sprintf("%s: secret_access_key is empty", domain))
+		}
+	case "pocketbase":
+		if cc.URL == "" {
+			return nil, fmt.Errorf("pocketbase requires 'url'")
+		}
+		if cc.Collection == "" {
+			return nil, fmt.Errorf("pocketbase requires 'collection'")
+		}
+		if cc.Email == "" {
+			warnings = append(warnings, fmt.Sprintf("%s: email is empty", domain))
+		}
+		if cc.Password == "" {
+			warnings = append(warnings, fmt.Sprintf("%s: password is empty", domain))
+		}
+	case "":
+		return nil, fmt.Errorf("'type' is required")
+	default:
+		return nil, fmt.Errorf("unknown credential type: %s", cc.Type)
+	}
+	return warnings, nil
+}
+
+// Resolve resolves all credentials into injection-ready form
 func (c *Config) Resolve() (map[string]*Credential, error) {
 	credentials := make(map[string]*Credential)
 
 	for domain, cc := range c.Credentials {
-		cred, err := cc.Resolve()
+		cred, err := cc.resolve()
 		if err != nil {
-			return nil, fmt.Errorf("failed to resolve credentials for %s: %w", domain, err)
+			return nil, fmt.Errorf("credentials.%s: %w", domain, err)
 		}
 		if cred != nil {
 			credentials[domain] = cred
@@ -90,143 +190,64 @@ func (c *Config) Resolve() (map[string]*Credential, error) {
 	return credentials, nil
 }
 
-// Resolve resolves a single credential config into a usable credential
-func (cc *CredentialConfig) Resolve() (*Credential, error) {
+func (cc *CredentialConfig) resolve() (*Credential, error) {
 	switch cc.Type {
 	case "bearer":
-		return cc.resolveBearer()
+		if cc.Token == "" {
+			return nil, nil
+		}
+		return &Credential{
+			Type:       "bearer",
+			HeaderName: "authorization",
+			Value:      "Bearer " + cc.Token,
+		}, nil
+
 	case "basic":
-		return cc.resolveBasic()
+		if cc.Username == "" || cc.Password == "" {
+			return nil, nil
+		}
+		encoded := basicAuth(cc.Username, cc.Password)
+		return &Credential{
+			Type:       "basic",
+			HeaderName: "authorization",
+			Value:      "Basic " + encoded,
+		}, nil
+
 	case "sigv4":
-		return cc.resolveSigV4()
+		if cc.AccessKeyID == "" || cc.SecretAccessKey == "" {
+			return nil, nil
+		}
+		return &Credential{
+			Type:       "sigv4",
+			HeaderName: "authorization",
+			SigV4Config: &SigV4ResolvedConfig{
+				Region:         cc.Region,
+				Service:        cc.Service,
+				AccessKeyID:    cc.AccessKeyID,
+				SecretAccessKey: cc.SecretAccessKey,
+			},
+		}, nil
+
 	case "pocketbase":
-		return cc.resolvePocketBase()
+		if cc.Email == "" || cc.Password == "" {
+			return nil, nil
+		}
+		return &Credential{
+			Type:       "pocketbase",
+			HeaderName: "authorization",
+			PocketBaseConfig: &PocketBaseResolvedConfig{
+				URL:        cc.URL,
+				Collection: cc.Collection,
+				Email:      cc.Email,
+				Password:   cc.Password,
+			},
+		}, nil
+
 	default:
 		return nil, fmt.Errorf("unknown credential type: %s", cc.Type)
 	}
 }
 
-func (cc *CredentialConfig) resolveBearer() (*Credential, error) {
-	if cc.Token == nil {
-		return nil, fmt.Errorf("bearer credentials require 'token' field")
-	}
-
-	token, err := cc.Token.GetValue()
-	if err != nil {
-		return nil, err
-	}
-	if token == "" {
-		return nil, nil // No credential configured
-	}
-
-	return &Credential{
-		Type:       "bearer",
-		HeaderName: "authorization",
-		Value:      "Bearer " + token,
-	}, nil
-}
-
-func (cc *CredentialConfig) resolveBasic() (*Credential, error) {
-	if cc.Username == nil || cc.Password == nil {
-		return nil, fmt.Errorf("basic credentials require 'username' and 'password' fields")
-	}
-
-	username, err := cc.Username.GetValue()
-	if err != nil {
-		return nil, err
-	}
-	password, err := cc.Password.GetValue()
-	if err != nil {
-		return nil, err
-	}
-	if username == "" || password == "" {
-		return nil, nil // No credential configured
-	}
-
-	encoded := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
-	return &Credential{
-		Type:       "basic",
-		HeaderName: "authorization",
-		Value:      "Basic " + encoded,
-	}, nil
-}
-
-func (cc *CredentialConfig) resolveSigV4() (*Credential, error) {
-	if cc.AccessKeyID == nil || cc.SecretAccessKey == nil {
-		return nil, fmt.Errorf("sigv4 credentials require 'access_key_id' and 'secret_access_key' fields")
-	}
-	if cc.Region == "" {
-		return nil, fmt.Errorf("sigv4 credentials require 'region' field")
-	}
-	if cc.Service == "" {
-		return nil, fmt.Errorf("sigv4 credentials require 'service' field")
-	}
-
-	accessKeyID, err := cc.AccessKeyID.GetValue()
-	if err != nil {
-		return nil, err
-	}
-	secretAccessKey, err := cc.SecretAccessKey.GetValue()
-	if err != nil {
-		return nil, err
-	}
-	if accessKeyID == "" || secretAccessKey == "" {
-		return nil, nil
-	}
-
-	return &Credential{
-		Type:       "sigv4",
-		HeaderName: "authorization",
-		SigV4Config: &SigV4ResolvedConfig{
-			Region:         cc.Region,
-			Service:        cc.Service,
-			AccessKeyID:    accessKeyID,
-			SecretAccessKey: secretAccessKey,
-		},
-	}, nil
-}
-
-func (cc *CredentialConfig) resolvePocketBase() (*Credential, error) {
-	if cc.Email == nil || cc.Password == nil {
-		return nil, fmt.Errorf("pocketbase credentials require 'email' and 'password' fields")
-	}
-	if cc.URL == "" {
-		return nil, fmt.Errorf("pocketbase credentials require 'url' field")
-	}
-	if cc.Collection == "" {
-		return nil, fmt.Errorf("pocketbase credentials require 'collection' field")
-	}
-
-	email, err := cc.Email.GetValue()
-	if err != nil {
-		return nil, err
-	}
-	password, err := cc.Password.GetValue()
-	if err != nil {
-		return nil, err
-	}
-	if email == "" || password == "" {
-		return nil, nil
-	}
-
-	return &Credential{
-		Type:       "pocketbase",
-		HeaderName: "authorization",
-		PocketBaseConfig: &PocketBaseResolvedConfig{
-			URL:        cc.URL,
-			Collection: cc.Collection,
-			Email:      email,
-			Password:   password,
-		},
-	}, nil
-}
-
-// GetValue retrieves the value from the configured provider
-func (pc *ProviderConfig) GetValue() (string, error) {
-	switch pc.Provider {
-	case "env":
-		return os.Getenv(pc.Name), nil
-	default:
-		return "", fmt.Errorf("unknown provider: %s", pc.Provider)
-	}
+func basicAuth(username, password string) string {
+	return base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
 }

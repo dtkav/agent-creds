@@ -117,9 +117,16 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		os.Exit(1)
 	}
 
-	// Export SOPS-encrypted secrets into process env (docker compose inherits them).
-	// Falls back silently if actl is not in PATH or ~/.config/agent-creds/secrets.env doesn't exist.
-	if out, err := exec.Command("actl", "secrets", "export").Output(); err == nil {
+	// Decrypt vault.yaml for mounting into vault container.
+	// Write placeholder first so docker compose mount never creates a directory.
+	vaultDecrypted := filepath.Join(scriptDir, "generated", "vault.yaml")
+	if _, err := os.Stat(vaultDecrypted); os.IsNotExist(err) {
+		os.WriteFile(vaultDecrypted, []byte("signing_key: \"\"\ncredentials: {}\n"), 0600)
+	}
+	exec.Command("actl", "vault", "decrypt", vaultDecrypted).Run()
+
+	// Fallback: export legacy secrets.env as env vars for docker compose.
+	if out, err := exec.Command("actl", "vault", "export").Output(); err == nil {
 		for _, line := range strings.Split(string(out), "\n") {
 			if k, v, ok := strings.Cut(line, "="); ok && k != "" {
 				os.Setenv(k, v)

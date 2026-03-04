@@ -1,5 +1,6 @@
 .signing-key
 .token
+vault.toml
 /mint
 /mintfs-cli
 /authz

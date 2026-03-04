@@ -54,7 +54,11 @@ Commands:
   edit              Open vault.yaml in $EDITOR (decrypts/re-encrypts)
   show              Decrypt and print vault.yaml to stdout
   decrypt <path>    Decrypt vault.yaml to a file (for mounting into containers)
-  import [file]     Import KEY=VALUE pairs into the secrets section (file or stdin)
+  import <file>     Import KEY=VALUE pairs into secrets (keyed by file path)
+
+Import examples:
+  actl vault import auth.env
+  actl vault import auth.staging.env
 `)
 }
 
@@ -157,24 +161,23 @@ func sopsEncrypt(plainPath string) ([]byte, error) {
 
 const vaultTemplate = `# Vault configuration — only the secrets section is encrypted by SOPS
 # Edit with: actl vault edit
-# Import env file: actl vault import secrets.env
+# Import env file: actl vault import auth.env
 
 secrets:
-  MACAROON_SIGNING_KEY: ""
-  # STRIPE_API_KEY: sk_live_xxx
+  vault:
+    SIGNING_KEY: ""
+  # Import env files to add more groups:
+  #   actl vault import auth.env
+  #   actl vault import auth.staging.env
 
-signing_key: ${MACAROON_SIGNING_KEY}
+signing_key:
+  $secret: 'vault#SIGNING_KEY'
 
 credentials: {}
   # api.stripe.com:
   #   type: bearer
-  #   token: ${STRIPE_API_KEY}
-  # s3.us-east-1.amazonaws.com:
-  #   type: sigv4
-  #   region: us-east-1
-  #   service: s3
-  #   access_key_id: ${AWS_ACCESS_KEY_ID}
-  #   secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+  #   token:
+  #     $secret: '/home/you/project/auth.env#STRIPE_KEY'
 `
 
 func secretsInit() {
@@ -307,29 +310,37 @@ func secretsExportLegacy() {
 	os.Stdout.Write(out)
 }
 
-// secretsImport reads KEY=VALUE pairs from a file (or stdin) and merges them
-// into the secrets section of vault.yaml.
+// secretsImport reads KEY=VALUE pairs from a file and merges them into
+// secrets.<path> in vault.yaml. The group key is the file path as given.
+//
+// Usage: actl vault import <file>
 func secretsImport(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: actl vault import <file>")
+		os.Exit(1)
+	}
+
+	filePath := args[0]
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error resolving path: %v\n", err)
+		os.Exit(1)
+	}
+	group := absPath
+
 	yamlPath := vaultYAMLPath()
 	if _, err := os.Stat(yamlPath); os.IsNotExist(err) {
 		fmt.Fprintln(os.Stderr, "No vault.yaml found. Run: actl vault init")
 		os.Exit(1)
 	}
 
-	// Read input: file arg or stdin
-	var input string
-	if len(args) > 0 {
-		data, err := os.ReadFile(args[0])
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error reading %s: %v\n", args[0], err)
-			os.Exit(1)
-		}
-		input = string(data)
-	} else {
-		input = readStdin()
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error reading %s: %v\n", absPath, err)
+		os.Exit(1)
 	}
 
-	newPairs := parseDotenv(input)
+	newPairs := parseDotenv(string(data))
 	if len(newPairs) == 0 {
 		fmt.Fprintln(os.Stderr, "No KEY=VALUE pairs found")
 		os.Exit(1)
@@ -349,13 +360,14 @@ func secretsImport(args []string) {
 		os.Exit(1)
 	}
 
-	// Find or create secrets mapping node
+	// Find or create secrets.<group> mapping node
 	root := doc.Content[0] // document root mapping
 	secretsNode := findOrCreateMapping(root, "secrets")
+	groupNode := findOrCreateMapping(secretsNode, group)
 
-	// Merge new pairs into secrets
+	// Merge new pairs into secrets.<group>
 	for k, v := range newPairs {
-		setMappingValue(secretsNode, k, v)
+		setMappingValue(groupNode, k, v)
 	}
 
 	// Write modified YAML to temp file
@@ -392,8 +404,9 @@ func secretsImport(args []string) {
 		os.Exit(1)
 	}
 
+	fmt.Printf("Imported %d keys into %s\n", len(newPairs), group)
 	for k := range newPairs {
-		fmt.Printf("Imported %s\n", k)
+		fmt.Printf("  %s\n", k)
 	}
 }
 

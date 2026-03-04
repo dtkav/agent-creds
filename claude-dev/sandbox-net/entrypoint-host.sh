@@ -106,11 +106,9 @@ iptables -t nat -A POSTROUTING -s "$SUBNET" -d "$ENVOY_IP" -j MASQUERADE
 # Create filter chain for DROP rules
 iptables -N "$FILTER_CHAIN" 2>/dev/null || iptables -F "$FILTER_CHAIN"
 
-# Filter rules: allow gateway (for browser/cdp forward), DNS, envoy, established; drop rest
+# Filter rules: allow gateway (for browser/cdp forward), envoy (also serves DNS), established; drop rest
 iptables -A "$FILTER_CHAIN" -d "$GATEWAY_IP" -j ACCEPT
 iptables -A "$FILTER_CHAIN" -d "$ENVOY_IP" -j ACCEPT
-iptables -A "$FILTER_CHAIN" -p udp --dport 53 -j ACCEPT
-iptables -A "$FILTER_CHAIN" -p tcp --dport 53 -j ACCEPT
 iptables -A "$FILTER_CHAIN" -m state --state ESTABLISHED,RELATED -j ACCEPT
 iptables -A "$FILTER_CHAIN" -j DROP
 
@@ -136,8 +134,6 @@ if [ -n "$SUBNET6" ] && [ -n "$ENVOY_IP6" ]; then
     ip6tables -N "$FILTER6_CHAIN" 2>/dev/null || ip6tables -F "$FILTER6_CHAIN"
     [ -n "$GATEWAY_IP6" ] && ip6tables -A "$FILTER6_CHAIN" -d "$GATEWAY_IP6" -j ACCEPT
     ip6tables -A "$FILTER6_CHAIN" -d "$ENVOY_IP6" -j ACCEPT
-    ip6tables -A "$FILTER6_CHAIN" -p udp --dport 53 -j ACCEPT
-    ip6tables -A "$FILTER6_CHAIN" -p tcp --dport 53 -j ACCEPT
     ip6tables -A "$FILTER6_CHAIN" -m state --state ESTABLISHED,RELATED -j ACCEPT
     ip6tables -A "$FILTER6_CHAIN" -j DROP
 

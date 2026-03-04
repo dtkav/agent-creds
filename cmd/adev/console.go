@@ -163,6 +163,20 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		cmd.Run()
 	}
 
+	// Build dns-responder if needed
+	dnsResponderBin := "generated/dns-responder"
+	dnsResponderSrc := "cmd/dns-responder/main.go"
+	if !fileExists(dnsResponderBin) || fileNewer(dnsResponderSrc, dnsResponderBin) {
+		spinner.Status("building dns-responder...")
+		cmd := exec.Command("go", "build", "-o", "../../generated/dns-responder", ".")
+		cmd.Dir = "cmd/dns-responder"
+		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+		cmd.Run()
+	}
+
+	// Create logs directory for network activity log
+	os.MkdirAll(filepath.Join(scriptDir, "generated", "logs"), 0755)
+
 	// Generate SSH key pair if not present (used by adev console to SSH into sandbox)
 	sshKeyPath := filepath.Join(scriptDir, "generated", "sandbox-key")
 	sshPubKeyPath := sshKeyPath + ".pub"
@@ -241,6 +255,8 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		"-v", scriptDir+"/generated/domains.json:/etc/envoy/domains.json:ro",
 		"-v", scriptDir+"/generated/envoy.json:/etc/envoy/envoy.json:ro",
 		"-v", scriptDir+"/envoy-entrypoint.sh:/entrypoint.sh:ro",
+		"-v", scriptDir+"/generated/dns-responder:/usr/local/bin/dns-responder:ro",
+		"-v", scriptDir+"/generated/logs:/var/log/adev",
 		"--entrypoint", "/entrypoint.sh",
 		"envoyproxy/envoy:v1.28-latest",
 		"-c", "/etc/envoy/envoy.json"); err != nil {
@@ -398,11 +414,10 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	if useHostNetfilter {
 		args = append(args, "--network", networkName)
 		// gVisor doesn't work with Docker's embedded DNS (127.0.0.11)
-		// Mount custom resolv.conf with external DNS servers
+		// Write placeholder resolv.conf (overwritten with envoy IP after sandbox starts)
+		// Uses 127.0.0.1 as fail-safe so DNS fails rather than bypasses during the brief window
 		resolvConf := filepath.Join(scriptDir, "generated", "resolv.conf")
-		if !fileExists(resolvConf) {
-			os.WriteFile(resolvConf, []byte("nameserver 8.8.8.8\nnameserver 8.8.4.4\n"), 0644)
-		}
+		os.WriteFile(resolvConf, []byte("nameserver 127.0.0.1\n"), 0644)
 		args = append(args, "-v", resolvConf+":/etc/resolv.conf:ro")
 	} else {
 		args = append(args, "--network=container:"+containerName)
@@ -420,6 +435,8 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		"-v", scriptDir+"/generated/tcp-bridge:/usr/local/bin/tcp-bridge:ro",
 		// SSH public key for passwordless login (mounted to /etc/adev/ so tmpfs on /tmp doesn't hide it)
 		"-v", sshPubKeyPath+":/etc/adev/pubkey:ro",
+		// Network activity logs (DNS + HTTP access log, written by envoy container)
+		"-v", scriptDir+"/generated/logs:/etc/adev/logs:ro",
 	)
 	// Mount host Nix store for sandbox-env (local builds only)
 	if envPath != "" {
@@ -509,6 +526,10 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 			cleanup()
 			os.Exit(1)
 		}
+
+		// Write resolv.conf pointing to envoy (dns-responder runs there)
+		resolvConf := filepath.Join(scriptDir, "generated", "resolv.conf")
+		os.WriteFile(resolvConf, []byte(fmt.Sprintf("nameserver %s\n", envoyIP)), 0644)
 
 		// Get IPv6 addresses for dual-stack DNAT
 		subnet6 := GetNetworkSubnet6(networkName)

@@ -305,7 +305,15 @@ func (g *Generator) generateEnvoyJSON() error {
 					"sni":   host,
 				},
 			},
-		})
+			// Use real DNS so envoy bypasses the local dns-responder
+			"dns_resolvers": []map[string]interface{}{{
+				"socket_address": map[string]interface{}{
+					"address":    "8.8.8.8",
+					"port_value": 53,
+				},
+			}},
+		}
+		clusters = append(clusters, cluster)
 	}
 
 	// Add vault cluster

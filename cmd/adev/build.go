@@ -134,6 +134,7 @@ func buildGoBinaries(scriptDir string) error {
 		{"cmd/aenv", "generated/aenv"},
 		{"cmd/cdp-proxy", "generated/cdp-proxy"},
 		{"cmd/tcp-bridge", "generated/tcp-bridge"},
+		{"cmd/dns-responder", "generated/dns-responder"},
 	}
 
 	for _, b := range binaries {

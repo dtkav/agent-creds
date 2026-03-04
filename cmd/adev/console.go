@@ -250,6 +250,11 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	// Create claude config dir (namespaced per project)
 	claudeConfigDir := filepath.Join(scriptDir, "claude-dev/claude-config")
 	os.MkdirAll(claudeConfigDir, 0755)
+	// Ensure .claude.json exists (Claude Code reads it from $HOME/.claude.json)
+	claudeJSON := filepath.Join(claudeConfigDir, ".claude.json")
+	if _, err := os.Stat(claudeJSON); os.IsNotExist(err) {
+		os.WriteFile(claudeJSON, []byte("{}"), 0600)
+	}
 
 	// Create per-sandbox network (remove stale one first if it exists without containers)
 	spinner.Status("creating network...")
@@ -443,6 +448,7 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		"-e", "CLAUDE_CONFIG_DIR=/home/devuser/.claude",
 		"-v", workDir+":/workspace",
 		"-v", claudeConfigDir+":/home/devuser/.claude",
+		"-v", claudeConfigDir+"/.claude.json:/home/devuser/.claude.json",
 		// Mount agent-creds CA so proxy TLS is trusted system-wide
 		"-v", scriptDir+"/generated/certs/ca.crt:/etc/ssl/agent-creds-ca.crt:ro",
 		// Mount entrypoint and binaries so changes take effect without image rebuild
@@ -613,6 +619,23 @@ func sortedUpstreamKeys(m map[string]UpstreamConfig) []string {
 	for k := range m {
 		keys = append(keys, k)
 	}
-	sort.Strings(keys)
+	sortDomains(keys)
 	return keys
+}
+
+// sortDomains sorts domains so subdomains are grouped under their parent.
+// e.g. github.com, api.github.com, api.stripe.com, stripe.com
+func sortDomains(domains []string) {
+	sort.Slice(domains, func(i, j int) bool {
+		return reverseDomain(domains[i]) < reverseDomain(domains[j])
+	})
+}
+
+// reverseDomain reverses domain labels for sorting: "api.stripe.com" → "com.stripe.api"
+func reverseDomain(domain string) string {
+	parts := strings.Split(domain, ".")
+	for l, r := 0, len(parts)-1; l < r; l, r = l+1, r-1 {
+		parts[l], parts[r] = parts[r], parts[l]
+	}
+	return strings.Join(parts, ".")
 }

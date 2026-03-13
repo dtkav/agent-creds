@@ -401,7 +401,7 @@ func main() {
 	// Start HTTP API server
 	httpPort := os.Getenv("HTTP_PORT")
 	if httpPort == "" {
-		httpPort = "8080"
+		httpPort = "8033"
 	}
 
 	rpID := os.Getenv("WEBAUTHN_RP_ID")

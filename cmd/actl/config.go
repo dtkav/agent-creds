@@ -15,7 +15,7 @@ type SandboxConfig struct {
 
 type VaultConfig struct {
 	Host string `toml:"host"` // bare hostname, implies https:443 + ssh:22
-	HTTP string `toml:"http"` // explicit URL for local dev (e.g. http://localhost:8080)
+	HTTP string `toml:"http"` // explicit URL for local dev (e.g. http://localhost:8033)
 	SSH  string `toml:"ssh"`  // explicit ssh address (e.g. localhost:2222)
 }
 
@@ -38,7 +38,7 @@ func (v VaultConfig) HTTPAddr() string {
 	if v.Host != "" {
 		return "https://" + v.Host
 	}
-	return "http://localhost:8080"
+	return "http://localhost:8033"
 }
 
 // IsRemote returns true when vault is a remote service.

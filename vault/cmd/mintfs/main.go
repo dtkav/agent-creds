@@ -51,7 +51,7 @@ Options:
   --ssh <host>         SSH server for token minting (e.g., "localhost -p 2222")
   --hosts <list>       Comma-separated hosts for SSH mode (e.g., "api.stripe.com,api.openai.com")
   --user <username>    Username for server authentication
-  --server <url>       Server URL (default: http://localhost:8080)
+  --server <url>       Server URL (default: http://localhost:8033)
   --insecure           Skip TLS verification
 
 Examples:

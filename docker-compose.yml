@@ -2,7 +2,7 @@ services:
   vault:
     build: ./vault
     ports:
-      - "8080:8080"
+      - "8033:8033"
       - "2222:2222"
     environment:
       # Env var fallback (used when vault.yaml is not configured)
@@ -19,7 +19,7 @@ services:
       - PB_EMAIL=${PB_EMAIL}
       - PB_PASSWORD=${PB_PASSWORD}
       - WEBAUTHN_RP_ID=${WEBAUTHN_RP_ID:-localhost}
-      - WEBAUTHN_RP_ORIGIN=${WEBAUTHN_RP_ORIGIN:-http://localhost:8080}
+      - WEBAUTHN_RP_ORIGIN=${WEBAUTHN_RP_ORIGIN:-http://localhost:8033}
       - WEBAUTHN_RP_NAME=${WEBAUTHN_RP_NAME:-Agent Credentials}
     volumes:
       - vault-data:/data

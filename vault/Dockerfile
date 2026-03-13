@@ -31,7 +31,7 @@ RUN mkdir -p /data
 # gRPC port for ext_authz
 EXPOSE 9001
 # HTTP port for API
-EXPOSE 8080
+EXPOSE 8033
 # SSH port for vault-ssh
 EXPOSE 2222
 

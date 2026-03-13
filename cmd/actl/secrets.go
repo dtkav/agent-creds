@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
@@ -35,6 +37,8 @@ func runSecrets(args []string) {
 		secretsDecrypt(args[1:])
 	case "import":
 		secretsImport(args[1:])
+	case "env":
+		secretsEnv(args[1:])
 	case "export":
 		secretsExportLegacy()
 	case "help", "-h", "--help":
@@ -55,6 +59,7 @@ Commands:
   show              Decrypt and print vault.yaml to stdout
   decrypt <path>    Decrypt vault.yaml to a file (for mounting into containers)
   import <file>     Import KEY=VALUE pairs into secrets (keyed by file path)
+  env [file]        Print KEY=VALUE for secrets (default: .auth.env)
 
 Import examples:
   actl vault import auth.env
@@ -159,26 +164,17 @@ func sopsEncrypt(plainPath string) ([]byte, error) {
 	return cmd.Output()
 }
 
-const vaultTemplate = `# Vault configuration — only the secrets section is encrypted by SOPS
-# Edit with: actl vault edit
-# Import env file: actl vault import auth.env
-
-secrets:
+func vaultTemplate(signingKey string) string {
+	return fmt.Sprintf(`secrets:
   vault:
-    SIGNING_KEY: ""
-  # Import env files to add more groups:
-  #   actl vault import auth.env
-  #   actl vault import auth.staging.env
+    SIGNING_KEY: %s
 
 signing_key:
   $secret: 'vault#SIGNING_KEY'
 
 credentials: {}
-  # api.stripe.com:
-  #   type: bearer
-  #   token:
-  #     $secret: '/home/you/project/auth.env#STRIPE_KEY'
-`
+`, signingKey)
+}
 
 func secretsInit() {
 	privKey, err := getOrCreateAgeKey()
@@ -205,6 +201,13 @@ func secretsInit() {
 		return
 	}
 
+	// Generate signing key
+	sigKey := make([]byte, 32)
+	if _, err := rand.Read(sigKey); err != nil {
+		fmt.Fprintf(os.Stderr, "Error generating signing key: %v\n", err)
+		os.Exit(1)
+	}
+
 	// Write template to temp file, encrypt, write to final path
 	tmpFile, err := os.CreateTemp("", "vault-*.yaml")
 	if err != nil {
@@ -214,7 +217,7 @@ func secretsInit() {
 	tmpPath := tmpFile.Name()
 	defer os.Remove(tmpPath)
 
-	if _, err := tmpFile.WriteString(vaultTemplate); err != nil {
+	if _, err := tmpFile.WriteString(vaultTemplate(base64.StdEncoding.EncodeToString(sigKey))); err != nil {
 		tmpFile.Close()
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -288,6 +291,51 @@ func secretsDecrypt(args []string) {
 	if err := os.WriteFile(outPath, out, 0600); err != nil {
 		fmt.Fprintf(os.Stderr, "Error writing %s: %v\n", outPath, err)
 		os.Exit(1)
+	}
+}
+
+// secretsEnv decrypts vault.yaml, finds the secrets group keyed by the given
+// file path (default: $PWD/.auth.env), and prints KEY=VALUE lines to stdout.
+func secretsEnv(args []string) {
+	file := ".auth.env"
+	if len(args) > 0 {
+		file = args[0]
+	}
+
+	absPath, err := filepath.Abs(file)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error resolving path: %v\n", err)
+		os.Exit(1)
+	}
+
+	yamlPath := vaultYAMLPath()
+	if _, err := os.Stat(yamlPath); os.IsNotExist(err) {
+		fmt.Fprintln(os.Stderr, "No vault.yaml found. Run: actl vault init")
+		os.Exit(1)
+	}
+
+	out, err := runSops("--decrypt", yamlPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error decrypting vault: %v\n", err)
+		os.Exit(1)
+	}
+
+	var doc struct {
+		Secrets map[string]map[string]string `yaml:"secrets"`
+	}
+	if err := yaml.Unmarshal(out, &doc); err != nil {
+		fmt.Fprintf(os.Stderr, "Error parsing vault.yaml: %v\n", err)
+		os.Exit(1)
+	}
+
+	group, ok := doc.Secrets[absPath]
+	if !ok {
+		fmt.Fprintf(os.Stderr, "No secrets found for %s\n", absPath)
+		os.Exit(1)
+	}
+
+	for k, v := range group {
+		fmt.Printf("%s=%s\n", k, v)
 	}
 }
 

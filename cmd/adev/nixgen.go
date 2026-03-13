@@ -33,6 +33,7 @@ var packageMap = map[string][]string{
 	"tree":     {"tree"},
 	"unzip":    {"unzip"},
 	"neovim":   {"neovim"},
+	"tmux":     {"tmux"},
 
 	// Build tools — build-essential maps to the full Nix toolchain equivalent
 	"build-essential":      {"gcc", "gnumake", "binutils"},

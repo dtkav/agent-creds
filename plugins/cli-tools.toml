@@ -15,4 +15,5 @@ packages = [
     "tree",
     "unzip",
     "neovim",
+    "tmux",
 ]

@@ -40,6 +40,9 @@ claude-dev/claude-config/
 # Local sandbox customizations
 local/
 
+# Tokens
+.base-token
+
 # Generated files (run `make generate` to create)
 generated/
 authz/domains_gen.go

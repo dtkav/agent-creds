@@ -3,8 +3,10 @@
 
 name = "claude"
 description = "Claude Code AI assistant"
-packages = ["claude-code"]
 plugins = ["python", "nodejs", "go", "rust", "cli-tools", "build-tools", "github"]
+
+[packages]
+claude-code = true
 
 [upstream."api.anthropic.com"]
 [upstream."claude.ai"]

@@ -4,7 +4,8 @@
 name = "github"
 description = "GitHub and GitHub API access"
 
-packages = ["git"]
+[packages]
+git = true
 
 [upstream."github.com"]
 [upstream."api.github.com"]

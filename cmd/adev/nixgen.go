@@ -8,68 +8,22 @@ import (
 	"strings"
 )
 
-// Package name mapping: ubuntu/debian package name -> nixpkgs attribute paths.
-// Values are slices to support one-to-many mappings (e.g. build-essential -> gcc + gnumake).
-// Empty slice means the package is satisfied another way (built-in or not needed in Nix).
-var packageMap = map[string][]string{
-	// Languages
-	"python3":           {"python3"},
-	"python3-pip":       {"python3Packages.pip"},
-	"python3-venv":      {},  // venv is part of python, not separate
-	"python-is-python3": {},  // not needed in nix
-	"nodejs":            {"nodejs"},
-	"npm":               {},  // comes with nodejs
-	"go":                {"go"},
-	"rustup":            {"rustup"},
-
-	// CLI tools
-	"ripgrep":  {"ripgrep"},
-	"fd-find":  {"fd"},
-	"bat":      {"bat"},
-	"eza":      {"eza"},
-	"fzf":      {"fzf"},
-	"jq":       {"jq"},
-	"httpie":   {"httpie"},
-	"tree":     {"tree"},
-	"unzip":    {"unzip"},
-	"neovim":   {"neovim"},
-	"tmux":     {"tmux"},
-
-	// Build tools — build-essential maps to the full Nix toolchain equivalent
-	"build-essential":      {"gcc", "gnumake", "binutils"},
-	"gnumake":              {"gnumake"},
-	"libcurl4-openssl-dev": {"curl.dev"},
-	"libssl-dev":           {"openssl.dev"},
-	"zlib1g-dev":           {"zlib.dev"},
-
-	// Base utilities (these are also in flake.nix basePackages, but listing here
-	// ensures they appear in packages.nix when requested by plugins)
-	"curl":            {"curl"},
-	"wget":            {"wget"},
-	"git":             {"git"},
-	"ca-certificates": {"cacert"},
-	"sudo":            {"sudo"},
-	"socat":           {"socat"},
-	"dnsutils":        {"dnsutils"},
-	"file":            {"file"},
-
-	// Agent packages
-	"claude-code": {"claude-code"}, // native binary via overlay in flake.nix
-}
-
 // GeneratePackagesNix generates a packages.nix file from the merged config.
+// Package sets come from TOML sections like [packages], [python3Packages], etc.
+// Each maps to pkgs.<name> or pkgs.<prefix>.<name> in the generated Nix.
 func GeneratePackagesNix(cfg ProjectConfig, outputPath string) error {
-	// Collect unique nixpkgs attributes
+	// Collect unique nixpkgs attributes from all package sets
 	nixPkgs := make(map[string]bool)
 
-	for _, pkg := range cfg.Packages {
-		nixAttrs, ok := packageMap[pkg]
-		if !ok {
-			fmt.Fprintf(os.Stderr, "Warning: unknown package %q, skipping\n", pkg)
-			continue
-		}
-		for _, attr := range nixAttrs {
-			nixPkgs[attr] = true
+	for prefix, pkgSet := range cfg.NixPackageSets {
+		for name, enabled := range pkgSet {
+			if enabled {
+				if prefix == "" {
+					nixPkgs[name] = true
+				} else {
+					nixPkgs[prefix+"."+name] = true
+				}
+			}
 		}
 	}
 
@@ -141,5 +95,4 @@ func runGenerateNix(args []string) {
 	}
 
 	fmt.Printf("Generated %s\n", outputPath)
-	fmt.Printf("Packages: %v\n", cfg.Packages)
 }

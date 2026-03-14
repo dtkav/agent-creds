@@ -131,8 +131,10 @@ func MergePlugins(cfg *ProjectConfig, discovered map[string]string, enabled []st
 			return fmt.Errorf("loading plugin %s: %w", name, err)
 		}
 
-		// Append packages
-		cfg.Packages = append(cfg.Packages, plugin.Packages...)
+		// Collect Nix package sets (e.g. [packages] bat = true, [python3Packages] websockets = true)
+		plugin.NixPackageSets = make(map[string]map[string]bool)
+		collectNixPackageSets(plugin.NixPackageSets, plugin.nixPkgSets()...)
+		cfg.NixPackageSets = mergeNixPackageSets(cfg.NixPackageSets, plugin.NixPackageSets)
 
 		// Collect inline nix
 		if nix := strings.TrimSpace(plugin.Nix); nix != "" {
@@ -179,8 +181,10 @@ func MergeAgent(cfg *ProjectConfig, agent AgentConfig, projectDir string) {
 		cfg.Entrypoint = agent.Entrypoint
 	}
 
-	// Append packages
-	cfg.Packages = append(cfg.Packages, agent.Packages...)
+	// Collect Nix package sets
+	agent.NixPackageSets = make(map[string]map[string]bool)
+	collectNixPackageSets(agent.NixPackageSets, agent.nixPkgSets()...)
+	cfg.NixPackageSets = mergeNixPackageSets(cfg.NixPackageSets, agent.NixPackageSets)
 
 	// Collect inline nix
 	if nix := strings.TrimSpace(agent.Nix); nix != "" {

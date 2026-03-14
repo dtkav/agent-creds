@@ -54,7 +54,7 @@ export COLORTERM=truecolor
 # dropbear creates a clean environment, so SSH shells lose all env vars above.
 # Write them to /tmp/adev-env.sh which .bashrc sources.
 {
-    for var in PATH TERMINFO_DIRS XDG_DATA_DIRS SSL_CERT_FILE NIX_SSL_CERT_FILE SANDBOX_ENV COLORTERM BROWSER TCP_BROWSER_PORT TCP_CDP_PORT CDP_PORT NODE_EXTRA_CA_CERTS; do
+    for var in PATH TERMINFO_DIRS XDG_DATA_DIRS SSL_CERT_FILE NIX_SSL_CERT_FILE SANDBOX_ENV COLORTERM BROWSER TCP_BROWSER_PORT CDP_PORT_MAP NODE_EXTRA_CA_CERTS; do
         eval "val=\${$var:-}"
         [ -n "$val" ] && printf 'export %s="%s"\n' "$var" "$val"
     done
@@ -104,8 +104,8 @@ exec dropbear -F -E -s -g -p 2222 \
 EOF
 chmod +x "$S6DIR/dropbear/run"
 
-# tcp-bridge: only if TCP_BROWSER_PORT or TCP_CDP_PORT is set
-if [ -n "${TCP_BROWSER_PORT:-}" ] || [ -n "${TCP_CDP_PORT:-}" ]; then
+# tcp-bridge: only if TCP_BROWSER_PORT or CDP_PORT_MAP is set
+if [ -n "${TCP_BROWSER_PORT:-}" ] || [ -n "${CDP_PORT_MAP:-}" ]; then
     mkdir -p "$S6DIR/tcp-bridge"
     cat > "$S6DIR/tcp-bridge/run" <<'EOF'
 #!/bin/bash
@@ -114,17 +114,17 @@ EOF
     chmod +x "$S6DIR/tcp-bridge/run"
 fi
 
-# cdp-proxy: only if tcp-bridge is running (creates the socket)
-if [ -n "${TCP_CDP_PORT:-}" ]; then
+# cdp-proxy: only if CDP_PORT_MAP is set (tcp-bridge creates the sockets)
+if [ -n "${CDP_PORT_MAP:-}" ]; then
     mkdir -p "$S6DIR/cdp-proxy"
-    cat > "$S6DIR/cdp-proxy/run" <<'EOF'
+    cat > "$S6DIR/cdp-proxy/run" <<'PROXYEOF'
 #!/bin/bash
-# Wait for tcp-bridge to create the socket
-while [ ! -S /tmp/cdp-forward.sock ] && [ ! -S /run/cdp-forward.sock ]; do
+# Wait for tcp-bridge to create at least one CDP socket
+while ! ls /tmp/cdp-*.sock >/dev/null 2>&1; do
     sleep 0.2
 done
 exec cdp-proxy 2>&1
-EOF
+PROXYEOF
     chmod +x "$S6DIR/cdp-proxy/run"
 fi
 

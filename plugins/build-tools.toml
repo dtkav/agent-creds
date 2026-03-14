@@ -4,9 +4,10 @@
 name = "build-tools"
 description = "Build essentials and development libraries"
 
-packages = [
-    "build-essential",
-    "libcurl4-openssl-dev",
-    "libssl-dev",
-    "zlib1g-dev",
-]
+[packages]
+gcc = true
+gnumake = true
+binutils = true
+"curl.dev" = true
+"openssl.dev" = true
+"zlib.dev" = true

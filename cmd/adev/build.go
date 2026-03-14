@@ -60,12 +60,18 @@ func envHash(cfg ProjectConfig, scriptDir string) string {
 	// Hash agent name
 	h.Write([]byte(cfg.Sandbox.Agent))
 
-	// Hash packages (sorted for determinism)
-	pkgs := make([]string, len(cfg.Packages))
-	copy(pkgs, cfg.Packages)
-	sort.Strings(pkgs)
-	for _, pkg := range pkgs {
-		h.Write([]byte(pkg))
+	// Hash Nix package sets (sorted for determinism)
+	for prefix, pkgSet := range cfg.NixPackageSets {
+		var names []string
+		for name, enabled := range pkgSet {
+			if enabled {
+				names = append(names, name)
+			}
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			h.Write([]byte(prefix + "." + name))
+		}
 	}
 
 	// Hash inline nix expressions

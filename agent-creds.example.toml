@@ -9,8 +9,7 @@ name = "myproject"
 # use_host_browser = true  # default
 
 # CDP forwarding: allow sandbox to control host Chrome via DevTools Protocol
-# use_host_browser_cdp = true      # enable on default port 9222
-# use_host_browser_cdp = 9333      # enable on custom port
+# use_host_browser_cdp = true   # enable (port configured per [[cdp_target]])
 
 # Remote vault (optional - uses local docker-compose vault by default)
 # [vault]
@@ -56,11 +55,13 @@ url = "http://localhost:*"  # OAuth callbacks
 # Empty = all targets blocked. Patterns use glob syntax (* matches any chars).
 #
 # Available fields (all optional, empty = match any):
+#   port  - Chrome CDP port (default 9222 if omitted)
 #   type  - target type: "page", "background_page", "service_worker", etc.
 #   title - page title pattern
 #   url   - page URL pattern
 #
 # When multiple fields specified, ALL must match.
+# Multiple ports are supported for controlling different Chrome instances.
 
 [[cdp_target]]
 type = "page"
@@ -71,3 +72,8 @@ url = "*localhost:3000*"  # Local dev server
 
 [[cdp_target]]
 title = "*- workspace -*"  # Specific workspace windows
+
+# Example: target on a different Chrome instance
+# [[cdp_target]]
+# port = 9333
+# url = "*localhost:8080*"

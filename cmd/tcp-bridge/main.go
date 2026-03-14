@@ -22,10 +22,7 @@ import (
 	"time"
 )
 
-const (
-	browserSockPath = "/tmp/browser-forward.sock"
-	cdpSockPath     = "/tmp/cdp-forward.sock"
-)
+const browserSockPath = "/tmp/browser-forward.sock"
 
 func main() {
 	// Log to file so we can debug (container stderr isn't visible)
@@ -35,10 +32,10 @@ func main() {
 	}
 
 	browserPort := os.Getenv("TCP_BROWSER_PORT")
-	cdpPort := os.Getenv("TCP_CDP_PORT")
+	cdpPortMap := os.Getenv("CDP_PORT_MAP")
 
-	if browserPort == "" && cdpPort == "" {
-		log.Println("tcp-bridge: no TCP_BROWSER_PORT or TCP_CDP_PORT set, exiting")
+	if browserPort == "" && cdpPortMap == "" {
+		log.Println("tcp-bridge: no TCP_BROWSER_PORT or CDP_PORT_MAP set, exiting")
 		return
 	}
 
@@ -49,6 +46,7 @@ func main() {
 	}
 	log.Printf("tcp-bridge: gateway IP is %s", gatewayIP)
 
+	var cdpSockPaths []string
 	var wg sync.WaitGroup
 
 	if browserPort != "" {
@@ -62,15 +60,25 @@ func main() {
 		}()
 	}
 
-	if cdpPort != "" {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			addr := fmt.Sprintf("%s:%s", gatewayIP, cdpPort)
-			if err := bridge(cdpSockPath, addr); err != nil {
-				log.Printf("CDP bridge error: %v", err)
+	// CDP_PORT_MAP=9222:51234,9333:51235 (chromePort:tcpPort pairs)
+	if cdpPortMap != "" {
+		for _, entry := range strings.Split(cdpPortMap, ",") {
+			parts := strings.SplitN(entry, ":", 2)
+			if len(parts) != 2 {
+				continue
 			}
-		}()
+			chromePort, tcpPort := parts[0], parts[1]
+			sockPath := fmt.Sprintf("/tmp/cdp-%s.sock", chromePort)
+			cdpSockPaths = append(cdpSockPaths, sockPath)
+			wg.Add(1)
+			go func(sock, tcp string) {
+				defer wg.Done()
+				addr := fmt.Sprintf("%s:%s", gatewayIP, tcp)
+				if err := bridge(sock, addr); err != nil {
+					log.Printf("CDP bridge error (%s): %v", sock, err)
+				}
+			}(sockPath, tcpPort)
+		}
 	}
 
 	// Wait for signal
@@ -80,7 +88,9 @@ func main() {
 
 	// Cleanup sockets
 	os.Remove(browserSockPath)
-	os.Remove(cdpSockPath)
+	for _, p := range cdpSockPaths {
+		os.Remove(p)
+	}
 }
 
 // getGatewayIP reads the default gateway from /proc/net/route

@@ -109,6 +109,7 @@ type UpstreamConfig struct {
 }
 
 type CDPTargetConfig struct {
+	Port  int    `toml:"port"`
 	Type  string `toml:"type"`
 	Title string `toml:"title"`
 	URL   string `toml:"url"`
@@ -319,15 +320,10 @@ type CDPInfo struct {
 }
 
 func checkCDP() CDPInfo {
-	port := 9222
-	if p := os.Getenv("CDP_PORT"); p != "" {
-		if v, err := fmt.Sscanf(p, "%d", &port); err != nil || v != 1 {
-			port = 9222
-		}
-	}
+	port := 9222 // always connect to the proxy, which merges all upstreams
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	// Check if cdp-proxy is listening (tcp-bridge creates /tmp/cdp-forward.sock, cdp-proxy listens on TCP)
+	// Check if cdp-proxy is listening (tcp-bridge creates /tmp/cdp-*.sock, cdp-proxy listens on TCP)
 	conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
 	if err != nil {
 		return CDPInfo{}

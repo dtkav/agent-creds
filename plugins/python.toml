@@ -4,7 +4,13 @@
 name = "python"
 description = "Python 3 with pip and PyPI access"
 
-packages = ["python3", "python3-pip", "python3-venv", "python-is-python3"]
+[packages]
+python3 = true
+
+[python3Packages]
+pip = true
+websockets = true
+click = true
 
 [upstream."pypi.org"]
 [upstream."files.pythonhosted.org"]

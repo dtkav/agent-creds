@@ -4,7 +4,8 @@
 name = "go"
 description = "Go with module proxy access"
 
-packages = ["go"]
+[packages]
+go = true
 
 [upstream."proxy.golang.org"]
 [upstream."sum.golang.org"]

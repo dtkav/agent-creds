@@ -327,11 +327,12 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 
 	// Forwarder state (protected by mutex for config watcher)
 	var fwdMu sync.Mutex
-	var browserFwd, cdpFwd *ForwardState
-	cdpPort := int(cfg.Sandbox.UseHostBrowserCDP)
+	var browserFwd *ForwardState
+	cdpFwds := make(map[int]*ForwardState) // keyed by Chrome CDP port
+	cdpTCPPorts := make(map[int]int)       // Chrome CDP port → allocated TCP port
 
-	// Allocate TCP ports for gVisor mode (bound to 127.0.0.1, DNAT'd by sandbox-net)
-	tcpBrowserPort, tcpCDPPort := AllocateTCPPorts(slug)
+	// Allocate TCP port for browser forwarding
+	tcpBrowserPort := AllocateTCPBrowserPort(slug)
 
 	// Start browser-forward server (TCP, tcp-bridge creates Unix socket in container)
 	if cfg.Sandbox.UseHostBrowserEnabled() {
@@ -342,12 +343,19 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		}
 	}
 
-	// Start CDP forward (TCP, tcp-bridge creates Unix socket in container)
+	// Start CDP forwarders (one per unique Chrome CDP port)
 	if cfg.Sandbox.UseHostBrowserCDPEnabled() {
-		spinner.Status("starting CDP forward...")
-		cdpFwd, err = startCDPForwardTCP(gatewayIP, tcpCDPPort, cdpPort)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: CDP forwarding disabled: %v\n", err)
+		ports := CDPPorts(cfg.CDPTargets)
+		for _, cdpPort := range ports {
+			tcpPort := AllocateTCPCDPPort(slug, cdpPort)
+			cdpTCPPorts[cdpPort] = tcpPort
+			spinner.Status(fmt.Sprintf("starting CDP forward :%d...", cdpPort))
+			fwd, err := startCDPForwardTCP(gatewayIP, tcpPort, cdpPort)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: CDP forwarding for port %d disabled: %v\n", cdpPort, err)
+				continue
+			}
+			cdpFwds[cdpPort] = fwd
 		}
 	}
 
@@ -386,20 +394,40 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 								browserFwd = nil
 							}
 
-							// Handle CDP forwarding changes
-							newCdpPort := int(newCfg.Sandbox.UseHostBrowserCDP)
+							// Handle CDP forwarding changes (diff port sets)
 							wantCDP := newCfg.Sandbox.UseHostBrowserCDPEnabled()
-							haveCDP := cdpFwd != nil
-							if wantCDP && !haveCDP {
-								cdpFwd, _ = startCDPForwardTCP(gatewayIP, tcpCDPPort, newCdpPort)
-							} else if !wantCDP && haveCDP {
-								cdpFwd.Close()
-								cdpFwd = nil
-							} else if wantCDP && haveCDP && newCdpPort != cdpPort {
-								cdpFwd.Close()
-								cdpFwd, _ = startCDPForwardTCP(gatewayIP, tcpCDPPort, newCdpPort)
+							if wantCDP {
+								newPorts := CDPPorts(newCfg.CDPTargets)
+								newPortSet := make(map[int]bool)
+								for _, p := range newPorts {
+									newPortSet[p] = true
+								}
+								// Remove forwarders for ports no longer needed
+								for p, fwd := range cdpFwds {
+									if !newPortSet[p] {
+										fwd.Close()
+										delete(cdpFwds, p)
+										delete(cdpTCPPorts, p)
+									}
+								}
+								// Add forwarders for new ports
+								for _, p := range newPorts {
+									if _, exists := cdpFwds[p]; !exists {
+										tcpPort := AllocateTCPCDPPort(slug, p)
+										cdpTCPPorts[p] = tcpPort
+										if fwd, err := startCDPForwardTCP(gatewayIP, tcpPort, p); err == nil {
+											cdpFwds[p] = fwd
+										}
+									}
+								}
+							} else {
+								// CDP disabled — close all
+								for p, fwd := range cdpFwds {
+									fwd.Close()
+									delete(cdpFwds, p)
+									delete(cdpTCPPorts, p)
+								}
 							}
-							cdpPort = newCdpPort
 							fwdMu.Unlock()
 
 							// Handle upstream changes: regenerate configs and restart envoy
@@ -473,9 +501,15 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		args = append(args, "-e", fmt.Sprintf("TCP_BROWSER_PORT=%d", tcpBrowserPort))
 		args = append(args, "-e", "BROWSER=/usr/local/bin/open-browser")
 	}
-	if cdpFwd != nil {
-		args = append(args, "-e", fmt.Sprintf("TCP_CDP_PORT=%d", tcpCDPPort))
-		args = append(args, "-e", fmt.Sprintf("CDP_PORT=%d", cdpPort))
+	if len(cdpFwds) > 0 {
+		// CDP_PORT_MAP=9222:51234,9333:51235 (chrome_port:tcp_port pairs)
+		var pairs []string
+		for _, cdpPort := range CDPPorts(cfg.CDPTargets) {
+			if tcpPort, ok := cdpTCPPorts[cdpPort]; ok {
+				pairs = append(pairs, fmt.Sprintf("%d:%d", cdpPort, tcpPort))
+			}
+		}
+		args = append(args, "-e", "CDP_PORT_MAP="+strings.Join(pairs, ","))
 	}
 	args = append(args, credsMounts...)
 	args = append(args, gitConfigMounts...)

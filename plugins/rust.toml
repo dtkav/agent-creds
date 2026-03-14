@@ -4,7 +4,8 @@
 name = "rust"
 description = "Rust with crates.io access"
 
-packages = ["rustup"]
+[packages]
+rustup = true
 
 [upstream."crates.io"]
 [upstream."static.crates.io"]

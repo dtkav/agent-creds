@@ -114,6 +114,9 @@ func (g *Generator) generateMergedConfig() error {
 	// [[cdp_target]] sections
 	for _, ct := range g.cfg.CDPTargets {
 		sb.WriteString("\n[[cdp_target]]\n")
+		if ct.Port != 0 {
+			sb.WriteString(fmt.Sprintf("port = %d\n", ct.Port))
+		}
 		if ct.Type != "" {
 			sb.WriteString(fmt.Sprintf("type = %q\n", ct.Type))
 		}

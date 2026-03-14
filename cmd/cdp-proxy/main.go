@@ -1,8 +1,12 @@
 // cdp-proxy is a protocol-aware CDP proxy that filters targets based on allow-list config.
-// It listens on a TCP port and proxies to /run/cdp-forward.sock with filtering applied.
+// It listens on 127.0.0.1:9222 and proxies to one or more upstream CDP sockets with filtering.
+//
+// Multiple upstream support: CDP_PORT_MAP env var contains chromePort:tcpPort pairs.
+// Each upstream has a socket at /tmp/cdp-<chromePort>.sock created by tcp-bridge.
+// Targets from all upstreams are merged, filtered, and served on the single proxy port.
 //
 // Filtering behavior:
-// - /json/list: Returns only allowed targets
+// - /json/list: Returns only allowed targets (merged from all upstreams)
 // - /devtools/page/<id>: Blocks WebSocket connections to disallowed targets
 // - CDP messages: Blocks Target.attachToTarget for disallowed targetIds
 //
@@ -19,7 +23,6 @@ import (
 	"net/http"
 	"os"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -28,6 +31,7 @@ import (
 )
 
 type CDPTargetConfig struct {
+	Port  int    `toml:"port"`
 	Type  string `toml:"type"`
 	Title string `toml:"title"`
 	URL   string `toml:"url"`
@@ -38,45 +42,41 @@ type Config struct {
 }
 
 type CDPTarget struct {
-	ID                       string `json:"id"`
-	Type                     string `json:"type"`
-	Title                    string `json:"title"`
-	URL                      string `json:"url"`
-	WebSocketDebuggerUrl     string `json:"webSocketDebuggerUrl,omitempty"`
-	DevtoolsFrontendUrl      string `json:"devtoolsFrontendUrl,omitempty"`
-	FaviconUrl               string `json:"faviconUrl,omitempty"`
-	Description              string `json:"description,omitempty"`
-	ParentId                 string `json:"parentId,omitempty"`
-	Attached                 bool   `json:"attached,omitempty"`
-	CanAccessOpener          bool   `json:"canAccessOpener,omitempty"`
-	BrowserContextId         string `json:"browserContextId,omitempty"`
+	ID                   string `json:"id"`
+	Type                 string `json:"type"`
+	Title                string `json:"title"`
+	URL                  string `json:"url"`
+	WebSocketDebuggerUrl string `json:"webSocketDebuggerUrl,omitempty"`
+	DevtoolsFrontendUrl  string `json:"devtoolsFrontendUrl,omitempty"`
+	FaviconUrl           string `json:"faviconUrl,omitempty"`
+	Description          string `json:"description,omitempty"`
+	ParentId             string `json:"parentId,omitempty"`
+	Attached             bool   `json:"attached,omitempty"`
+	CanAccessOpener      bool   `json:"canAccessOpener,omitempty"`
+	BrowserContextId     string `json:"browserContextId,omitempty"`
+}
+
+// upstream represents a single Chrome CDP upstream identified by its socket path.
+type upstream struct {
+	chromePort int    // the Chrome CDP port this upstream corresponds to
+	sockPath   string // Unix socket path, e.g. /tmp/cdp-9222.sock
 }
 
 var (
-	config       Config
-	allowedIDs   = make(map[string]bool)
-	allowedMu    sync.RWMutex
-	sockPath     string
-	listenPort   int
-	upgrader     = websocket.Upgrader{
+	config     Config
+	upstreams  []upstream                  // all upstream sockets
+	portFilter map[int][]CDPTargetConfig   // chromePort → filter patterns for that port
+	allowedIDs = make(map[string]string)   // targetID → sockPath (which upstream owns it)
+	allowedMu  sync.RWMutex
+	listenPort = 9222
+	upgrader   = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool { return true },
 	}
 )
 
-func init() {
-	// tcp-bridge creates this socket
-	sockPath = "/tmp/cdp-forward.sock"
-}
-
 func main() {
-	listenPort = 9222
-	if p := os.Getenv("CDP_PORT"); p != "" {
-		if v, err := strconv.Atoi(p); err == nil && v > 0 {
-			listenPort = v
-		}
-	}
-
 	loadConfig()
+	loadUpstreams()
 
 	http.HandleFunc("/json/list", handleJSONList)
 	http.HandleFunc("/json/", handleJSONPassthrough)
@@ -92,8 +92,36 @@ func main() {
 func loadConfig() {
 	path := "/etc/aenv/agent-creds.toml"
 	if _, err := toml.DecodeFile(path, &config); err != nil {
-		// Config not found or invalid - all targets blocked
 		config.CDPTargets = nil
+	}
+
+	// Group filter patterns by port (0 → 9222)
+	portFilter = make(map[int][]CDPTargetConfig)
+	for _, ct := range config.CDPTargets {
+		p := ct.Port
+		if p == 0 {
+			p = 9222
+		}
+		portFilter[p] = append(portFilter[p], ct)
+	}
+}
+
+func loadUpstreams() {
+	cdpPortMap := os.Getenv("CDP_PORT_MAP")
+	if cdpPortMap == "" {
+		return
+	}
+	for _, entry := range strings.Split(cdpPortMap, ",") {
+		parts := strings.SplitN(entry, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		var chromePort int
+		if _, err := fmt.Sscanf(parts[0], "%d", &chromePort); err != nil {
+			continue
+		}
+		sockPath := fmt.Sprintf("/tmp/cdp-%d.sock", chromePort)
+		upstreams = append(upstreams, upstream{chromePort: chromePort, sockPath: sockPath})
 	}
 }
 
@@ -109,11 +137,11 @@ func matchGlob(pattern, value string) bool {
 	return matched
 }
 
-func isTargetAllowed(target CDPTarget) bool {
-	if len(config.CDPTargets) == 0 {
+func isTargetAllowed(target CDPTarget, filters []CDPTargetConfig) bool {
+	if len(filters) == 0 {
 		return false
 	}
-	for _, cfg := range config.CDPTargets {
+	for _, cfg := range filters {
 		typeMatch := matchGlob(cfg.Type, target.Type)
 		titleMatch := matchGlob(cfg.Title, target.Title)
 		urlMatch := matchGlob(cfg.URL, target.URL)
@@ -124,18 +152,14 @@ func isTargetAllowed(target CDPTarget) bool {
 	return false
 }
 
-func updateAllowedIDs(targets []CDPTarget) {
-	allowedMu.Lock()
-	defer allowedMu.Unlock()
-	allowedIDs = make(map[string]bool)
-	for _, t := range targets {
-		if isTargetAllowed(t) {
-			allowedIDs[t.ID] = true
-		}
-	}
+func isIDAllowed(id string) bool {
+	allowedMu.RLock()
+	defer allowedMu.RUnlock()
+	_, ok := allowedIDs[id]
+	return ok
 }
 
-func isIDAllowed(id string) bool {
+func getIDSocket(id string) string {
 	allowedMu.RLock()
 	defer allowedMu.RUnlock()
 	return allowedIDs[id]
@@ -173,39 +197,51 @@ func rewriteCDPUrl(rawURL string) string {
 }
 
 func handleJSONList(w http.ResponseWriter, r *http.Request) {
-	// Fetch from upstream
-	resp, err := fetchUpstream("/json/list")
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	}
-	defer resp.Body.Close()
+	newAllowed := make(map[string]string)
+	var allTargets []CDPTarget
 
-	var targets []CDPTarget
-	if err := json.NewDecoder(resp.Body).Decode(&targets); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+	for _, u := range upstreams {
+		resp, err := fetchFromSocket(u.sockPath, "/json/list")
+		if err != nil {
+			continue
+		}
+		var targets []CDPTarget
+		if err := json.NewDecoder(resp.Body).Decode(&targets); err != nil {
+			resp.Body.Close()
+			continue
+		}
+		resp.Body.Close()
 
-	// Update allowed IDs cache
-	updateAllowedIDs(targets)
+		// Get filters for this upstream's Chrome port
+		filters := portFilter[u.chromePort]
 
-	// Filter targets and rewrite URLs to use proxy port
-	var allowed []CDPTarget
-	for _, t := range targets {
-		if isTargetAllowed(t) {
-			t.WebSocketDebuggerUrl = rewriteCDPUrl(t.WebSocketDebuggerUrl)
-			t.DevtoolsFrontendUrl = rewriteCDPUrl(t.DevtoolsFrontendUrl)
-			allowed = append(allowed, t)
+		for _, t := range targets {
+			if isTargetAllowed(t, filters) {
+				t.WebSocketDebuggerUrl = rewriteCDPUrl(t.WebSocketDebuggerUrl)
+				t.DevtoolsFrontendUrl = rewriteCDPUrl(t.DevtoolsFrontendUrl)
+				allTargets = append(allTargets, t)
+				newAllowed[t.ID] = u.sockPath
+			}
 		}
 	}
 
+	// Update allowed IDs cache atomically
+	allowedMu.Lock()
+	allowedIDs = newAllowed
+	allowedMu.Unlock()
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(allowed)
+	json.NewEncoder(w).Encode(allTargets)
 }
 
 func handleJSONPassthrough(w http.ResponseWriter, r *http.Request) {
-	resp, err := fetchUpstream(r.URL.Path)
+	// For /json/version and other /json/* endpoints, use the first available upstream
+	if len(upstreams) == 0 {
+		http.Error(w, "no upstreams", http.StatusBadGateway)
+		return
+	}
+
+	resp, err := fetchFromSocket(upstreams[0].sockPath, r.URL.Path)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -261,17 +297,39 @@ func handleDevTools(w http.ResponseWriter, r *http.Request) {
 
 	// Check if this is a WebSocket upgrade
 	if websocket.IsWebSocketUpgrade(r) {
-		handleWebSocket(w, r)
+		handleWebSocket(w, r, targetID)
 		return
 	}
 
-	// Otherwise passthrough
-	handlePassthrough(w, r)
+	// Otherwise passthrough to the target's upstream
+	sock := getIDSocket(targetID)
+	if sock == "" {
+		http.Error(w, "target not found", http.StatusNotFound)
+		return
+	}
+	resp, err := fetchFromSocket(sock, r.URL.Path)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	for k, v := range resp.Header {
+		w.Header()[k] = v
+	}
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
 }
 
-func handleWebSocket(w http.ResponseWriter, r *http.Request) {
+func handleWebSocket(w http.ResponseWriter, r *http.Request, targetID string) {
+	// Look up which upstream socket owns this target
+	sock := getIDSocket(targetID)
+	if sock == "" {
+		http.Error(w, "target not found", http.StatusNotFound)
+		return
+	}
+
 	// Connect to upstream via unix socket
-	upstreamConn, err := net.Dial("unix", sockPath)
+	upstreamConn, err := net.Dial("unix", sock)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -443,7 +501,11 @@ func filterCDPMessages(src *bufio.ReadWriter, dst net.Conn, clientConn net.Conn)
 }
 
 func handlePassthrough(w http.ResponseWriter, r *http.Request) {
-	resp, err := fetchUpstream(r.URL.Path)
+	if len(upstreams) == 0 {
+		http.Error(w, "no upstreams", http.StatusBadGateway)
+		return
+	}
+	resp, err := fetchFromSocket(upstreams[0].sockPath, r.URL.Path)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -457,7 +519,7 @@ func handlePassthrough(w http.ResponseWriter, r *http.Request) {
 	io.Copy(w, resp.Body)
 }
 
-func fetchUpstream(path string) (*http.Response, error) {
+func fetchFromSocket(sockPath string, path string) (*http.Response, error) {
 	conn, err := net.Dial("unix", sockPath)
 	if err != nil {
 		return nil, err

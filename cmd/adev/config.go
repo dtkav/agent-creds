@@ -5,42 +5,25 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/BurntSushi/toml"
 )
-
-// CDPPort handles both boolean and integer values for use_host_browser_cdp.
-// false or omitted = 0 (disabled), true = 9222 (default), integer = custom port.
-type CDPPort int
-
-func (c *CDPPort) UnmarshalTOML(data any) error {
-	switch v := data.(type) {
-	case bool:
-		if v {
-			*c = 9222
-		} else {
-			*c = 0
-		}
-	case int64:
-		*c = CDPPort(v)
-	}
-	return nil
-}
 
 type SandboxConfig struct {
 	Name              string   `toml:"name"`
 	Image             string   `toml:"image"`
 	Runtime           string   `toml:"runtime"` // "runc" or "gvisor" (default: gvisor)
 	UseHostBrowser    *bool    `toml:"use_host_browser"`     // default true
-	UseHostBrowserCDP CDPPort  `toml:"use_host_browser_cdp"` // 0=disabled, port number=enabled
+	UseHostBrowserCDP bool     `toml:"use_host_browser_cdp"` // enable CDP forwarding
 	Agent             string   `toml:"agent"`                // agent to use (e.g., "claude")
 	Plugins           []string `toml:"plugins"`              // additional plugins to enable
 	DisabledPlugins   []string `toml:"disabled_plugins"`     // plugins to disable
 }
 
 func (s SandboxConfig) UseHostBrowserEnabled() bool    { return s.UseHostBrowser == nil || *s.UseHostBrowser }
-func (s SandboxConfig) UseHostBrowserCDPEnabled() bool { return s.UseHostBrowserCDP > 0 }
+func (s SandboxConfig) UseHostBrowserCDPEnabled() bool { return s.UseHostBrowserCDP }
 
 // RuntimeArg returns the --runtime flag value for docker.
 // Default is gVisor (runsc), explicit "runc" uses docker default.
@@ -87,9 +70,29 @@ type UpstreamConfig struct {
 // CDPTargetConfig defines an allowed CDP target pattern.
 // All specified fields must match (empty = match any).
 type CDPTargetConfig struct {
+	Port  int    `toml:"port"`  // Chrome CDP port (default 9222 if 0)
 	Type  string `toml:"type"`  // glob pattern matching target type (page, background_page, service_worker, etc.)
 	Title string `toml:"title"` // glob pattern matching target title
 	URL   string `toml:"url"`   // glob pattern matching target URL
+}
+
+// CDPPorts returns the deduplicated sorted list of Chrome CDP ports from targets.
+// Ports of 0 are treated as the default (9222).
+func CDPPorts(targets []CDPTargetConfig) []int {
+	seen := make(map[int]bool)
+	for _, t := range targets {
+		p := t.Port
+		if p == 0 {
+			p = 9222
+		}
+		seen[p] = true
+	}
+	ports := make([]int, 0, len(seen))
+	for p := range seen {
+		ports = append(ports, p)
+	}
+	sort.Ints(ports)
+	return ports
 }
 
 // BrowserTargetConfig defines an allowed URL pattern for browser forwarding.
@@ -112,44 +115,125 @@ type EnvConfig struct {
 
 // PluginConfig represents a plugin's configuration.
 type PluginConfig struct {
-	Name           string                     `toml:"name"`
-	Description    string                     `toml:"description"`
-	Packages       []string                   `toml:"packages"`      // system packages to install
-	Nix            string                     `toml:"nix"`           // inline nix expression (list of derivations, pkgs in scope)
-	Upstream       map[string]UpstreamConfig  `toml:"upstream"`
-	BrowserTargets []BrowserTargetConfig      `toml:"browser_target"`
-	CDPTargets     []CDPTargetConfig          `toml:"cdp_target"`
-	Mounts         []MountConfig              `toml:"mount"`
-	Env            []EnvConfig                `toml:"env"`
+	Name              string                             `toml:"name"`
+	Description       string                             `toml:"description"`
+	Nix               string                             `toml:"nix"`           // inline nix expression (list of derivations, pkgs in scope)
+	NixPkgFields                                          // embedded Nix package set fields ([packages], [python3Packages], etc.)
+	Upstream          map[string]UpstreamConfig           `toml:"upstream"`
+	BrowserTargets    []BrowserTargetConfig               `toml:"browser_target"`
+	CDPTargets        []CDPTargetConfig                   `toml:"cdp_target"`
+	Mounts            []MountConfig                       `toml:"mount"`
+	Env               []EnvConfig                         `toml:"env"`
 }
 
 // AgentConfig represents an agent's configuration.
 // Agents are like plugins but also define entrypoint and can require plugins.
 type AgentConfig struct {
-	Name           string                     `toml:"name"`
-	Description    string                     `toml:"description"`
-	Entrypoint     string                     `toml:"entrypoint"`    // command to run
-	Packages       []string                   `toml:"packages"`      // system packages to install
-	Nix            string                     `toml:"nix"`           // inline nix expression (list of derivations, pkgs in scope)
-	Plugins        []string                   `toml:"plugins"`       // plugins this agent requires
-	Upstream       map[string]UpstreamConfig  `toml:"upstream"`
-	BrowserTargets []BrowserTargetConfig      `toml:"browser_target"`
-	CDPTargets     []CDPTargetConfig          `toml:"cdp_target"`
-	Mounts         []MountConfig              `toml:"mount"`
-	Env            []EnvConfig                `toml:"env"`
+	Name              string                             `toml:"name"`
+	Description       string                             `toml:"description"`
+	Entrypoint        string                             `toml:"entrypoint"`    // command to run
+	Nix               string                             `toml:"nix"`           // inline nix expression (list of derivations, pkgs in scope)
+	Plugins           []string                           `toml:"plugins"`       // plugins this agent requires
+	NixPkgFields                                          // embedded Nix package set fields ([packages], [python3Packages], etc.)
+	Upstream          map[string]UpstreamConfig           `toml:"upstream"`
+	BrowserTargets    []BrowserTargetConfig               `toml:"browser_target"`
+	CDPTargets        []CDPTargetConfig                   `toml:"cdp_target"`
+	Mounts            []MountConfig                       `toml:"mount"`
+	Env               []EnvConfig                         `toml:"env"`
 }
 
 type ProjectConfig struct {
-	Sandbox        SandboxConfig              `toml:"sandbox"`
-	Vault          VaultConfig                `toml:"vault"`
-	Entrypoint     string                     // set by agent
-	Packages       []string                   // aggregated from agent + plugins
-	NixExprs       []string                   // inline nix expressions from plugins/agents
-	Upstream       map[string]UpstreamConfig  `toml:"upstream"`
-	CDPTargets     []CDPTargetConfig          `toml:"cdp_target"`
-	BrowserTargets []BrowserTargetConfig      `toml:"browser_target"`
-	Mounts         []MountConfig              `toml:"mount"`
-	Env            []EnvConfig                `toml:"env"`
+	Sandbox        SandboxConfig                      `toml:"sandbox"`
+	Vault          VaultConfig                        `toml:"vault"`
+	Entrypoint     string                             // set by agent
+	NixExprs       []string                           // inline nix expressions from plugins/agents
+	NixPkgFields                                       // embedded Nix package set fields
+	Upstream       map[string]UpstreamConfig           `toml:"upstream"`
+	CDPTargets     []CDPTargetConfig                   `toml:"cdp_target"`
+	BrowserTargets []BrowserTargetConfig               `toml:"browser_target"`
+	Mounts         []MountConfig                       `toml:"mount"`
+	Env            []EnvConfig                         `toml:"env"`
+}
+
+// NixPkgFields holds Nix package set fields shared by PluginConfig, AgentConfig, and ProjectConfig.
+// Each field maps to a TOML section like [python3Packages] with boolean entries.
+// To add a new Nix namespace: add a field here and an entry in nixPkgSets().
+type NixPkgFields struct {
+	NixPackages       map[string]bool                    `toml:"packages"`          // top-level pkgs.*
+	Python3Packages   map[string]bool                    `toml:"python3Packages"`
+	NodePackages      map[string]bool                    `toml:"nodePackages"`
+	LuaPackages       map[string]bool                    `toml:"luaPackages"`
+	PerlPackages      map[string]bool                    `toml:"perlPackages"`
+	HaskellPackages   map[string]bool                    `toml:"haskellPackages"`
+	RubyPackages      map[string]bool                    `toml:"rubyPackages"`
+	EmacsPackages     map[string]bool                    `toml:"emacsPackages"`
+	PhpPackages       map[string]bool                    `toml:"phpPackages"`
+	OcamlPackages     map[string]bool                    `toml:"ocamlPackages"`
+	RPackages         map[string]bool                    `toml:"rPackages"`
+	BeamPackages      map[string]bool                    `toml:"beamPackages"`
+	NixPackageSets    map[string]map[string]bool          // aggregated; not from TOML directly
+}
+
+// nixPkgSets returns all package set fields as prefix→map pairs.
+// "" prefix means top-level pkgs.* (no dot prefix).
+func (n *NixPkgFields) nixPkgSets() []nixPkgSet {
+	return []nixPkgSet{
+		{"", n.NixPackages},
+		{"python3Packages", n.Python3Packages},
+		{"nodePackages", n.NodePackages},
+		{"luaPackages", n.LuaPackages},
+		{"perlPackages", n.PerlPackages},
+		{"haskellPackages", n.HaskellPackages},
+		{"rubyPackages", n.RubyPackages},
+		{"emacsPackages", n.EmacsPackages},
+		{"phpPackages", n.PhpPackages},
+		{"ocamlPackages", n.OcamlPackages},
+		{"rPackages", n.RPackages},
+		{"beamPackages", n.BeamPackages},
+	}
+}
+
+// collectNixPackageSets gathers explicit Nix package set fields into the generic map.
+func collectNixPackageSets(dst map[string]map[string]bool, sets ...nixPkgSet) {
+	for _, s := range sets {
+		if len(s.pkgs) == 0 {
+			continue
+		}
+		if dst[s.prefix] == nil {
+			dst[s.prefix] = make(map[string]bool)
+		}
+		for name, enabled := range s.pkgs {
+			if enabled {
+				dst[s.prefix][name] = true
+			}
+		}
+	}
+}
+
+type nixPkgSet struct {
+	prefix string
+	pkgs   map[string]bool
+}
+
+// mergeNixPackageSets merges src package sets into dst.
+func mergeNixPackageSets(dst, src map[string]map[string]bool) map[string]map[string]bool {
+	if len(src) == 0 {
+		return dst
+	}
+	if dst == nil {
+		dst = make(map[string]map[string]bool)
+	}
+	for prefix, pkgs := range src {
+		if dst[prefix] == nil {
+			dst[prefix] = make(map[string]bool)
+		}
+		for name, enabled := range pkgs {
+			if enabled {
+				dst[prefix][name] = true
+			}
+		}
+	}
+	return dst
 }
 
 // MatchGlob performs simple glob matching where * matches any characters.

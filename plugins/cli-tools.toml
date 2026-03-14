@@ -4,16 +4,15 @@
 name = "cli-tools"
 description = "Modern CLI tools (ripgrep, fd, bat, fzf, etc.)"
 
-packages = [
-    "ripgrep",
-    "fd-find",
-    "bat",
-    "eza",
-    "fzf",
-    "jq",
-    "httpie",
-    "tree",
-    "unzip",
-    "neovim",
-    "tmux",
-]
+[packages]
+ripgrep = true
+fd = true
+bat = true
+eza = true
+fzf = true
+jq = true
+httpie = true
+tree = true
+unzip = true
+neovim = true
+tmux = true

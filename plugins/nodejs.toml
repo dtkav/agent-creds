@@ -4,7 +4,7 @@
 name = "nodejs"
 description = "Node.js with npm and registry access"
 
-packages = ["nodejs", "npm"]
+[packages]
+nodejs = true
 
 [upstream."registry.npmjs.org"]
-

@@ -12,14 +12,20 @@ import (
 	"time"
 )
 
-// AllocateTCPPorts returns deterministic TCP ports for an instance.
-// Browser: 50000 + (hash(slug) % 1000)
-// CDP: 51000 + (hash(slug) % 1000)
-func AllocateTCPPorts(slug string) (browser, cdp int) {
+// AllocateTCPBrowserPort returns a deterministic TCP port for browser forwarding.
+// Port: 50000 + (hash(slug) % 1000)
+func AllocateTCPBrowserPort(slug string) int {
 	h := fnv.New32a()
 	h.Write([]byte(slug))
-	offset := int(h.Sum32() % 1000)
-	return 50000 + offset, 51000 + offset
+	return 50000 + int(h.Sum32()%1000)
+}
+
+// AllocateTCPCDPPort returns a deterministic TCP port for a specific Chrome CDP port.
+// Port: 51000 + (hash(slug + cdpPort) % 1000)
+func AllocateTCPCDPPort(slug string, cdpPort int) int {
+	h := fnv.New32a()
+	h.Write([]byte(fmt.Sprintf("%s%d", slug, cdpPort)))
+	return 51000 + int(h.Sum32()%1000)
 }
 
 // startBrowserForwardTCP listens on a TCP port for browser forward requests.

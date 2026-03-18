@@ -15,6 +15,8 @@ type SandboxConfig struct {
 	Name              string   `toml:"name"`
 	Image             string   `toml:"image"`
 	Runtime           string   `toml:"runtime"` // "runc" or "gvisor" (default: gvisor)
+	Memory            string   `toml:"memory"`  // docker --memory limit (e.g., "8g", "512m")
+	CPUs              string   `toml:"cpus"`    // docker --cpus limit (e.g., "4", "1.5")
 	UseHostBrowser    *bool    `toml:"use_host_browser"`     // default true
 	UseHostBrowserCDP bool     `toml:"use_host_browser_cdp"` // enable CDP forwarding
 	Agent             string   `toml:"agent"`                // agent to use (e.g., "claude")

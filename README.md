@@ -207,6 +207,8 @@ Controls the sandbox configuration, and which domains are routed through the pro
 [sandbox]
 name = "myproject"
 # runtime = "runc"  # default is gVisor; use runc if runsc not installed
+# memory = "8g"     # docker --memory limit (e.g., "8g", "512m")
+# cpus = "4"        # docker --cpus limit (e.g., "4", "1.5")
 
 [upstream."api.stripe.com"]
 [upstream."pocketbase.example.com"]

@@ -101,22 +101,21 @@ func needsBaseRebuild(scriptDir string) bool {
 }
 
 // needsEnvRebuild checks if the sandbox env needs to be rebuilt.
+// Each distinct env hash gets its own cache file in nixDir(), so switching
+// between projects with different package sets doesn't trigger rebuilds.
 func needsEnvRebuild(cfg ProjectConfig, scriptDir string) bool {
-	hashFile := filepath.Join(scriptDir, "generated", ".env-hash")
 	currentHash := envHash(cfg, scriptDir)
-
-	stored, err := os.ReadFile(hashFile)
+	envFile := filepath.Join(nixDir(), "env-"+currentHash)
+	if !fileExists(envFile) {
+		return true
+	}
+	// Verify the stored path still exists on disk
+	data, err := os.ReadFile(envFile)
 	if err != nil {
 		return true
 	}
-
-	if strings.TrimSpace(string(stored)) != currentHash {
-		return true
-	}
-
-	// Also check that current-env file exists
-	envFile := filepath.Join(nixDir(), "current-env")
-	return !fileExists(envFile)
+	envPath := strings.TrimSpace(string(data))
+	return !fileExists(envPath)
 }
 
 // saveBaseHash saves the base image hash after successful build.
@@ -125,10 +124,11 @@ func saveBaseHash(scriptDir string) error {
 	return os.WriteFile(hashFile, []byte(baseImageHash(scriptDir)), 0644)
 }
 
-// saveEnvHash saves the env hash after successful build.
-func saveEnvHash(cfg ProjectConfig, scriptDir string) error {
-	hashFile := filepath.Join(scriptDir, "generated", ".env-hash")
-	return os.WriteFile(hashFile, []byte(envHash(cfg, scriptDir)), 0644)
+// saveEnvHash saves the env hash → env path mapping after successful build.
+func saveEnvHash(cfg ProjectConfig, scriptDir, envPath string) error {
+	currentHash := envHash(cfg, scriptDir)
+	cacheFile := filepath.Join(nixDir(), "env-"+currentHash)
+	return os.WriteFile(cacheFile, []byte(envPath), 0644)
 }
 
 // buildGoBinaries builds the Go binaries needed for the sandbox image.
@@ -188,11 +188,11 @@ func ensureBaseImage(scriptDir string, spinner *Spinner) error {
 // Returns the env store path (e.g. /nix/store/xxx-sandbox-env).
 func ensureSandboxEnv(cfg ProjectConfig, scriptDir string, spinner *Spinner) (string, error) {
 	if !needsEnvRebuild(cfg, scriptDir) {
-		// Read existing env path
-		envFile := filepath.Join(nixDir(), "current-env")
-		data, err := os.ReadFile(envFile)
+		// Read cached env path for this hash
+		cacheFile := filepath.Join(nixDir(), "env-"+envHash(cfg, scriptDir))
+		data, err := os.ReadFile(cacheFile)
 		if err != nil {
-			return "", fmt.Errorf("reading current-env: %w", err)
+			return "", fmt.Errorf("reading cached env path: %w", err)
 		}
 		return strings.TrimSpace(string(data)), nil
 	}
@@ -225,8 +225,13 @@ func ensureSandboxEnv(cfg ProjectConfig, scriptDir string, spinner *Spinner) (st
 		return "", fmt.Errorf("unexpected env path: %s", envPath)
 	}
 
-	if err := saveEnvHash(cfg, scriptDir); err != nil {
+	if err := saveEnvHash(cfg, scriptDir, envPath); err != nil {
 		return "", fmt.Errorf("saving env hash: %w", err)
+	}
+
+	// Also write current-env for backward compat (used by build-nix.sh)
+	if err := os.WriteFile(filepath.Join(nixDir(), "current-env"), []byte(envPath), 0644); err != nil {
+		return "", fmt.Errorf("writing current-env: %w", err)
 	}
 
 	return envPath, nil

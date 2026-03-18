@@ -25,6 +25,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/gorilla/websocket"
@@ -526,6 +527,7 @@ func fetchFromSocket(sockPath string, path string) (*http.Response, error) {
 	}
 
 	client := &http.Client{
+		Timeout: 5 * time.Second,
 		Transport: &http.Transport{
 			Dial: func(_, _ string) (net.Conn, error) {
 				return conn, nil

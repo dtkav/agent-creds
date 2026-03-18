@@ -335,7 +335,7 @@ func secretsEnv(args []string) {
 	}
 
 	for k, v := range group {
-		fmt.Printf("%s=%s\n", k, v)
+		fmt.Printf("%s='%s'\n", k, strings.ReplaceAll(v, "'", "'\"'\"'"))
 	}
 }
 

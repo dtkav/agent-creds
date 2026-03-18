@@ -220,16 +220,12 @@ func browserProxy(downstream net.Conn, tcpAddr string) {
 	done := make(chan struct{}, 2)
 	go func() {
 		io.Copy(upstream, reader)
-		if tc, ok := upstream.(*net.TCPConn); ok {
-			tc.CloseWrite()
-		}
+		closeWrite(upstream)
 		done <- struct{}{}
 	}()
 	go func() {
 		io.Copy(downstream, upstream)
-		if tc, ok := downstream.(*net.TCPConn); ok {
-			tc.CloseWrite()
-		}
+		closeWrite(downstream)
 		done <- struct{}{}
 	}()
 	<-done
@@ -363,21 +359,28 @@ func startCallbackProxy(port string) {
 			done := make(chan struct{}, 2)
 			go func() {
 				io.Copy(upstream, c)
-				if tc, ok := upstream.(*net.TCPConn); ok {
-					tc.CloseWrite()
-				}
+				closeWrite(upstream)
 				done <- struct{}{}
 			}()
 			go func() {
 				io.Copy(c, upstream)
-				if tc, ok := c.(*net.TCPConn); ok {
-					tc.CloseWrite()
-				}
+				closeWrite(c)
 				done <- struct{}{}
 			}()
 			<-done
 			<-done
 		}(conn)
+	}
+}
+
+// closeWrite shuts down the write side of a connection, signaling EOF to the reader.
+// Works for both TCP and Unix socket connections.
+func closeWrite(c net.Conn) {
+	switch conn := c.(type) {
+	case *net.TCPConn:
+		conn.CloseWrite()
+	case *net.UnixConn:
+		conn.CloseWrite()
 	}
 }
 
@@ -395,16 +398,12 @@ func proxy(downstream net.Conn, tcpAddr string) {
 	done := make(chan struct{}, 2)
 	go func() {
 		io.Copy(upstream, downstream)
-		if tc, ok := upstream.(*net.TCPConn); ok {
-			tc.CloseWrite()
-		}
+		closeWrite(upstream)
 		done <- struct{}{}
 	}()
 	go func() {
 		io.Copy(downstream, upstream)
-		if tc, ok := downstream.(*net.TCPConn); ok {
-			tc.CloseWrite()
-		}
+		closeWrite(downstream)
 		done <- struct{}{}
 	}()
 	<-done

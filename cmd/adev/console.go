@@ -547,6 +547,14 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		}
 	}
 
+	// Resource limits
+	if cfg.Sandbox.Memory != "" {
+		args = append(args, "--memory", cfg.Sandbox.Memory)
+	}
+	if cfg.Sandbox.CPUs != "" {
+		args = append(args, "--cpus", cfg.Sandbox.CPUs)
+	}
+
 	// Add custom runtime if configured (only for sandbox, not sandbox-net or envoy)
 	if rt := cfg.Sandbox.RuntimeArg(); rt != "" {
 		args = append(args, "--runtime="+rt)

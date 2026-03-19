@@ -7,8 +7,10 @@ require (
 	github.com/BurntSushi/toml v1.3.2
 	github.com/charmbracelet/bubbletea v1.3.4
 	github.com/charmbracelet/lipgloss v1.0.0
+	github.com/mattn/go-sqlite3 v1.14.37
 	github.com/muesli/termenv v0.15.2
 	github.com/zalando/go-keyring v0.2.6
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -31,5 +33,4 @@ require (
 	golang.org/x/sync v0.18.0 // indirect
 	golang.org/x/sys v0.38.0 // indirect
 	golang.org/x/text v0.31.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

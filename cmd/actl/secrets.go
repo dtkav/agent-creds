@@ -41,6 +41,8 @@ func runSecrets(args []string) {
 		secretsEnv(args[1:])
 	case "export":
 		secretsExportLegacy()
+	case "log":
+		runAuditLog(args[1:])
 	case "help", "-h", "--help":
 		secretsUsage()
 	default:
@@ -60,6 +62,7 @@ Commands:
   decrypt <path>    Decrypt vault.yaml to a file (for mounting into containers)
   import <file>     Import KEY=VALUE pairs into secrets (keyed by file path)
   env [file]        Print KEY=VALUE for secrets (default: .auth.env)
+  log               Display audit log entries
 
 Import examples:
   actl vault import auth.env

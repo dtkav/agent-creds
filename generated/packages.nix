@@ -40,9 +40,11 @@
       hash = "sha256-vLJhhwimbvuxlU+EzWoidafxkFf/syREdf2zJeiiiDc=";
     };
     patches = [];
-    postInstall = (old.postInstall or "") + ''
+    postInstall = ''
       mv $out/bin/git $out/bin/igit
       rm -f $out/bin/git-*
+      rm -rf $out/share/git $out/share/bash-completion
+      rm -rf $out/libexec $out/share/man $out/share/doc
     '';
   });
 in [ igit ]

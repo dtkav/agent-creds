@@ -728,15 +728,40 @@ func (m setupModel) writeConfig() error {
 		}
 	}
 
-	// Write TOML
-	f, err := os.Create(path)
+	// Write TOML to temp file, validate, then rename
+	tmpPath := path + ".tmp"
+	f, err := os.Create(tmpPath)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 
 	enc := toml.NewEncoder(f)
-	return enc.Encode(cfg)
+	if err := enc.Encode(cfg); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("encoding TOML: %w", err)
+	}
+	f.Close()
+
+	// Validate written config can be parsed back
+	var check ProjectConfig
+	data, err := os.ReadFile(tmpPath)
+	if err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("reading back config: %w", err)
+	}
+	if err := toml.Unmarshal(data, &check); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("validating written config: %w", err)
+	}
+
+	// Atomic rename
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+
+	return nil
 }
 
 // Helper functions

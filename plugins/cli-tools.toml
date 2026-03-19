@@ -16,3 +16,4 @@ tree = true
 unzip = true
 neovim = true
 tmux = true
+diffr = true

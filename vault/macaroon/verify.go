@@ -31,6 +31,9 @@ type Verifier struct {
 // AttestationLocation is the third-party location for YubiKey attestation
 const AttestationLocation = "yubikey-local"
 
+// SSHAttestationLocation is the third-party location for SSH-based attestation
+const SSHAttestationLocation = "ssh-attestation"
+
 // NewVerifier creates a new token verifier
 func NewVerifier(ks *KeyStore) *Verifier {
 	v := &Verifier{
@@ -38,9 +41,10 @@ func NewVerifier(ks *KeyStore) *Verifier {
 		Trusted3Ps: make(map[string][]macaroon.EncryptionKey),
 	}
 
-	// Register attestation location if encryption key is configured
+	// Register attestation locations if encryption key is configured
 	if len(ks.EncryptionKey) > 0 {
 		v.AddTrusted3P(AttestationLocation, ks.EncryptionKey)
+		v.AddTrusted3P(SSHAttestationLocation, ks.EncryptionKey)
 	}
 
 	return v

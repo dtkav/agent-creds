@@ -134,6 +134,20 @@ func (d *DB) migrate() error {
 
 		// Add status column to users if it doesn't exist
 		`ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'pending'`,
+
+		// Audit log
+		`CREATE TABLE IF NOT EXISTS audit_log (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			timestamp INTEGER NOT NULL,
+			decision TEXT NOT NULL,
+			method TEXT NOT NULL,
+			host TEXT NOT NULL,
+			path TEXT NOT NULL,
+			reason TEXT,
+			token_id TEXT,
+			fingerprint TEXT
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp)`,
 	}
 
 	for _, m := range migrations {

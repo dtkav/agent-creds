@@ -1,0 +1,27 @@
+name = "igit"
+description = "igit - Git with inverted .gitignore semantics"
+
+nix = """
+let
+  igit = pkgs.git.overrideAttrs (old: {
+    pname = "igit";
+    version = "2.53.0-rc2";
+    src = pkgs.fetchFromGitHub {
+      owner = "dtkav";
+      repo = "igit";
+      rev = "7468c842712a5f9c1e34d09502143e3208bfb757";
+      hash = "sha256-vLJhhwimbvuxlU+EzWoidafxkFf/syREdf2zJeiiiDc=";
+    };
+    patches = [];
+    outputs = [ "out" ];
+    doCheck = false;
+    doInstallCheck = false;
+    postInstall = ''
+      mv $out/bin/git $out/bin/igit
+      rm -f $out/bin/git-*
+      rm -rf $out/share/git $out/share/bash-completion
+      rm -rf $out/libexec $out/share/man $out/share/doc
+    '';
+  });
+in [ igit ]
+"""

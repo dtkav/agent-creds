@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"net"
@@ -45,6 +46,9 @@ type domainCredential struct {
 
 	// PocketBase config (for authType="pocketbase")
 	pocketbaseConfig *pocketbase.Config
+
+	// Fly OIDC config (for authType="fly_oidc")
+	flyOIDCConfig *pocketbase.OIDCConfig
 }
 
 type authServer struct {
@@ -84,14 +88,16 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 	// Check for authorization header
 	authHeader := headers["authorization"]
 
-	// Detect macaroon token: either Bearer acm_xxx or SigV4 Credential=acm_xxx/...
+	// Detect macaroon token: Bearer acm_xxx, SigV4 Credential=acm_xxx/..., or Basic auth password=acm_xxx
 	tokenPrefix := s.verifier.GetTokenPrefix()
 	isBearerMacaroon := macaroon.IsMacaroonAuth(authHeader, tokenPrefix)
 	sigv4Macaroon := sigv4.ExtractAccessKey(authHeader)
 	isSigV4Macaroon := strings.HasPrefix(sigv4Macaroon, tokenPrefix)
+	basicMacaroon := extractBasicAuthMacaroon(authHeader, tokenPrefix)
+	isBasicMacaroon := basicMacaroon != ""
 
 	// Passthrough: unrecognized token format (unless strict mode)
-	if !isBearerMacaroon && !isSigV4Macaroon {
+	if !isBearerMacaroon && !isSigV4Macaroon && !isBasicMacaroon {
 		if s.strictMode {
 			log.Printf("Strict mode: rejected non-macaroon request to %s %s", host, access.Path)
 			return &authv3.CheckResponse{
@@ -112,9 +118,12 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 
 	// Normalize auth header for macaroon verification
 	// For SigV4: extract the macaroon from Credential field and wrap as Bearer
+	// For Basic: extract the macaroon from password field and wrap as Bearer
 	verifyAuth := authHeader
 	if isSigV4Macaroon {
 		verifyAuth = "Bearer " + sigv4Macaroon
+	} else if isBasicMacaroon {
+		verifyAuth = "Bearer " + basicMacaroon
 	}
 
 	// Macaroon token: validate and inject credentials
@@ -288,9 +297,43 @@ func (s *authServer) resolveCredentialHeaders(cred domainCredential, host string
 			AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
 		}}, nil
 
+	case "fly_oidc":
+		token, err := s.pbTokenManager.GetOIDCToken(host, cred.flyOIDCConfig)
+		if err != nil {
+			return nil, fmt.Errorf("fly oidc auth: %w", err)
+		}
+		return []*corev3.HeaderValueOption{{
+			Header: &corev3.HeaderValue{
+				Key:   cred.headerName,
+				Value: "Bearer " + token,
+			},
+			AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
+		}}, nil
+
 	default:
 		return nil, fmt.Errorf("unknown auth type: %s", cred.authType)
 	}
+}
+
+// extractBasicAuthMacaroon extracts a macaroon token from a Basic auth header's password field.
+// Returns the macaroon token if found, or empty string if not a Basic auth macaroon.
+func extractBasicAuthMacaroon(header, prefix string) string {
+	if !strings.HasPrefix(header, "Basic ") {
+		return ""
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(header, "Basic "))
+	if err != nil {
+		return ""
+	}
+	// Format: username:password — macaroon is in the password
+	_, password, ok := strings.Cut(string(decoded), ":")
+	if !ok {
+		return ""
+	}
+	if strings.HasPrefix(password, prefix) {
+		return password
+	}
+	return ""
 }
 
 func main() {
@@ -366,6 +409,12 @@ func main() {
 				Collection: cred.PocketBaseConfig.Collection,
 				Email:      cred.PocketBaseConfig.Email,
 				Password:   cred.PocketBaseConfig.Password,
+			}
+		case "fly_oidc":
+			dc.authType = "fly_oidc"
+			dc.flyOIDCConfig = &pocketbase.OIDCConfig{
+				Audience:  cred.FlyOIDCConfig.Audience,
+				FlyConfig: cred.FlyOIDCConfig.FlyConfig,
 			}
 		default:
 			dc.authType = "static"

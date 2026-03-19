@@ -41,6 +41,8 @@ func runSecrets(args []string) {
 		secretsEnv(args[1:])
 	case "export":
 		secretsExportLegacy()
+	case "credentials":
+		runCredentials(args[1:])
 	case "log":
 		runAuditLog(args[1:])
 	case "help", "-h", "--help":
@@ -64,6 +66,7 @@ Commands:
   decrypt <path>    Decrypt vault.yaml to a file (for mounting into containers)
   import <file>     Import KEY=VALUE pairs into secrets (keyed by file path)
   env [file]        Print KEY=VALUE for secrets (default: .auth.env)
+  credentials add   Add a new credential interactively
   log               Display audit log entries
 
 Import examples:

@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -688,6 +691,9 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		startDischargeRefresh(refreshCtx, cfg, scriptDir)
 	}
 
+	// Start denial monitoring
+	startDenialMonitor(refreshCtx, cfg.Vault)
+
 	// SSH into the sandbox (dropbear runs as devuser on port 2222)
 	sshCmd := exec.Command("ssh",
 		"-i", sshKeyPath,
@@ -1004,6 +1010,72 @@ func remintTokens(newCfg ProjectConfig, scriptDir string, oldUpstreams map[strin
 	if err := generateSandboxEnv(shaped, staticResolved); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: hot-reload env update failed: %v\n", err)
 	}
+}
+
+// denialEntry represents a denial from the vault API.
+type denialEntry struct {
+	Method string  `json:"method"`
+	Host   string  `json:"host"`
+	Path   string  `json:"path"`
+	Reason *string `json:"reason,omitempty"`
+}
+
+// startDenialMonitor polls the vault HTTP API every 30 seconds for new denials
+// and prints a warning when denials are detected. Stops when ctx is cancelled.
+func startDenialMonitor(ctx context.Context, vault VaultConfig) {
+	baseURL := vault.HTTP
+	if baseURL == "" {
+		if vault.IsRemote() {
+			baseURL = "https://" + vault.Host
+		} else {
+			baseURL = "http://localhost:8033"
+		}
+	}
+
+	go func() {
+		lastCheck := time.Now()
+		client := &http.Client{Timeout: 5 * time.Second}
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(30 * time.Second):
+			}
+
+			u, err := url.Parse(baseURL + "/api/denials")
+			if err != nil {
+				continue
+			}
+			q := u.Query()
+			q.Set("since", lastCheck.UTC().Format(time.RFC3339))
+			u.RawQuery = q.Encode()
+			now := time.Now()
+
+			resp, err := client.Get(u.String())
+			if err != nil {
+				continue
+			}
+
+			var denials []denialEntry
+			json.NewDecoder(resp.Body).Decode(&denials)
+			resp.Body.Close()
+
+			if len(denials) > 0 {
+				// Group by host+path+reason for concise output
+				fmt.Fprintf(os.Stderr, "\n⚠ %d access denial(s):\n", len(denials))
+				for _, d := range denials {
+					reason := ""
+					if d.Reason != nil {
+						reason = " -- " + *d.Reason
+					}
+					fmt.Fprintf(os.Stderr, "  %s %s%s%s\n", d.Method, d.Host, d.Path, reason)
+				}
+			}
+
+			lastCheck = now
+		}
+	}()
 }
 
 // reverseDomain reverses domain labels for sorting: "api.stripe.com" → "com.stripe.api"

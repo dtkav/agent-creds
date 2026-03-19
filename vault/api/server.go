@@ -55,6 +55,9 @@ func (s *Server) registerRoutes() {
 	// Audit log
 	s.mux.HandleFunc("/api/audit", s.handleAudit)
 
+	// Recent denials (unauthenticated, for adev polling)
+	s.mux.HandleFunc("/api/denials", s.handleDenials)
+
 	// Enrollment page
 	s.mux.HandleFunc("/enroll", s.handleEnrollPage)
 

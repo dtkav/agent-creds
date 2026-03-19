@@ -88,3 +88,50 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, resp)
 }
+
+// handleDenials returns recent denial entries without requiring session auth.
+// Used by adev for denial monitoring polling.
+func (s *Server) handleDenials(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	since := time.Now().Add(-30 * time.Second)
+	if v := r.URL.Query().Get("since"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid since parameter")
+			return
+		}
+		since = t
+	}
+
+	deny := "deny"
+	filter := db.AuditFilter{
+		Decision: &deny,
+		Since:    &since,
+		Limit:    50,
+	}
+
+	entries, err := s.db.QueryAuditLog(filter)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to query audit log")
+		return
+	}
+
+	resp := make([]auditEntryResponse, len(entries))
+	for i, e := range entries {
+		resp[i] = auditEntryResponse{
+			ID:        e.ID,
+			Timestamp: e.Timestamp.UTC().Format(time.RFC3339),
+			Decision:  e.Decision,
+			Method:    e.Method,
+			Host:      e.Host,
+			Path:      e.Path,
+			Reason:    e.Reason,
+		}
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}

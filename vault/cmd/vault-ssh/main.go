@@ -98,6 +98,8 @@ func handleCommand(sess ssh.Session, userID []byte, fingerprint, status string, 
 		cmdMint(sess, userID, status, cmdArgs)
 	case "keys":
 		cmdKeys(sess, userID, cmdArgs)
+	case "discharge":
+		cmdDischarge(sess, status, cmdArgs)
 	case "users":
 		cmdUsers(sess, status, cmdArgs)
 	default:
@@ -236,6 +238,72 @@ func cmdMint(sess ssh.Session, userID []byte, status string, args []string) {
 	token, err := tfmac.EncodeToken(m)
 	if err != nil {
 		fmt.Fprintf(sess, "Error encoding token: %v\n", err)
+		return
+	}
+
+	fmt.Fprintln(sess, token)
+}
+
+func cmdDischarge(sess ssh.Session, status string, args []string) {
+	if status == UserStatusPending {
+		fmt.Fprintln(sess, "Error: Your account is pending approval.")
+		return
+	}
+
+	if len(args) == 0 {
+		fmt.Fprintln(sess, "Usage: discharge <token>")
+		return
+	}
+
+	if len(keyStore.EncryptionKey) == 0 {
+		fmt.Fprintln(sess, "Error: MACAROON_ENCRYPTION_KEY is not configured")
+		return
+	}
+
+	// Decode the provided token
+	m, err := tfmac.DecodeToken(args[0])
+	if err != nil {
+		fmt.Fprintf(sess, "Error decoding token: %v\n", err)
+		return
+	}
+
+	// Find 3P caveat at SSHAttestationLocation
+	var found *macaroon.Caveat3P
+	for _, c := range m.UnsafeCaveats.Caveats {
+		if tp, ok := c.(*macaroon.Caveat3P); ok {
+			if tp.Location == tfmac.SSHAttestationLocation {
+				found = tp
+				break
+			}
+		}
+	}
+
+	if found == nil {
+		fmt.Fprintln(sess, "Error: Token has no third-party caveat at ssh-attestation location")
+		return
+	}
+
+	// Create discharge macaroon
+	_, discharge, err := macaroon.DischargeTicket(keyStore.EncryptionKey, found.Location, found.Ticket)
+	if err != nil {
+		fmt.Fprintf(sess, "Error creating discharge: %v\n", err)
+		return
+	}
+
+	// Add 1-hour validity window
+	now := time.Now()
+	if err := discharge.Add(&macaroon.ValidityWindow{
+		NotBefore: now.Unix(),
+		NotAfter:  now.Add(1 * time.Hour).Unix(),
+	}); err != nil {
+		fmt.Fprintf(sess, "Error adding validity: %v\n", err)
+		return
+	}
+
+	// Encode and print
+	token, err := tfmac.EncodeToken(discharge)
+	if err != nil {
+		fmt.Fprintf(sess, "Error encoding discharge: %v\n", err)
 		return
 	}
 

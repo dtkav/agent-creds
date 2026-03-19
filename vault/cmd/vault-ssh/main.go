@@ -25,6 +25,7 @@ import (
 	"vault/attestation"
 	"vault/db"
 	tfmac "vault/macaroon"
+	vaultcfg "vault/vault"
 )
 
 var (
@@ -64,8 +65,9 @@ const (
 
 // Global resources (initialized in main)
 var (
-	database *db.DB
-	keyStore *tfmac.KeyStore
+	database    *db.DB
+	keyStore    *tfmac.KeyStore
+	vaultConfig *vaultcfg.Config
 )
 
 // configuredHosts lists hosts that can be minted (loaded from domains_gen.go if available)
@@ -747,6 +749,16 @@ func main() {
 	keyStore, err = tfmac.LoadKeyStore()
 	if err != nil {
 		log.Fatalf("Failed to load keystore: %v", err)
+	}
+
+	// Load vault config (optional — missing config is not fatal)
+	vaultConfigPath := os.Getenv("VAULT_CONFIG")
+	if vaultConfigPath == "" {
+		vaultConfigPath = "vault.yaml"
+	}
+	vaultConfig, err = vaultcfg.Load(vaultConfigPath)
+	if err != nil {
+		log.Printf("Warning: Could not load vault config from %s: %v", vaultConfigPath, err)
 	}
 
 	host := os.Getenv("SSH_HOST")

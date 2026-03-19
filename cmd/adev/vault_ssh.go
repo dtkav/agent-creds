@@ -10,11 +10,19 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+// EndpointInfo describes an allowed endpoint from credential capabilities.
+type EndpointInfo struct {
+	Methods     []string `json:"methods"`
+	Paths       []string `json:"paths"`
+	Description string   `json:"description,omitempty"`
+}
+
 // CredentialInfo holds metadata returned by vault-ssh info command.
 type CredentialInfo struct {
-	Type    string   `json:"type"`
-	EnvVars []string `json:"env_vars,omitempty"`
-	Hosts   []string `json:"hosts,omitempty"`
+	Type      string         `json:"type"`
+	EnvVars   []string       `json:"env_vars,omitempty"`
+	Hosts     []string       `json:"hosts,omitempty"`
+	Endpoints []EndpointInfo `json:"endpoints,omitempty"`
 }
 
 // vaultSSHAddr returns the SSH address for the vault.

@@ -245,9 +245,65 @@ func (m setupModel) updateCredentialSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 	return m, nil
 }
 
+// hasCapabilities returns true if the credential has endpoint capabilities defined.
+func (c *credential) hasCapabilities() bool {
+	return c.Info != nil && len(c.Info.Endpoints) > 0
+}
+
+// endpointKey returns a unique string key for an endpoint capability.
+func endpointKey(ep EndpointInfo) string {
+	return strings.Join(ep.Methods, ",") + ":" + strings.Join(ep.Paths, ",")
+}
+
+// isEndpointSelected checks if a capability endpoint's methods and paths are all selected.
+func (c *credential) isEndpointSelected(ep EndpointInfo) bool {
+	for _, m := range ep.Methods {
+		if !containsStr(c.Methods, m) {
+			return false
+		}
+	}
+	for _, p := range ep.Paths {
+		if !containsStr(c.Paths, p) {
+			return false
+		}
+	}
+	return true
+}
+
+// toggleEndpoint adds or removes a capability endpoint's methods and paths.
+func (c *credential) toggleEndpoint(ep EndpointInfo) {
+	if c.isEndpointSelected(ep) {
+		// Remove
+		for _, m := range ep.Methods {
+			c.Methods = removeStr(c.Methods, m)
+		}
+		for _, p := range ep.Paths {
+			c.Paths = removeStr(c.Paths, p)
+		}
+	} else {
+		// Add
+		for _, m := range ep.Methods {
+			if !containsStr(c.Methods, m) {
+				c.Methods = append(c.Methods, m)
+			}
+		}
+		for _, p := range ep.Paths {
+			if !containsStr(c.Paths, p) {
+				c.Paths = append(c.Paths, p)
+			}
+		}
+	}
+}
+
 func (m setupModel) updateEndpointConfig(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	c := &m.credentials[m.cursor]
 
+	// Credentials with capabilities use endpoint selection
+	if c.hasCapabilities() {
+		return m.updateEndpointConfigCaps(msg, c)
+	}
+
+	// Free-form endpoint entry for credentials without capabilities
 	if m.editingField >= 0 {
 		// Editing a field
 		switch msg.String() {
@@ -302,6 +358,32 @@ func (m setupModel) updateEndpointConfig(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Edit paths
 		m.editingField = 1
 		m.inputBuf = strings.Join(c.Paths, ", ")
+	case "enter":
+		m.view = viewCredentialSelect
+	}
+	return m, nil
+}
+
+func (m setupModel) updateEndpointConfigCaps(msg tea.KeyMsg, c *credential) (tea.Model, tea.Cmd) {
+	endpoints := c.Info.Endpoints
+	switch msg.String() {
+	case "esc":
+		m.view = viewCredentialSelect
+	case "q", "ctrl+c":
+		m.quitting = true
+		return m, tea.Quit
+	case "up", "k":
+		if m.endpointCursor > 0 {
+			m.endpointCursor--
+		}
+	case "down", "j":
+		if m.endpointCursor < len(endpoints)-1 {
+			m.endpointCursor++
+		}
+	case " ":
+		if m.endpointCursor < len(endpoints) {
+			c.toggleEndpoint(endpoints[m.endpointCursor])
+		}
 	case "enter":
 		m.view = viewCredentialSelect
 	}
@@ -547,35 +629,61 @@ func (m setupModel) viewEndpointConfig() string {
 		b.WriteString("\n")
 	}
 
-	b.WriteString("  HTTP Methods:\n\n")
-	for i, method := range httpMethods {
+	if c.hasCapabilities() {
+		// Show capability endpoints as selectable items
+		b.WriteString("  Endpoints:\n\n")
+		for i, ep := range c.Info.Endpoints {
+			cursor := "  "
+			if i == m.endpointCursor {
+				cursor = "> "
+			}
+			marker := "○"
+			if c.isEndpointSelected(ep) {
+				marker = "●"
+			}
+
+			methods := strings.Join(ep.Methods, ", ")
+			paths := strings.Join(ep.Paths, ", ")
+			b.WriteString(fmt.Sprintf("  %s%s %s  %s\n", cursor, marker, methods, paths))
+			if ep.Description != "" {
+				b.WriteString(setupDimStyle.Render(fmt.Sprintf("       %s", ep.Description)))
+				b.WriteString("\n")
+			}
+		}
+
+		b.WriteString(setupHelpStyle.Render("\n  [space] toggle endpoint  [enter] save  [esc] back"))
+	} else {
+		// Free-form entry
+		b.WriteString("  HTTP Methods:\n\n")
+		for i, method := range httpMethods {
+			cursor := "  "
+			if i == m.endpointCursor {
+				cursor = "> "
+			}
+			marker := "○"
+			if containsStr(c.Methods, method) {
+				marker = "●"
+			}
+			b.WriteString(fmt.Sprintf("  %s%s %s\n", cursor, marker, method))
+		}
+
+		// Paths section
 		cursor := "  "
-		if i == m.endpointCursor {
+		if m.endpointCursor == len(httpMethods) {
 			cursor = "> "
 		}
-		marker := "○"
-		if containsStr(c.Methods, method) {
-			marker = "●"
+		pathsStr := "(all)"
+		if len(c.Paths) > 0 {
+			pathsStr = strings.Join(c.Paths, ", ")
 		}
-		b.WriteString(fmt.Sprintf("  %s%s %s\n", cursor, marker, method))
-	}
+		b.WriteString(fmt.Sprintf("\n  %sPaths: %s\n", cursor, pathsStr))
 
-	// Paths section
-	cursor := "  "
-	if m.endpointCursor == len(httpMethods) {
-		cursor = "> "
-	}
-	pathsStr := "(all)"
-	if len(c.Paths) > 0 {
-		pathsStr = strings.Join(c.Paths, ", ")
-	}
-	b.WriteString(fmt.Sprintf("\n  %sPaths: %s\n", cursor, pathsStr))
+		if m.editingField == 1 {
+			b.WriteString(fmt.Sprintf("\n  Edit paths (comma-separated): %s█\n", m.inputBuf))
+		}
 
-	if m.editingField == 1 {
-		b.WriteString(fmt.Sprintf("\n  Edit paths (comma-separated): %s█\n", m.inputBuf))
+		b.WriteString(setupHelpStyle.Render("\n  [space] toggle method  [p] edit paths  [enter] save  [esc] back"))
 	}
-
-	b.WriteString(setupHelpStyle.Render("\n  [space] toggle method  [p] edit paths  [enter] save  [esc] back"))
 
 	return setupBorderStyle.Render(b.String())
 }

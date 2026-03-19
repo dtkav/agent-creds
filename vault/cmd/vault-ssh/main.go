@@ -346,10 +346,17 @@ func cmdInfo(sess ssh.Session, status string, args []string) {
 	}
 
 	// Build response JSON
+	type endpointInfo struct {
+		Methods     []string `json:"methods"`
+		Paths       []string `json:"paths"`
+		Description string   `json:"description,omitempty"`
+	}
+
 	type infoResponse struct {
-		Type    string   `json:"type"`
-		EnvVars []string `json:"env_vars,omitempty"`
-		Hosts   []string `json:"hosts,omitempty"`
+		Type      string         `json:"type"`
+		EnvVars   []string       `json:"env_vars,omitempty"`
+		Hosts     []string       `json:"hosts,omitempty"`
+		Endpoints []endpointInfo `json:"endpoints,omitempty"`
 	}
 
 	resp := infoResponse{
@@ -367,9 +374,16 @@ func cmdInfo(sess ssh.Session, status string, args []string) {
 		resp.EnvVars = append(resp.EnvVars, cc.EnvPass)
 	}
 
-	// Collect hosts from capabilities
+	// Collect hosts and endpoints from capabilities
 	if cc.Capabilities != nil {
 		resp.Hosts = cc.Capabilities.Hosts
+		for _, ep := range cc.Capabilities.Endpoints {
+			resp.Endpoints = append(resp.Endpoints, endpointInfo{
+				Methods:     ep.Methods,
+				Paths:       ep.Paths,
+				Description: ep.Description,
+			})
+		}
 	}
 
 	out, err := json.Marshal(resp)

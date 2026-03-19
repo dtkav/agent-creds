@@ -15,13 +15,30 @@ agent-creds lets agents use real API credentials (Stripe, AWS, GitHub, etc.) wit
 
 ### 1. Gather current state
 
-Read these to understand what's configured and what's available:
+Read and run all of these to understand what's configured and what's available:
 
 - **Current config**: Read `agent-creds.toml` to see existing upstream entries and their scopes (methods, paths, credential references).
 - **Available credentials**: Run `actl vault show --credentials` to list credentials stored in the vault, their types (bearer, sigv4, basic), and associated hosts.
-- **Recent denials** (if investigating failures): Run `actl vault log --recent --denials` to see recent authorization failures with method, host, path, and reason.
+- **Recent denials**: Run `actl vault log --recent --denials` to see recent authorization failures with method, host, path, and reason.
 
-### 2. Understand the request
+### 2. Present vault state
+
+Before acting on the request, show the operator a summary of the current access state:
+
+**Credential inventory** — For each credential from `actl vault show --credentials`, display:
+- Credential path (e.g., `/stripe/prod`)
+- Type (bearer, sigv4, basic)
+- Associated host(s)
+- Whether it's referenced in `agent-creds.toml` (active) or available but unused
+
+**Recent failures** — If there are any recent denials, surface them prominently:
+- Group denials by host and reason
+- Highlight repeated patterns (e.g., same path denied multiple times)
+- Suggest the most likely fix for each denial pattern
+
+This gives the operator full context before making changes.
+
+### 3. Understand the request
 
 The user may ask to:
 - **Add access** to a new API ("I need Stripe access", "add S3 read access")
@@ -29,7 +46,7 @@ The user may ask to:
 - **Fix denials** ("fix the recent denials", "why is my API call failing?")
 - **Modify scope** ("restrict to read-only", "add POST to /v1/charges")
 
-### 3. Propose changes to agent-creds.toml
+### 4. Propose changes to agent-creds.toml
 
 When adding or modifying upstream entries, use this format:
 
@@ -45,7 +62,7 @@ Key fields:
 - `methods` — HTTP methods to allow (omit to allow all)
 - `paths` — URL path patterns with glob support (`*` = one segment, `**` = multiple segments). Omit to allow all paths.
 
-### 4. Apply changes
+### 5. Apply changes
 
 After the user approves the proposed changes:
 1. Edit `agent-creds.toml` with the new/modified upstream entries

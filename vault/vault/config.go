@@ -199,6 +199,11 @@ func (c *Config) Validate() (warnings []string, err error) {
 		if e != nil {
 			return warnings, fmt.Errorf("credentials.%s: %w", domain, e)
 		}
+		// Validate capability hosts against the credential's configured host (map key)
+		if cc.Capabilities != nil {
+			capWarnings := cc.Capabilities.validate(domain)
+			warnings = append(warnings, capWarnings...)
+		}
 	}
 	return warnings, nil
 }
@@ -348,6 +353,27 @@ func (cc *CredentialConfig) resolve() (*Credential, error) {
 	default:
 		return nil, fmt.Errorf("unknown credential type: %s", cc.Type)
 	}
+}
+
+// validate checks that capability hosts include the credential's configured host.
+func (cap *CapabilitiesConfig) validate(domain string) []string {
+	var warnings []string
+	if len(cap.Hosts) == 0 {
+		return warnings
+	}
+	found := false
+	for _, h := range cap.Hosts {
+		if h == domain {
+			found = true
+			break
+		}
+	}
+	if !found {
+		warnings = append(warnings, fmt.Sprintf(
+			"%s: capability hosts %v do not include the credential host %q",
+			domain, cap.Hosts, domain))
+	}
+	return warnings
 }
 
 func basicAuth(username, password string) string {

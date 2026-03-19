@@ -66,6 +66,8 @@ type authServer struct {
 	pbTokenManager *pocketbase.TokenManager
 	// StrictMode requires macaroon tokens for all requests (no passthrough)
 	strictMode bool
+	// Database for audit logging
+	database *db.DB
 }
 
 func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*authv3.CheckResponse, error) {
@@ -100,10 +102,28 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 	basicMacaroon := extractBasicAuthMacaroon(authHeader, tokenPrefix)
 	isBasicMacaroon := basicMacaroon != ""
 
+	// Determine the raw macaroon token string for token ID extraction
+	var rawToken string
+	if isSigV4Macaroon {
+		rawToken = sigv4Macaroon
+	} else if isBasicMacaroon {
+		rawToken = basicMacaroon
+	} else if isBearerMacaroon {
+		// Extract the main token from "Bearer acm_xxx,acm_yyy" format
+		if tokenStr := strings.TrimPrefix(authHeader, "Bearer "); tokenStr != "" {
+			if idx := strings.Index(tokenStr, ","); idx > 0 {
+				rawToken = strings.TrimSpace(tokenStr[:idx])
+			} else {
+				rawToken = strings.TrimSpace(tokenStr)
+			}
+		}
+	}
+
 	// Passthrough: unrecognized token format (unless strict mode)
 	if !isBearerMacaroon && !isSigV4Macaroon && !isBasicMacaroon {
 		if s.strictMode {
 			log.Printf("Strict mode: rejected non-macaroon request to %s %s", host, access.Path)
+			s.logAudit("deny", access.Method, host, access.Path, "macaroon token required", nil)
 			return &authv3.CheckResponse{
 				Status: &status.Status{Code: int32(codes.PermissionDenied)},
 				HttpResponse: &authv3.CheckResponse_DeniedResponse{
@@ -130,10 +150,14 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 		verifyAuth = "Bearer " + basicMacaroon
 	}
 
+	// Extract token ID for audit logging
+	tokenID := extractTokenID(rawToken)
+
 	// Macaroon token: validate and inject credentials
 	result := s.verifier.VerifyRequest(verifyAuth, access)
 	if !result.Valid {
 		log.Printf("Auth failed: %s", result.Error)
+		s.logAudit("deny", access.Method, host, access.Path, result.Error, tokenID)
 		return &authv3.CheckResponse{
 			Status: &status.Status{Code: int32(codes.PermissionDenied)},
 			HttpResponse: &authv3.CheckResponse_DeniedResponse{
@@ -157,7 +181,9 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 			}
 		}
 		if !allowed {
-			log.Printf("Upstream restriction: method %s not allowed for %s (allowed: %s)", method, host, allowedMethods)
+			reason := fmt.Sprintf("method %s not allowed (allowed: %s)", method, allowedMethods)
+			log.Printf("Upstream restriction: %s for %s", reason, host)
+			s.logAudit("deny", access.Method, host, access.Path, reason, tokenID)
 			return &authv3.CheckResponse{
 				Status: &status.Status{Code: int32(codes.PermissionDenied)},
 				HttpResponse: &authv3.CheckResponse_DeniedResponse{
@@ -184,7 +210,9 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 			}
 		}
 		if !matched {
-			log.Printf("Upstream restriction: path %s not allowed for %s (allowed: %s)", httpReq.GetPath(), host, allowedPaths)
+			reason := fmt.Sprintf("path %s not allowed (allowed: %s)", httpReq.GetPath(), allowedPaths)
+			log.Printf("Upstream restriction: %s for %s", reason, host)
+			s.logAudit("deny", access.Method, host, access.Path, reason, tokenID)
 			return &authv3.CheckResponse{
 				Status: &status.Status{Code: int32(codes.PermissionDenied)},
 				HttpResponse: &authv3.CheckResponse_DeniedResponse{
@@ -201,6 +229,7 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 	cred, ok := s.credentials[host]
 	if !ok {
 		log.Printf("Auth failed: no credentials configured for %s", host)
+		s.logAudit("deny", access.Method, host, access.Path, "no credentials configured for host", tokenID)
 		return &authv3.CheckResponse{
 			Status: &status.Status{Code: int32(codes.PermissionDenied)},
 			HttpResponse: &authv3.CheckResponse_DeniedResponse{
@@ -216,6 +245,7 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 	respHeaders, err := s.resolveCredentialHeaders(cred, host, httpReq)
 	if err != nil {
 		log.Printf("Credential resolution failed for %s: %v", host, err)
+		s.logAudit("deny", access.Method, host, access.Path, fmt.Sprintf("credential resolution failed: %v", err), tokenID)
 		return &authv3.CheckResponse{
 			Status: &status.Status{Code: int32(codes.Internal)},
 			HttpResponse: &authv3.CheckResponse_DeniedResponse{
@@ -228,6 +258,7 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 	}
 
 	log.Printf("Auth successful for %s %s %s", access.Method, host, access.Path)
+	s.logAudit("allow", access.Method, host, access.Path, "", tokenID)
 	return &authv3.CheckResponse{
 		Status: &status.Status{Code: int32(codes.OK)},
 		HttpResponse: &authv3.CheckResponse_OkResponse{
@@ -550,6 +581,7 @@ func main() {
 		tokenManager:   tokenManager,
 		pbTokenManager: pbTokenManager,
 		strictMode:     strictMode,
+		database:       database,
 	})
 
 	// Handle graceful shutdown
@@ -569,6 +601,37 @@ func main() {
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("Failed to serve: %v", err)
 	}
+}
+
+// logAudit writes an audit entry asynchronously so it doesn't block the response path.
+func (s *authServer) logAudit(decision, method, host, path, reason string, tokenID *string) {
+	entry := &db.AuditEntry{
+		Timestamp: time.Now(),
+		Decision:  decision,
+		Method:    method,
+		Host:      host,
+		Path:      path,
+	}
+	if reason != "" {
+		entry.Reason = &reason
+	}
+	entry.TokenID = tokenID
+	go func() {
+		if err := s.database.InsertAuditEntry(entry); err != nil {
+			log.Printf("Audit log error: %v", err)
+		}
+	}()
+}
+
+// extractTokenID attempts to extract the token UUID from a raw token string.
+// Returns nil if the token cannot be decoded.
+func extractTokenID(tokenStr string) *string {
+	m, err := macaroon.DecodeToken(tokenStr)
+	if err != nil {
+		return nil
+	}
+	id := m.Nonce.UUID().String()
+	return &id
 }
 
 // Silence unused import warning

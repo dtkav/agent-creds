@@ -38,6 +38,10 @@ type domainCredential struct {
 	// Static API key (for authType="static")
 	apiKey string
 
+	// Basic auth credentials (for authType="basic")
+	username string
+	password string
+
 	// OAuth2 config (for authType="oauth2")
 	oauth2Config *oauth2.OAuth2Config
 
@@ -259,6 +263,16 @@ func (s *authServer) resolveCredentialHeaders(cred domainCredential, host string
 			AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
 		}}, nil
 
+	case "basic":
+		encoded := base64.StdEncoding.EncodeToString([]byte(cred.username + ":" + cred.password))
+		return []*corev3.HeaderValueOption{{
+			Header: &corev3.HeaderValue{
+				Key:   "authorization",
+				Value: "Basic " + encoded,
+			},
+			AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
+		}}, nil
+
 	case "sigv4":
 		cfg := cred.sigv4Config
 		headers := httpReq.GetHeaders()
@@ -401,6 +415,19 @@ func main() {
 				Service:        cred.SigV4Config.Service,
 				AccessKeyID:    cred.SigV4Config.AccessKeyID,
 				SecretAccessKey: cred.SigV4Config.SecretAccessKey,
+			}
+		case "basic":
+			dc.authType = "basic"
+			// Extract username:password from the resolved "Basic <base64>" value
+			if cred.Value != "" {
+				if encoded, ok := strings.CutPrefix(cred.Value, "Basic "); ok {
+					if decoded, err := base64.StdEncoding.DecodeString(encoded); err == nil {
+						if u, p, ok := strings.Cut(string(decoded), ":"); ok {
+							dc.username = u
+							dc.password = p
+						}
+					}
+				}
 			}
 		case "pocketbase":
 			dc.authType = "pocketbase"

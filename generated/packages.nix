@@ -39,6 +39,7 @@
       rev = "7468c842712a5f9c1e34d09502143e3208bfb757";
       hash = "sha256-vLJhhwimbvuxlU+EzWoidafxkFf/syREdf2zJeiiiDc=";
     };
+    patches = [];
     postInstall = (old.postInstall or "") + ''
       mv $out/bin/git $out/bin/igit
       rm -f $out/bin/git-*

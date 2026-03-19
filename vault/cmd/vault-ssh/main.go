@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -102,6 +103,8 @@ func handleCommand(sess ssh.Session, userID []byte, fingerprint, status string, 
 		cmdKeys(sess, userID, cmdArgs)
 	case "discharge":
 		cmdDischarge(sess, status, cmdArgs)
+	case "info":
+		cmdInfo(sess, status, cmdArgs)
 	case "users":
 		cmdUsers(sess, status, cmdArgs)
 	default:
@@ -310,6 +313,69 @@ func cmdDischarge(sess ssh.Session, status string, args []string) {
 	}
 
 	fmt.Fprintln(sess, token)
+}
+
+func cmdInfo(sess ssh.Session, status string, args []string) {
+	if status == UserStatusPending {
+		fmt.Fprintln(sess, "Error: Your account is pending approval.")
+		return
+	}
+
+	if len(args) == 0 {
+		fmt.Fprintln(sess, "Usage: info <credential-path>")
+		return
+	}
+
+	credPath := args[0]
+
+	if vaultConfig == nil {
+		fmt.Fprintln(sess, "Error: Vault config not loaded")
+		return
+	}
+
+	// Look up credential by path (e.g., "/stripe/prod" maps to key "stripe/prod" or we strip leading slash)
+	lookupKey := strings.TrimPrefix(credPath, "/")
+
+	cc, ok := vaultConfig.Credentials[lookupKey]
+	if !ok {
+		fmt.Fprintf(sess, "Error: Unknown credential path: %s\n", credPath)
+		return
+	}
+
+	// Build response JSON
+	type infoResponse struct {
+		Type    string   `json:"type"`
+		EnvVars []string `json:"env_vars,omitempty"`
+		Hosts   []string `json:"hosts,omitempty"`
+	}
+
+	resp := infoResponse{
+		Type: cc.Type,
+	}
+
+	// Collect env var names
+	if cc.Env != "" {
+		resp.EnvVars = append(resp.EnvVars, cc.Env)
+	}
+	if cc.EnvUser != "" {
+		resp.EnvVars = append(resp.EnvVars, cc.EnvUser)
+	}
+	if cc.EnvPass != "" {
+		resp.EnvVars = append(resp.EnvVars, cc.EnvPass)
+	}
+
+	// Collect hosts from capabilities
+	if cc.Capabilities != nil {
+		resp.Hosts = cc.Capabilities.Hosts
+	}
+
+	out, err := json.Marshal(resp)
+	if err != nil {
+		fmt.Fprintf(sess, "Error: %v\n", err)
+		return
+	}
+
+	fmt.Fprintln(sess, string(out))
 }
 
 func cmdKeys(sess ssh.Session, userID []byte, args []string) {

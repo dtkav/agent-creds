@@ -24,6 +24,11 @@ type CredentialConfig struct {
 	Username string `yaml:"username,omitempty"`
 	Password string `yaml:"password,omitempty"`
 
+	// Environment variable name fields for credential resolution
+	Env     string `yaml:"env,omitempty"`      // env var holding bearer token
+	EnvUser string `yaml:"env_user,omitempty"` // env var holding basic auth username
+	EnvPass string `yaml:"env_pass,omitempty"` // env var holding basic auth password
+
 	// SigV4 fields
 	Region         string `yaml:"region,omitempty"`
 	Service        string `yaml:"service,omitempty"`
@@ -34,16 +39,21 @@ type CredentialConfig struct {
 	URL        string `yaml:"url,omitempty"`
 	Collection string `yaml:"collection,omitempty"`
 	Email      string `yaml:"email,omitempty"`
+
+	// Fly OIDC fields
+	Audience  string `yaml:"audience,omitempty"`
+	FlyConfig string `yaml:"fly_config,omitempty"`
 }
 
 // Credential holds a resolved credential ready for injection
 type Credential struct {
-	Type       string // "bearer", "basic", "sigv4", or "pocketbase"
+	Type       string // "bearer", "basic", "sigv4", "pocketbase", or "fly_oidc"
 	HeaderName string // "authorization"
 	Value      string // The full header value (for bearer/basic)
 
 	SigV4Config      *SigV4ResolvedConfig
 	PocketBaseConfig *PocketBaseResolvedConfig
+	FlyOIDCConfig    *FlyOIDCResolvedConfig
 }
 
 // SigV4ResolvedConfig holds resolved SigV4 credentials
@@ -60,6 +70,12 @@ type PocketBaseResolvedConfig struct {
 	Collection string
 	Email      string
 	Password   string
+}
+
+// FlyOIDCResolvedConfig holds resolved Fly OIDC credentials
+type FlyOIDCResolvedConfig struct {
+	Audience  string
+	FlyConfig string
 }
 
 // Load reads and parses a vault.yaml file, resolving $secret references.
@@ -172,17 +188,22 @@ func (c *Config) Validate() (warnings []string, err error) {
 }
 
 func (cc *CredentialConfig) validate(domain string) (warnings []string, err error) {
+	// Validate env field consistency: EnvUser and EnvPass must both be set or both absent
+	if (cc.EnvUser == "") != (cc.EnvPass == "") {
+		return nil, fmt.Errorf("env_user and env_pass must both be set or both absent")
+	}
+
 	switch cc.Type {
 	case "bearer":
-		if cc.Token == "" {
-			warnings = append(warnings, fmt.Sprintf("%s: token is empty", domain))
+		if cc.Token == "" && cc.Env == "" {
+			warnings = append(warnings, fmt.Sprintf("%s: token is empty and no env var configured", domain))
 		}
 	case "basic":
-		if cc.Username == "" {
-			warnings = append(warnings, fmt.Sprintf("%s: username is empty", domain))
+		if cc.Username == "" && cc.EnvUser == "" {
+			warnings = append(warnings, fmt.Sprintf("%s: username is empty and no env_user configured", domain))
 		}
-		if cc.Password == "" {
-			warnings = append(warnings, fmt.Sprintf("%s: password is empty", domain))
+		if cc.Password == "" && cc.EnvPass == "" {
+			warnings = append(warnings, fmt.Sprintf("%s: password is empty and no env_pass configured", domain))
 		}
 	case "sigv4":
 		if cc.Region == "" {
@@ -209,6 +230,13 @@ func (cc *CredentialConfig) validate(domain string) (warnings []string, err erro
 		}
 		if cc.Password == "" {
 			warnings = append(warnings, fmt.Sprintf("%s: password is empty", domain))
+		}
+	case "fly_oidc":
+		if cc.Audience == "" {
+			return nil, fmt.Errorf("fly_oidc requires 'audience'")
+		}
+		if cc.FlyConfig == "" {
+			return nil, fmt.Errorf("fly_oidc requires 'fly_config'")
 		}
 	case "":
 		return nil, fmt.Errorf("'type' is required")
@@ -285,6 +313,19 @@ func (cc *CredentialConfig) resolve() (*Credential, error) {
 				Collection: cc.Collection,
 				Email:      cc.Email,
 				Password:   cc.Password,
+			},
+		}, nil
+
+	case "fly_oidc":
+		if cc.Audience == "" || cc.FlyConfig == "" {
+			return nil, nil
+		}
+		return &Credential{
+			Type:       "fly_oidc",
+			HeaderName: "authorization",
+			FlyOIDCConfig: &FlyOIDCResolvedConfig{
+				Audience:  cc.Audience,
+				FlyConfig: cc.FlyConfig,
 			},
 		}, nil
 

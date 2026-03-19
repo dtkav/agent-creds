@@ -9,6 +9,7 @@ require (
 	github.com/fsnotify/fsnotify v1.7.0
 	github.com/muesli/termenv v0.15.2
 	golang.org/x/crypto v0.49.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

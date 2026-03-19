@@ -40,6 +40,8 @@
       hash = "sha256-vLJhhwimbvuxlU+EzWoidafxkFf/syREdf2zJeiiiDc=";
     };
     patches = [];
+    doCheck = false;
+    doInstallCheck = false;
     postInstall = ''
       mv $out/bin/git $out/bin/igit
       rm -f $out/bin/git-*

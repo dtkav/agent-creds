@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // generateSandboxEnv writes generated/sandbox.env with token env vars and static env vars.
@@ -85,4 +87,79 @@ func shapeTokens(entries []TokenEntry, infos map[string]*CredentialInfo) map[str
 		}
 	}
 	return tokens
+}
+
+// resolveStaticEnv processes the [env] section from agent-creds.toml, resolving
+// $secret references against the vault.yaml secrets map. Plain string values
+// pass through unchanged. Returns a map of env var name → resolved value.
+func resolveStaticEnv(staticEnv map[string]interface{}, vaultYAMLPath string) (map[string]string, error) {
+	result := make(map[string]string)
+	if len(staticEnv) == 0 {
+		return result, nil
+	}
+
+	// Load secrets map from vault.yaml (only if we have $secret refs)
+	var secrets map[string]map[string]string
+	needSecrets := false
+	for _, v := range staticEnv {
+		if _, ok := v.(map[string]interface{}); ok {
+			needSecrets = true
+			break
+		}
+	}
+
+	if needSecrets {
+		data, err := os.ReadFile(vaultYAMLPath)
+		if err != nil {
+			return nil, fmt.Errorf("reading vault.yaml for secret resolution: %w", err)
+		}
+		var raw struct {
+			Secrets map[string]map[string]string `yaml:"secrets"`
+		}
+		if err := yaml.Unmarshal(data, &raw); err != nil {
+			return nil, fmt.Errorf("parsing vault.yaml secrets: %w", err)
+		}
+		secrets = raw.Secrets
+	}
+
+	for k, v := range staticEnv {
+		switch val := v.(type) {
+		case string:
+			result[k] = val
+		case map[string]interface{}:
+			ref, ok := val["$secret"]
+			if !ok {
+				return nil, fmt.Errorf("env var %s: map value must have $secret key", k)
+			}
+			refStr, ok := ref.(string)
+			if !ok {
+				return nil, fmt.Errorf("env var %s: $secret value must be a string", k)
+			}
+			resolved, err := lookupVaultSecret(refStr, secrets)
+			if err != nil {
+				return nil, fmt.Errorf("env var %s: %w", k, err)
+			}
+			result[k] = resolved
+		default:
+			result[k] = fmt.Sprintf("%v", v)
+		}
+	}
+	return result, nil
+}
+
+// lookupVaultSecret resolves a "path#KEY" reference against the secrets map.
+func lookupVaultSecret(ref string, secrets map[string]map[string]string) (string, error) {
+	path, key, ok := strings.Cut(ref, "#")
+	if !ok {
+		return "", fmt.Errorf("invalid $secret ref %q: must be path#KEY", ref)
+	}
+	group, exists := secrets[path]
+	if !exists {
+		return "", fmt.Errorf("secret group %q not found in vault.yaml", path)
+	}
+	val, exists := group[key]
+	if !exists {
+		return "", fmt.Errorf("key %q not found in secret group %q", key, path)
+	}
+	return val, nil
 }

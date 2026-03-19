@@ -32,7 +32,7 @@ func runSecrets(args []string) {
 	case "edit":
 		secretsEdit()
 	case "show":
-		secretsShow()
+		secretsShow(args[1:])
 	case "decrypt":
 		secretsDecrypt(args[1:])
 	case "import":
@@ -59,6 +59,7 @@ Commands:
   init              Generate age key and create vault.yaml
   edit              Open vault.yaml in $EDITOR (decrypts/re-encrypts)
   show              Decrypt and print vault.yaml to stdout
+  show --credentials  List credentials with masked secrets
   decrypt <path>    Decrypt vault.yaml to a file (for mounting into containers)
   import <file>     Import KEY=VALUE pairs into secrets (keyed by file path)
   env [file]        Print KEY=VALUE for secrets (default: .auth.env)
@@ -257,7 +258,14 @@ func secretsEdit() {
 	}
 }
 
-func secretsShow() {
+func secretsShow(args []string) {
+	credentials := false
+	for _, a := range args {
+		if a == "--credentials" {
+			credentials = true
+		}
+	}
+
 	yamlPath := vaultYAMLPath()
 	if _, err := os.Stat(yamlPath); os.IsNotExist(err) {
 		fmt.Fprintln(os.Stderr, "No vault.yaml found. Run: actl vault init")
@@ -269,7 +277,90 @@ func secretsShow() {
 		fmt.Fprintf(os.Stderr, "Error decrypting vault: %v\n", err)
 		os.Exit(1)
 	}
-	os.Stdout.Write(out)
+
+	if !credentials {
+		os.Stdout.Write(out)
+		return
+	}
+
+	var cfg struct {
+		Credentials map[string]credentialShowConfig `yaml:"credentials"`
+	}
+	if err := yaml.Unmarshal(out, &cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "Error parsing vault.yaml: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(cfg.Credentials) == 0 {
+		fmt.Println("No credentials configured.")
+		return
+	}
+
+	for path, cc := range cfg.Credentials {
+		fmt.Printf("/%s\n", path)
+		fmt.Printf("  type: %s\n", cc.Type)
+
+		// Env var names
+		if cc.Env != "" {
+			fmt.Printf("  env: %s\n", cc.Env)
+		}
+		if cc.EnvUser != "" {
+			fmt.Printf("  env_user: %s\n", cc.EnvUser)
+		}
+		if cc.EnvPass != "" {
+			fmt.Printf("  env_pass: %s\n", cc.EnvPass)
+		}
+
+		// Masked secrets
+		if cc.Token != "" {
+			fmt.Printf("  token: %s\n", maskSecret(cc.Token))
+		}
+		if cc.Username != "" {
+			fmt.Printf("  username: %s\n", cc.Username)
+		}
+		if cc.Password != "" {
+			fmt.Printf("  password: %s\n", maskSecret(cc.Password))
+		}
+		if cc.AccessKeyID != "" {
+			fmt.Printf("  access_key_id: %s\n", maskSecret(cc.AccessKeyID))
+		}
+		if cc.SecretAccessKey != "" {
+			fmt.Printf("  secret_access_key: %s\n", maskSecret(cc.SecretAccessKey))
+		}
+
+		// Host hints from capabilities
+		if cc.Capabilities != nil && len(cc.Capabilities.Hosts) > 0 {
+			fmt.Printf("  hosts: %s\n", strings.Join(cc.Capabilities.Hosts, ", "))
+		}
+
+		fmt.Println()
+	}
+}
+
+// credentialShowConfig mirrors the credential fields needed for display.
+type credentialShowConfig struct {
+	Type           string                  `yaml:"type"`
+	Token          string                  `yaml:"token,omitempty"`
+	Username       string                  `yaml:"username,omitempty"`
+	Password       string                  `yaml:"password,omitempty"`
+	Env            string                  `yaml:"env,omitempty"`
+	EnvUser        string                  `yaml:"env_user,omitempty"`
+	EnvPass        string                  `yaml:"env_pass,omitempty"`
+	AccessKeyID    string                  `yaml:"access_key_id,omitempty"`
+	SecretAccessKey string                 `yaml:"secret_access_key,omitempty"`
+	Capabilities   *credentialShowCaps     `yaml:"capabilities,omitempty"`
+}
+
+type credentialShowCaps struct {
+	Hosts []string `yaml:"hosts,omitempty"`
+}
+
+// maskSecret shows only the last 4 characters, replacing the rest with asterisks.
+func maskSecret(s string) string {
+	if len(s) <= 4 {
+		return "****"
+	}
+	return strings.Repeat("*", len(s)-4) + s[len(s)-4:]
 }
 
 func secretsDecrypt(args []string) {

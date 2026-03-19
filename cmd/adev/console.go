@@ -749,8 +749,20 @@ func mintTokens(cfg ProjectConfig, scriptDir string, spinner *Spinner) ([]TokenE
 		}
 		authzCache[host] = authzToken
 
-		// Step 5: Get discharge
+		// Step 5: Get discharge (retry with fresh token if cached token fails)
 		discharge, err := vaultSSHDischarge(cfg.Vault, authzToken)
+		if err != nil && fileExists(cachePath) {
+			// Cached token may be stale (e.g., vault key rotated) — delete and re-mint
+			os.Remove(cachePath)
+			authzToken, err = vaultSSHMint(cfg.Vault, host, upstream.Methods, upstream.Paths)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: re-mint %s failed: %v\n", host, err)
+				continue
+			}
+			os.WriteFile(cachePath, []byte(authzToken+"\n"), 0600)
+			authzCache[host] = authzToken
+			discharge, err = vaultSSHDischarge(cfg.Vault, authzToken)
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: discharge %s failed: %v\n", host, err)
 			continue

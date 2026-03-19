@@ -40,6 +40,7 @@
       hash = "sha256-vLJhhwimbvuxlU+EzWoidafxkFf/syREdf2zJeiiiDc=";
     };
     patches = [];
+    outputs = [ "out" ];
     doCheck = false;
     doInstallCheck = false;
     postInstall = ''

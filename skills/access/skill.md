@@ -19,6 +19,7 @@ Read and run all of these to understand what's configured and what's available:
 
 - **Current config**: Read `agent-creds.toml` to see existing upstream entries and their scopes (methods, paths, credential references).
 - **Available credentials**: Run `actl vault show --credentials` to list credentials stored in the vault, their types (bearer, sigv4, basic), and associated hosts.
+- **Credential capabilities**: For each credential from the list above, run `actl vault show --capabilities <path>` (e.g., `actl vault show --capabilities /stripe/prod`) to discover what endpoints the credential supports — allowed hosts, methods, paths, and descriptions.
 - **Recent denials**: Run `actl vault log --recent --denials` to see recent authorization failures with method, host, path, and reason.
 
 ### 2. Present vault state
@@ -30,6 +31,7 @@ Before acting on the request, show the operator a summary of the current access 
 - Type (bearer, sigv4, basic)
 - Associated host(s)
 - Whether it's referenced in `agent-creds.toml` (active) or available but unused
+- Capability ceiling (if defined): allowed hosts, methods, paths, and endpoint descriptions
 
 **Recent failures** — If there are any recent denials, surface them prominently:
 - Group denials by host and reason
@@ -46,7 +48,18 @@ The user may ask to:
 - **Fix denials** ("fix the recent denials", "why is my API call failing?")
 - **Modify scope** ("restrict to read-only", "add POST to /v1/charges")
 
-### 4. Propose changes to agent-creds.toml
+### 4. Validate against capability ceiling
+
+Before proposing changes, check every requested endpoint against the credential's capabilities (from `actl vault show --capabilities`):
+
+- **Methods**: Only suggest methods listed in the credential's capability endpoints. If the user requests a method the credential doesn't support, warn them: "The /stripe/prod credential does not support DELETE on /v1/charges — only GET and POST are available."
+- **Paths**: Only suggest paths that fall within the credential's capability path patterns. If the user requests a path outside the ceiling, explain: "The /stripe/prod credential only supports /v1/charges and /v1/customers paths."
+- **Hosts**: Only suggest hosts listed in the credential's capability hosts. If the user requests a different host, explain that the credential is not configured for that host.
+- **No capabilities defined**: If a credential has no capabilities, treat it as unrestricted — any methods and paths are allowed. Note this to the operator so they're aware there is no ceiling.
+
+If some requested endpoints are within capabilities and others are not, propose the valid subset and list the rejected endpoints separately with explanations.
+
+### 5. Propose changes to agent-creds.toml
 
 Show the user the exact TOML changes before applying. Clearly distinguish between:
 
@@ -76,7 +89,7 @@ When proposing changes, present a before/after diff so the user can see exactly 
 +paths = ["/v1/charges", "/v1/charges/**"]
 ```
 
-### 5. Apply changes
+### 6. Apply changes
 
 After the user confirms the proposed changes:
 

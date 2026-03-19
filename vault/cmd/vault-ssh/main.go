@@ -22,6 +22,7 @@ import (
 	"github.com/superfly/macaroon"
 	gossh "golang.org/x/crypto/ssh"
 
+	"vault/attestation"
 	"vault/db"
 	tfmac "vault/macaroon"
 )
@@ -151,9 +152,12 @@ func cmdMint(sess ssh.Session, userID []byte, status string, args []string) {
 	// Parse optional flags
 	var methods, paths []string
 	validFor := 24 * time.Hour
+	requireAttestation := false
 
 	for i := 1; i < len(args); i++ {
 		switch args[i] {
+		case "--require-attestation":
+			requireAttestation = true
 		case "--methods":
 			if i+1 < len(args) {
 				methods = strings.Split(args[i+1], ",")
@@ -177,6 +181,12 @@ func cmdMint(sess ssh.Session, userID []byte, status string, args []string) {
 		}
 	}
 
+	// Check encryption key if attestation is required
+	if requireAttestation && len(keyStore.EncryptionKey) == 0 {
+		fmt.Fprintln(sess, "Error: --require-attestation requires MACAROON_ENCRYPTION_KEY to be configured")
+		return
+	}
+
 	// Create token
 	m, err := keyStore.NewToken()
 	if err != nil {
@@ -184,14 +194,22 @@ func cmdMint(sess ssh.Session, userID []byte, status string, args []string) {
 		return
 	}
 
-	// Add validity window
-	now := time.Now()
-	if err := m.Add(&macaroon.ValidityWindow{
-		NotBefore: now.Unix(),
-		NotAfter:  now.Add(validFor).Unix(),
-	}); err != nil {
-		fmt.Fprintf(sess, "Error adding validity: %v\n", err)
-		return
+	if requireAttestation {
+		// Add 3P caveat at SSH attestation location instead of validity window
+		if err := attestation.Add3PCaveatWithLocation(m, keyStore.EncryptionKey, tfmac.SSHAttestationLocation); err != nil {
+			fmt.Fprintf(sess, "Error adding attestation caveat: %v\n", err)
+			return
+		}
+	} else {
+		// Add validity window
+		now := time.Now()
+		if err := m.Add(&macaroon.ValidityWindow{
+			NotBefore: now.Unix(),
+			NotAfter:  now.Add(validFor).Unix(),
+		}); err != nil {
+			fmt.Fprintf(sess, "Error adding validity: %v\n", err)
+			return
+		}
 	}
 
 	// Always restrict to the requested host

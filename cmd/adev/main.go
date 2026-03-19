@@ -193,6 +193,8 @@ func main() {
 		runStop(args)
 	case "generate-nix", "nix":
 		runGenerateNix(args)
+	case "setup":
+		runSetup(args)
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -210,6 +212,7 @@ Usage:
 Commands:
   list, ls        Interactive TUI showing running instances (default)
   console [name]  Start or attach to a sandbox
+  setup           Interactive TUI for credential configuration
   stop [name]     Stop a running instance
   help            Show this help
 

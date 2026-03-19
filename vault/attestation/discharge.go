@@ -131,9 +131,9 @@ func CombineTokens(mainToken, discharge string) string {
 	return mainToken + "," + discharge
 }
 
-// Add3PCaveat adds a third-party attestation caveat to a macaroon
-// This is used when creating .akey files
-func Add3PCaveat(m *macaroon.Macaroon, encryptionKey macaroon.EncryptionKey) error {
+// Add3PCaveatWithLocation adds a third-party caveat to a macaroon at the given location.
+// This is the general form used when the location may vary (e.g., ssh-attestation).
+func Add3PCaveatWithLocation(m *macaroon.Macaroon, encryptionKey macaroon.EncryptionKey, location string) error {
 	// Generate random nonce for this caveat
 	nonce := make([]byte, 16)
 	if _, err := rand.Read(nonce); err != nil {
@@ -142,7 +142,7 @@ func Add3PCaveat(m *macaroon.Macaroon, encryptionKey macaroon.EncryptionKey) err
 
 	// Create an attestation caveat - the "ticket" data is just a nonce
 	// that will be included in the discharge
-	err := m.Add3P(encryptionKey, tfmac.AttestationLocation, &AttestationCaveat{
+	err := m.Add3P(encryptionKey, location, &AttestationCaveat{
 		Nonce: base64.StdEncoding.EncodeToString(nonce),
 	})
 	if err != nil {
@@ -150,6 +150,13 @@ func Add3PCaveat(m *macaroon.Macaroon, encryptionKey macaroon.EncryptionKey) err
 	}
 
 	return nil
+}
+
+// Add3PCaveat adds a third-party attestation caveat to a macaroon.
+// This is used when creating .akey files. It delegates to Add3PCaveatWithLocation
+// with the default AttestationLocation.
+func Add3PCaveat(m *macaroon.Macaroon, encryptionKey macaroon.EncryptionKey) error {
+	return Add3PCaveatWithLocation(m, encryptionKey, tfmac.AttestationLocation)
 }
 
 // AttestationCaveat is included in the 3P ticket

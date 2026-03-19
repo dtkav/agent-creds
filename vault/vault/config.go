@@ -43,6 +43,22 @@ type CredentialConfig struct {
 	// Fly OIDC fields
 	Audience  string `yaml:"audience,omitempty"`
 	FlyConfig string `yaml:"fly_config,omitempty"`
+
+	// Capabilities (optional)
+	Capabilities *CapabilitiesConfig `yaml:"capabilities,omitempty"`
+}
+
+// EndpointCap defines allowed methods and path patterns for an endpoint
+type EndpointCap struct {
+	Methods     []string `yaml:"methods"`
+	Paths       []string `yaml:"paths"`
+	Description string   `yaml:"description,omitempty"`
+}
+
+// CapabilitiesConfig defines what a credential is allowed to access
+type CapabilitiesConfig struct {
+	Hosts     []string      `yaml:"hosts,omitempty"`
+	Endpoints []EndpointCap `yaml:"endpoints,omitempty"`
 }
 
 // Credential holds a resolved credential ready for injection

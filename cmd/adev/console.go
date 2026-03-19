@@ -148,8 +148,34 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	}
 
 	// Mint tokens for credentialed upstreams
-	tokens, _ := mintTokens(cfg, scriptDir, spinner)
-	_ = tokens // used later by T016 (sandbox.env generation)
+	tokenEntries, _ := mintTokens(cfg, scriptDir, spinner)
+
+	// Generate sandbox.env if there are credentialed upstreams or static env vars
+	sandboxEnvGenerated := false
+	if len(tokenEntries) > 0 || len(cfg.StaticEnv) > 0 {
+		// Collect credential info for token shaping
+		infos := make(map[string]*CredentialInfo)
+		for _, e := range tokenEntries {
+			if info, err := vaultSSHInfo(cfg.Vault, cfg.Upstream[e.Host].Credential); err == nil {
+				infos[e.Host] = info
+			}
+		}
+		shaped := shapeTokens(tokenEntries, infos)
+
+		// Resolve static env vars
+		vaultYAMLPath := filepath.Join(scriptDir, "generated", "vault.yaml")
+		staticResolved, err := resolveStaticEnv(cfg.StaticEnv, vaultYAMLPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: resolving static env: %v\n", err)
+			staticResolved = make(map[string]string)
+		}
+
+		if err := generateSandboxEnv(shaped, staticResolved); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: generating sandbox.env: %v\n", err)
+		} else {
+			sandboxEnvGenerated = true
+		}
+	}
 
 	// Build aenv if needed (CGO_ENABLED=0 for static binary, required by Nix-based image)
 	aenvBin := "generated/aenv"
@@ -493,6 +519,11 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		// Network activity logs (DNS + HTTP access log, written by envoy container)
 		"-v", scriptDir+"/generated/logs:/etc/adev/logs:ro",
 	)
+	// Mount sandbox.env as /workspace/.env (read-only) when generated
+	if sandboxEnvGenerated {
+		sandboxEnvPath := filepath.Join(scriptDir, "generated", "sandbox.env")
+		args = append(args, "-v", sandboxEnvPath+":/workspace/.env:ro")
+	}
 	// Mount host Nix store for sandbox-env (local builds only)
 	if envPath != "" {
 		args = append(args,

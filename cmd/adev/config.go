@@ -65,8 +65,9 @@ func (v VaultConfig) IsRemote() bool {
 }
 
 type UpstreamConfig struct {
-	Methods []string `toml:"methods"` // allowed HTTP methods (empty = all)
-	Paths   []string `toml:"paths"`   // allowed path patterns with glob support (empty = all)
+	Credential string   `toml:"credential,omitempty"` // vault credential path (e.g., /stripe/live)
+	Methods    []string `toml:"methods"`              // allowed HTTP methods (empty = all)
+	Paths      []string `toml:"paths"`                // allowed path patterns with glob support (empty = all)
 }
 
 // CDPTargetConfig defines an allowed CDP target pattern.

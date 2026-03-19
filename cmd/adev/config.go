@@ -156,6 +156,7 @@ type ProjectConfig struct {
 	BrowserTargets []BrowserTargetConfig               `toml:"browser_target"`
 	Mounts         []MountConfig                       `toml:"mount"`
 	Env            []EnvConfig                         `toml:"env"`
+	StaticEnv      map[string]interface{}              `toml:"env,omitempty"`
 }
 
 // NixPkgFields holds Nix package set fields shared by PluginConfig, AgentConfig, and ProjectConfig.

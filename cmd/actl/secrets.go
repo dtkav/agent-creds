@@ -60,6 +60,7 @@ Commands:
   edit              Open vault.yaml in $EDITOR (decrypts/re-encrypts)
   show              Decrypt and print vault.yaml to stdout
   show --credentials  List credentials with masked secrets
+  show --capabilities <path>  Show credential capabilities
   decrypt <path>    Decrypt vault.yaml to a file (for mounting into containers)
   import <file>     Import KEY=VALUE pairs into secrets (keyed by file path)
   env [file]        Print KEY=VALUE for secrets (default: .auth.env)
@@ -260,9 +261,13 @@ func secretsEdit() {
 
 func secretsShow(args []string) {
 	credentials := false
-	for _, a := range args {
+	capabilitiesPath := ""
+	for i, a := range args {
 		if a == "--credentials" {
 			credentials = true
+		}
+		if a == "--capabilities" && i+1 < len(args) {
+			capabilitiesPath = args[i+1]
 		}
 	}
 
@@ -278,7 +283,7 @@ func secretsShow(args []string) {
 		os.Exit(1)
 	}
 
-	if !credentials {
+	if !credentials && capabilitiesPath == "" {
 		os.Stdout.Write(out)
 		return
 	}
@@ -289,6 +294,11 @@ func secretsShow(args []string) {
 	if err := yaml.Unmarshal(out, &cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "Error parsing vault.yaml: %v\n", err)
 		os.Exit(1)
+	}
+
+	if capabilitiesPath != "" {
+		showCapabilities(cfg.Credentials, capabilitiesPath)
+		return
 	}
 
 	if len(cfg.Credentials) == 0 {
@@ -337,6 +347,47 @@ func secretsShow(args []string) {
 	}
 }
 
+func showCapabilities(credentials map[string]credentialShowConfig, path string) {
+	// Normalize: strip leading /
+	lookup := strings.TrimPrefix(path, "/")
+
+	cc, ok := credentials[lookup]
+	if !ok {
+		fmt.Fprintf(os.Stderr, "Credential not found: /%s\n", lookup)
+		os.Exit(1)
+	}
+
+	fmt.Printf("/%s (type: %s)\n\n", lookup, cc.Type)
+
+	if cc.Capabilities == nil {
+		fmt.Println("No capabilities defined for this credential.")
+		return
+	}
+
+	if len(cc.Capabilities.Hosts) > 0 {
+		fmt.Println("Allowed hosts:")
+		for _, h := range cc.Capabilities.Hosts {
+			fmt.Printf("  - %s\n", h)
+		}
+		fmt.Println()
+	}
+
+	if len(cc.Capabilities.Endpoints) == 0 {
+		fmt.Println("No endpoints defined.")
+		return
+	}
+
+	fmt.Println("Endpoints:")
+	for _, ep := range cc.Capabilities.Endpoints {
+		methods := strings.Join(ep.Methods, ", ")
+		paths := strings.Join(ep.Paths, ", ")
+		fmt.Printf("  %s %s\n", methods, paths)
+		if ep.Description != "" {
+			fmt.Printf("    %s\n", ep.Description)
+		}
+	}
+}
+
 // credentialShowConfig mirrors the credential fields needed for display.
 type credentialShowConfig struct {
 	Type           string                  `yaml:"type"`
@@ -352,7 +403,14 @@ type credentialShowConfig struct {
 }
 
 type credentialShowCaps struct {
-	Hosts []string `yaml:"hosts,omitempty"`
+	Hosts     []string              `yaml:"hosts,omitempty"`
+	Endpoints []credentialShowEndpoint `yaml:"endpoints,omitempty"`
+}
+
+type credentialShowEndpoint struct {
+	Methods     []string `yaml:"methods"`
+	Paths       []string `yaml:"paths"`
+	Description string   `yaml:"description,omitempty"`
 }
 
 // maskSecret shows only the last 4 characters, replacing the rest with asterisks.

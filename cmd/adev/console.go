@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -675,6 +676,13 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	spinner.Stop()
 	signal.Stop(sigChan)
 
+	// Start background discharge refresh for credentialed upstreams
+	refreshCtx, refreshCancel := context.WithCancel(context.Background())
+	defer refreshCancel()
+	if len(tokenEntries) > 0 {
+		startDischargeRefresh(refreshCtx, cfg, scriptDir)
+	}
+
 	// SSH into the sandbox (dropbear runs as devuser on port 2222)
 	sshCmd := exec.Command("ssh",
 		"-i", sshKeyPath,
@@ -785,6 +793,84 @@ func sortedUpstreamKeys(m map[string]UpstreamConfig) []string {
 	}
 	sortDomains(keys)
 	return keys
+}
+
+// startDischargeRefresh launches a background goroutine that refreshes discharge
+// tokens every 45 minutes. It re-discharges cached authz tokens and regenerates
+// sandbox.env atomically. Stops when ctx is cancelled.
+func startDischargeRefresh(ctx context.Context, cfg ProjectConfig, scriptDir string) {
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(45 * time.Minute):
+			}
+
+			// Refresh discharge for each credentialed upstream
+			authzDir := filepath.Join(scriptDir, "generated", "authz")
+			var tokens []TokenEntry
+			for host, upstream := range cfg.Upstream {
+				if upstream.Credential == "" {
+					continue
+				}
+
+				info, err := vaultSSHInfo(cfg.Vault, upstream.Credential)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: discharge refresh info %s failed: %v (old tokens valid for ~15 more minutes)\n", host, err)
+					continue
+				}
+				envVar := ""
+				if len(info.EnvVars) > 0 {
+					envVar = info.EnvVars[0]
+				}
+				if envVar == "" {
+					continue
+				}
+
+				// Read cached authz token
+				cachePath := filepath.Join(authzDir, host+".token")
+				data, err := os.ReadFile(cachePath)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: discharge refresh %s: no cached authz token (old tokens valid for ~15 more minutes)\n", host)
+					continue
+				}
+				authzToken := strings.TrimSpace(string(data))
+
+				discharge, err := vaultSSHDischarge(cfg.Vault, authzToken)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: discharge refresh %s failed: %v (old tokens valid for ~15 more minutes)\n", host, err)
+					continue
+				}
+
+				combined := authzToken + "," + discharge
+				tokens = append(tokens, TokenEntry{EnvVar: envVar, Combined: combined, Host: host})
+			}
+
+			if len(tokens) == 0 {
+				continue
+			}
+
+			// Reshape and regenerate sandbox.env
+			infos := make(map[string]*CredentialInfo)
+			for _, e := range tokens {
+				if info, err := vaultSSHInfo(cfg.Vault, cfg.Upstream[e.Host].Credential); err == nil {
+					infos[e.Host] = info
+				}
+			}
+			shaped := shapeTokens(tokens, infos)
+
+			vaultYAMLPath := filepath.Join(scriptDir, "generated", "vault.yaml")
+			staticResolved, err := resolveStaticEnv(cfg.StaticEnv, vaultYAMLPath)
+			if err != nil {
+				staticResolved = make(map[string]string)
+			}
+
+			if err := generateSandboxEnv(shaped, staticResolved); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: discharge refresh env update failed: %v (old tokens valid for ~15 more minutes)\n", err)
+			}
+		}
+	}()
 }
 
 // sortDomains sorts domains so subdomains are grouped under their parent.

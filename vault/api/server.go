@@ -52,6 +52,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/tokens", s.handleTokens)
 	s.mux.HandleFunc("/api/tokens/", s.handleTokenByID)
 
+	// Audit log
+	s.mux.HandleFunc("/api/audit", s.handleAudit)
+
 	// Enrollment page
 	s.mux.HandleFunc("/enroll", s.handleEnrollPage)
 

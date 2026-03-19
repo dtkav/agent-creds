@@ -48,8 +48,9 @@ The user may ask to:
 
 ### 4. Propose changes to agent-creds.toml
 
-When adding or modifying upstream entries, use this format:
+Show the user the exact TOML changes before applying. Clearly distinguish between:
 
+**Adding a new upstream** — a new `[upstream."host"]` section:
 ```toml
 [upstream."api.stripe.com"]
 credential = "/stripe/prod"
@@ -57,17 +58,39 @@ methods = ["GET", "POST"]
 paths = ["/v1/customers", "/v1/customers/**"]
 ```
 
-Key fields:
-- `credential` — path to the vault credential (from `actl vault show --credentials`)
+**Modifying an existing upstream** — changing fields on an existing entry:
+- Adding a `credential` reference to a passthrough upstream
+- Narrowing or widening `methods` (e.g., adding "POST" to a read-only upstream)
+- Adjusting `paths` patterns (e.g., adding a new path glob)
+
+**Key fields:**
+- `credential` — path to the vault credential (from `actl vault show --credentials`). Must match exactly.
 - `methods` — HTTP methods to allow (omit to allow all)
 - `paths` — URL path patterns with glob support (`*` = one segment, `**` = multiple segments). Omit to allow all paths.
 
+When proposing changes, present a before/after diff so the user can see exactly what will change:
+```
+ [upstream."api.stripe.com"]
++credential = "/stripe/prod"
++methods = ["GET", "POST"]
++paths = ["/v1/charges", "/v1/charges/**"]
+```
+
 ### 5. Apply changes
 
-After the user approves the proposed changes:
-1. Edit `agent-creds.toml` with the new/modified upstream entries
-2. Hot-reload picks up the change automatically — `adev` watches the file, re-mints tokens, and updates the sandbox environment
-3. No restart needed
+After the user confirms the proposed changes:
+
+1. **Read** the current `agent-creds.toml` to get the latest content
+2. **Edit** the file using precise string replacements:
+   - For new upstreams: append the new `[upstream."host"]` section at the end of the file
+   - For modifications: replace the specific fields within the existing upstream section
+   - Preserve all other sections and formatting in the file
+3. **Verify** the edit was applied correctly by reading the file back
+4. **Hot-reload** happens automatically — `adev` watches `agent-creds.toml` for changes and will:
+   - Re-generate envoy config with updated routes
+   - Re-mint tokens with new caveats (methods/paths) for changed upstreams
+   - Regenerate `sandbox.env` with updated tokens
+   - No restart needed — changes take effect within seconds
 
 ## Important rules
 

@@ -159,164 +159,190 @@ func (g *Generator) generateCA() error {
 	return nil
 }
 
+// extAuthzFilter returns the ext_authz HTTP filter config pointing at the vault cluster.
+func (g *Generator) extAuthzFilter() map[string]interface{} {
+	return map[string]interface{}{
+		"name": "envoy.filters.http.ext_authz",
+		"typed_config": map[string]interface{}{
+			"@type": "type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz",
+			"grpc_service": map[string]interface{}{
+				"envoy_grpc": map[string]interface{}{
+					"cluster_name": "vault_cluster",
+				},
+				"timeout": "5s",
+			},
+			"transport_api_version": "V3",
+			"failure_mode_allow":    false,
+			"with_request_body": map[string]interface{}{
+				"max_request_bytes":     8192,
+				"allow_partial_message": true,
+			},
+		},
+	}
+}
+
+// routerFilter returns the standard HTTP router filter.
+func routerFilter() map[string]interface{} {
+	return map[string]interface{}{
+		"name": "envoy.filters.http.router",
+		"typed_config": map[string]interface{}{
+			"@type": "type.googleapis.com/envoy.extensions.filters.http.router.v3.Router",
+		},
+	}
+}
+
+// accessLogConfig returns the access log config used by all HTTP connection managers.
+func accessLogConfig() []map[string]interface{} {
+	return []map[string]interface{}{
+		{
+			"name": "envoy.access_loggers.stdout",
+			"typed_config": map[string]interface{}{
+				"@type": "type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog",
+			},
+		},
+		{
+			"name": "envoy.access_loggers.file",
+			"typed_config": map[string]interface{}{
+				"@type": "type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog",
+				"path":  "/var/log/adev/access.log",
+				"log_format": map[string]interface{}{
+					"text_format_source": map[string]interface{}{
+						"inline_string": "%START_TIME(%Y-%m-%dT%H:%M:%SZ)% %REQ(:METHOD)% %REQ(:AUTHORITY)%%REQ(:PATH)% %RESPONSE_CODE% %RESPONSE_CODE_DETAILS%\n",
+					},
+				},
+			},
+		},
+	}
+}
+
+// tlsFilterChain builds a per-domain filter chain with SNI matching, TLS termination,
+// ext_authz, and routing to the domain's upstream cluster. Used by both the DNAT
+// listener (port 443) and the internal listener (CONNECT TLS bumping).
+func (g *Generator) tlsFilterChain(host, statPrefix string) map[string]interface{} {
+	safeName := strings.ReplaceAll(host, ".", "_")
+	clusterName := safeName + "_cluster"
+	upstreamCfg := g.upstream[host]
+
+	route := map[string]interface{}{
+		"match": map[string]string{"prefix": "/"},
+		"route": map[string]interface{}{
+			"cluster":              clusterName,
+			"host_rewrite_literal": host,
+			"timeout":              "300s",
+		},
+	}
+	if len(upstreamCfg.Methods) > 0 || len(upstreamCfg.Paths) > 0 || upstreamCfg.Credential != "" {
+		contextExtensions := map[string]string{}
+		if upstreamCfg.Credential != "" {
+			contextExtensions["credential"] = upstreamCfg.Credential
+		}
+		if len(upstreamCfg.Methods) > 0 {
+			contextExtensions["allowed_methods"] = strings.Join(upstreamCfg.Methods, ",")
+		}
+		if len(upstreamCfg.Paths) > 0 {
+			contextExtensions["allowed_paths"] = strings.Join(upstreamCfg.Paths, ",")
+		}
+		route["typed_per_filter_config"] = map[string]interface{}{
+			"envoy.filters.http.ext_authz": map[string]interface{}{
+				"@type": "type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute",
+				"check_settings": map[string]interface{}{
+					"context_extensions": contextExtensions,
+				},
+			},
+		}
+	}
+
+	return map[string]interface{}{
+		"filter_chain_match": map[string]interface{}{
+			"server_names": []string{host},
+		},
+		"transport_socket": map[string]interface{}{
+			"name": "envoy.transport_sockets.tls",
+			"typed_config": map[string]interface{}{
+				"@type": "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext",
+				"common_tls_context": map[string]interface{}{
+					"tls_certificates": []map[string]interface{}{{
+						"certificate_chain": map[string]string{"filename": fmt.Sprintf("/tmp/certs/%s.crt", safeName)},
+						"private_key":       map[string]string{"filename": fmt.Sprintf("/tmp/certs/%s.key", safeName)},
+					}},
+				},
+			},
+		},
+		"filters": []map[string]interface{}{{
+			"name": "envoy.filters.network.http_connection_manager",
+			"typed_config": map[string]interface{}{
+				"@type":       "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
+				"stat_prefix": statPrefix,
+				"access_log":  accessLogConfig(),
+				"http_filters": []map[string]interface{}{
+					g.extAuthzFilter(),
+					routerFilter(),
+				},
+				"route_config": map[string]interface{}{
+					"name": "local_route",
+					"virtual_hosts": []map[string]interface{}{{
+						"name":    safeName + "_vhost",
+						"domains": []string{"*"},
+						"routes":  []map[string]interface{}{route},
+					}},
+				},
+			},
+		}},
+	}
+}
+
+// upstreamCluster builds a cluster definition for an upstream domain.
+func upstreamCluster(host string) map[string]interface{} {
+	safeName := strings.ReplaceAll(host, ".", "_")
+	clusterName := safeName + "_cluster"
+	return map[string]interface{}{
+		"name":              clusterName,
+		"type":              "LOGICAL_DNS",
+		"dns_lookup_family": "V4_ONLY",
+		"load_assignment": map[string]interface{}{
+			"cluster_name": clusterName,
+			"endpoints": []map[string]interface{}{{
+				"lb_endpoints": []map[string]interface{}{{
+					"endpoint": map[string]interface{}{
+						"address": map[string]interface{}{
+							"socket_address": map[string]interface{}{
+								"address":    host,
+								"port_value": 443,
+							},
+						},
+					},
+				}},
+			}},
+		},
+		"transport_socket": map[string]interface{}{
+			"name": "envoy.transport_sockets.tls",
+			"typed_config": map[string]interface{}{
+				"@type": "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext",
+				"sni":   host,
+			},
+		},
+		// Use real DNS so envoy bypasses the local dns-responder
+		"dns_resolvers": []map[string]interface{}{{
+			"socket_address": map[string]interface{}{
+				"address":    "8.8.8.8",
+				"port_value": 53,
+			},
+		}},
+	}
+}
+
 func (g *Generator) generateEnvoyJSON() error {
 	vaultHost := g.vaultHost
 	vaultPort := g.vaultPort
-	listenPort := 443
 
 	var filterChains []map[string]interface{}
+	var internalFilterChains []map[string]interface{}
 	var clusters []map[string]interface{}
 
 	for _, host := range g.hosts {
-		safeName := strings.ReplaceAll(host, ".", "_")
-		clusterName := safeName + "_cluster"
-		upstreamCfg := g.upstream[host]
-
-		// All domains go through ext_authz for token validation
-		// Credential injection is controlled by vault.toml in vault
-		httpFilters := []map[string]interface{}{
-			{
-				"name": "envoy.filters.http.ext_authz",
-				"typed_config": map[string]interface{}{
-					"@type": "type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz",
-					"grpc_service": map[string]interface{}{
-						"envoy_grpc": map[string]interface{}{
-							"cluster_name": "vault_cluster",
-						},
-						"timeout": "5s",
-					},
-					"transport_api_version": "V3",
-					"failure_mode_allow":    false,
-					"with_request_body": map[string]interface{}{
-						"max_request_bytes":     8192,
-						"allow_partial_message": true,
-					},
-				},
-			},
-			{
-				"name": "envoy.filters.http.router",
-				"typed_config": map[string]interface{}{
-					"@type": "type.googleapis.com/envoy.extensions.filters.http.router.v3.Router",
-				},
-			},
-		}
-
-		// Build route config — add context_extensions if methods/paths are restricted
-		route := map[string]interface{}{
-			"match": map[string]string{"prefix": "/"},
-			"route": map[string]interface{}{
-				"cluster":              clusterName,
-				"host_rewrite_literal": host,
-				"timeout":              "300s",
-			},
-		}
-		if len(upstreamCfg.Methods) > 0 || len(upstreamCfg.Paths) > 0 {
-			contextExtensions := map[string]string{}
-			if len(upstreamCfg.Methods) > 0 {
-				contextExtensions["allowed_methods"] = strings.Join(upstreamCfg.Methods, ",")
-			}
-			if len(upstreamCfg.Paths) > 0 {
-				contextExtensions["allowed_paths"] = strings.Join(upstreamCfg.Paths, ",")
-			}
-			route["typed_per_filter_config"] = map[string]interface{}{
-				"envoy.filters.http.ext_authz": map[string]interface{}{
-					"@type": "type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute",
-					"check_settings": map[string]interface{}{
-						"context_extensions": contextExtensions,
-					},
-				},
-			}
-		}
-
-		filterChains = append(filterChains, map[string]interface{}{
-			"filter_chain_match": map[string]interface{}{
-				"server_names": []string{host},
-			},
-			"transport_socket": map[string]interface{}{
-				"name": "envoy.transport_sockets.tls",
-				"typed_config": map[string]interface{}{
-					"@type": "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext",
-					"common_tls_context": map[string]interface{}{
-						"tls_certificates": []map[string]interface{}{{
-							"certificate_chain": map[string]string{"filename": fmt.Sprintf("/tmp/certs/%s.crt", safeName)},
-							"private_key":       map[string]string{"filename": fmt.Sprintf("/tmp/certs/%s.key", safeName)},
-						}},
-					},
-				},
-			},
-			"filters": []map[string]interface{}{{
-				"name": "envoy.filters.network.http_connection_manager",
-				"typed_config": map[string]interface{}{
-					"@type":       "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
-					"stat_prefix": "ingress_http",
-					"access_log": []map[string]interface{}{
-						{
-							"name": "envoy.access_loggers.stdout",
-							"typed_config": map[string]interface{}{
-								"@type": "type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog",
-							},
-						},
-						{
-							"name": "envoy.access_loggers.file",
-							"typed_config": map[string]interface{}{
-								"@type": "type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog",
-								"path":  "/var/log/adev/access.log",
-								"log_format": map[string]interface{}{
-									"text_format_source": map[string]interface{}{
-										"inline_string": "%START_TIME(%Y-%m-%dT%H:%M:%SZ)% %REQ(:METHOD)% %REQ(:AUTHORITY)%%REQ(:PATH)% %RESPONSE_CODE% %RESPONSE_CODE_DETAILS%\n",
-									},
-								},
-							},
-						},
-					},
-					"http_filters": httpFilters,
-					"route_config": map[string]interface{}{
-						"name": "local_route",
-						"virtual_hosts": []map[string]interface{}{{
-							"name":    safeName + "_vhost",
-							"domains": []string{"*"},
-							"routes":  []map[string]interface{}{route},
-						}},
-					},
-				},
-			}},
-		})
-
-		cluster := map[string]interface{}{
-			"name":              clusterName,
-			"type":              "LOGICAL_DNS",
-			"dns_lookup_family": "V4_ONLY",
-			"load_assignment": map[string]interface{}{
-				"cluster_name": clusterName,
-				"endpoints": []map[string]interface{}{{
-					"lb_endpoints": []map[string]interface{}{{
-						"endpoint": map[string]interface{}{
-							"address": map[string]interface{}{
-								"socket_address": map[string]interface{}{
-									"address":    host,
-									"port_value": 443,
-								},
-							},
-						},
-					}},
-				}},
-			},
-			"transport_socket": map[string]interface{}{
-				"name": "envoy.transport_sockets.tls",
-				"typed_config": map[string]interface{}{
-					"@type": "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext",
-					"sni":   host,
-				},
-			},
-			// Use real DNS so envoy bypasses the local dns-responder
-			"dns_resolvers": []map[string]interface{}{{
-				"socket_address": map[string]interface{}{
-					"address":    "8.8.8.8",
-					"port_value": 53,
-				},
-			}},
-		}
-		clusters = append(clusters, cluster)
+		filterChains = append(filterChains, g.tlsFilterChain(host, "ingress_http"))
+		internalFilterChains = append(internalFilterChains, g.tlsFilterChain(host, "connect_bump"))
+		clusters = append(clusters, upstreamCluster(host))
 	}
 
 	// Add vault cluster
@@ -348,7 +374,6 @@ func (g *Generator) generateEnvoyJSON() error {
 			},
 		},
 	}
-	// Add custom DNS resolver if configured (for private networks)
 	if g.vaultDNS != "" {
 		vaultCluster["dns_resolvers"] = []map[string]interface{}{{
 			"socket_address": map[string]interface{}{
@@ -359,27 +384,130 @@ func (g *Generator) generateEnvoyJSON() error {
 	}
 	clusters = append(clusters, vaultCluster)
 
-	envoyConfig := map[string]interface{}{
-		"static_resources": map[string]interface{}{
-			"listeners": []map[string]interface{}{{
-				"name": "https_listener",
-				"address": map[string]interface{}{
-					"socket_address": map[string]interface{}{
-						"address":      "::",
-						"port_value":   listenPort,
-						"ipv4_compat":  true,
-					},
-				},
-				"listener_filters": []map[string]interface{}{{
-					"name": "envoy.filters.listener.tls_inspector",
-					"typed_config": map[string]interface{}{
-						"@type": "type.googleapis.com/envoy.extensions.filters.listener.tls_inspector.v3.TlsInspector",
+	// Cluster that routes to the internal listener for TLS bumping
+	clusters = append(clusters, map[string]interface{}{
+		"name":              "connect_internal",
+		"type":              "STATIC",
+		"load_assignment": map[string]interface{}{
+			"cluster_name": "connect_internal",
+			"endpoints": []map[string]interface{}{{
+				"lb_endpoints": []map[string]interface{}{{
+					"endpoint": map[string]interface{}{
+						"address": map[string]interface{}{
+							"envoy_internal_address": map[string]interface{}{
+								"server_listener_name": "connect_tls_bump",
+							},
+						},
 					},
 				}},
-				"filter_chains": filterChains,
 			}},
+		},
+	})
+
+	// Listener 1: Existing DNAT reverse proxy (port 443)
+	httpsListener := map[string]interface{}{
+		"name": "https_listener",
+		"address": map[string]interface{}{
+			"socket_address": map[string]interface{}{
+				"address":     "::",
+				"port_value":  443,
+				"ipv4_compat": true,
+			},
+		},
+		"listener_filters": []map[string]interface{}{{
+			"name": "envoy.filters.listener.tls_inspector",
+			"typed_config": map[string]interface{}{
+				"@type": "type.googleapis.com/envoy.extensions.filters.listener.tls_inspector.v3.TlsInspector",
+			},
+		}},
+		"filter_chains": filterChains,
+	}
+
+	// Listener 2: Forward proxy accepting CONNECT (port 10000)
+	// Terminates the CONNECT tunnel and routes inner TCP to the internal listener
+	// for TLS bumping + credential injection.
+	connectListener := map[string]interface{}{
+		"name": "connect_listener",
+		"address": map[string]interface{}{
+			"socket_address": map[string]interface{}{
+				"address":     "::",
+				"port_value":  10000,
+				"ipv4_compat": true,
+			},
+		},
+		"filter_chains": []map[string]interface{}{{
+			"filters": []map[string]interface{}{{
+				"name": "envoy.filters.network.http_connection_manager",
+				"typed_config": map[string]interface{}{
+					"@type":       "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
+					"stat_prefix": "connect_proxy",
+					"access_log":  accessLogConfig(),
+					"http_protocol_options": map[string]interface{}{
+						"allow_absolute_url": true,
+					},
+					"http2_protocol_options": map[string]interface{}{
+						"allow_connect": true,
+					},
+					"upgrade_configs": []map[string]interface{}{{
+						"upgrade_type": "CONNECT",
+					}},
+					"http_filters": []map[string]interface{}{
+						routerFilter(),
+					},
+					"route_config": map[string]interface{}{
+						"name": "connect_route",
+						"virtual_hosts": []map[string]interface{}{{
+							"name":    "connect_vhost",
+							"domains": []string{"*"},
+							"routes": []map[string]interface{}{{
+								"match": map[string]interface{}{
+									"connect_matcher": map[string]interface{}{},
+								},
+								"route": map[string]interface{}{
+									"cluster": "connect_internal",
+									"upgrade_configs": []map[string]interface{}{{
+										"upgrade_type":   "CONNECT",
+										"connect_config": map[string]interface{}{},
+									}},
+								},
+							}},
+						}},
+					},
+				},
+			}},
+		}},
+	}
+
+	// Listener 3: Internal listener for TLS bumping
+	// Receives raw TCP from terminated CONNECT tunnels, inspects SNI,
+	// terminates TLS with per-domain certs, runs ext_authz, routes upstream.
+	internalListener := map[string]interface{}{
+		"name":              "connect_tls_bump",
+		"internal_listener": map[string]interface{}{},
+		"listener_filters": []map[string]interface{}{{
+			"name": "envoy.filters.listener.tls_inspector",
+			"typed_config": map[string]interface{}{
+				"@type": "type.googleapis.com/envoy.extensions.filters.listener.tls_inspector.v3.TlsInspector",
+			},
+		}},
+		"filter_chains": internalFilterChains,
+	}
+
+	envoyConfig := map[string]interface{}{
+		"static_resources": map[string]interface{}{
+			"listeners": []map[string]interface{}{
+				httpsListener,
+				connectListener,
+				internalListener,
+			},
 			"clusters": clusters,
 		},
+		"bootstrap_extensions": []map[string]interface{}{{
+			"name": "envoy.bootstrap.internal_listener",
+			"typed_config": map[string]interface{}{
+				"@type": "type.googleapis.com/envoy.extensions.bootstrap.internal_listener.v3.InternalListener",
+			},
+		}},
 	}
 
 	data, _ := json.MarshalIndent(envoyConfig, "", "  ")

@@ -253,6 +253,24 @@ func MatchGlob(pattern, value string) bool {
 	return matched
 }
 
+// ValidateUpstreams checks credential references on upstream configs.
+// Returns an error for invalid credential paths, and prints warnings to stderr
+// for upstreams that have methods/paths caveats but no credential.
+func ValidateUpstreams(upstreams map[string]UpstreamConfig) error {
+	for host, u := range upstreams {
+		if u.Credential != "" {
+			if !strings.HasPrefix(u.Credential, "/") {
+				return fmt.Errorf("upstream %q: credential path %q must start with /", host, u.Credential)
+			}
+		} else {
+			if len(u.Methods) > 0 || len(u.Paths) > 0 {
+				fmt.Fprintf(os.Stderr, "Warning: upstream %q has methods/paths caveats but no credential; caveats will have no effect\n", host)
+			}
+		}
+	}
+	return nil
+}
+
 // LoadProjectConfig reads agent-creds.toml from dir if it exists.
 // Returns a zero-value config (not an error) if the file is absent.
 func LoadProjectConfig(dir string) (ProjectConfig, error) {
@@ -266,6 +284,9 @@ func LoadProjectConfig(dir string) (ProjectConfig, error) {
 		return cfg, err
 	}
 	if err := toml.Unmarshal(data, &cfg); err != nil {
+		return cfg, err
+	}
+	if err := ValidateUpstreams(cfg.Upstream); err != nil {
 		return cfg, err
 	}
 	return cfg, nil

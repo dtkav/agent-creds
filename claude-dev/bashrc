@@ -1,3 +1,6 @@
+# Source credential env vars injected by adev
+[ -f /workspace/.env ] && set -a && . /workspace/.env && set +a
+
 HISTCONTROL=ignoreboth
 HISTSIZE=1000
 HISTFILESIZE=2000

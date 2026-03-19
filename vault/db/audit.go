@@ -93,3 +93,13 @@ func (d *DB) QueryAuditLog(filter AuditFilter) ([]AuditEntry, error) {
 	}
 	return entries, rows.Err()
 }
+
+// DeleteOldAuditEntries removes audit log entries older than the given duration.
+func (d *DB) DeleteOldAuditEntries(maxAge time.Duration) (int64, error) {
+	cutoff := time.Now().Add(-maxAge).Unix()
+	result, err := d.Exec("DELETE FROM audit_log WHERE timestamp < ?", cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("failed to delete old audit entries: %w", err)
+	}
+	return result.RowsAffected()
+}

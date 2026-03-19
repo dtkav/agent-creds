@@ -502,6 +502,11 @@ func main() {
 			if err := database.CleanupExpired(); err != nil {
 				log.Printf("Cleanup error: %v", err)
 			}
+			if n, err := database.DeleteOldAuditEntries(7 * 24 * time.Hour); err != nil {
+				log.Printf("Audit log cleanup error: %v", err)
+			} else if n > 0 {
+				log.Printf("Cleaned up %d old audit log entries", n)
+			}
 		}
 	}()
 

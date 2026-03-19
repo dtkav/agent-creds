@@ -147,6 +147,10 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		}
 	}
 
+	// Mint tokens for credentialed upstreams
+	tokens, _ := mintTokens(cfg, scriptDir, spinner)
+	_ = tokens // used later by T016 (sandbox.env generation)
+
 	// Build aenv if needed (CGO_ENABLED=0 for static binary, required by Nix-based image)
 	aenvBin := "generated/aenv"
 	aenvSrc := "cmd/aenv/main.go"
@@ -654,6 +658,81 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	sshCmd.Stderr = os.Stderr
 	sshCmd.Run()
 	// No cleanup: use 'adev stop' to stop.
+}
+
+// TokenEntry holds a minted combined token (authz,discharge) for one env var.
+type TokenEntry struct {
+	EnvVar   string // e.g., STRIPE_API_KEY
+	Combined string // authz,discharge combined token
+	Host     string // upstream host
+}
+
+// mintTokens mints tokens for all credentialed upstreams.
+// Returns token entries keyed by env var name, plus cached authz tokens keyed by host.
+func mintTokens(cfg ProjectConfig, scriptDir string, spinner *Spinner) ([]TokenEntry, map[string]string) {
+	authzDir := filepath.Join(scriptDir, "generated", "authz")
+	os.MkdirAll(authzDir, 0755)
+
+	var tokens []TokenEntry
+	authzCache := make(map[string]string) // host → authz token
+
+	for host, upstream := range cfg.Upstream {
+		if upstream.Credential == "" {
+			continue
+		}
+
+		// Step 1: Get credential metadata
+		spinner.Status(fmt.Sprintf("minting tokens... %s", host))
+		info, err := vaultSSHInfo(cfg.Vault, upstream.Credential)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: info %s failed: %v\n", upstream.Credential, err)
+			continue
+		}
+
+		// Determine primary env var name
+		envVar := ""
+		if len(info.EnvVars) > 0 {
+			envVar = info.EnvVars[0]
+		}
+		if envVar == "" {
+			fmt.Fprintf(os.Stderr, "Warning: no env var for %s, skipping\n", host)
+			continue
+		}
+
+		// Step 2: Check for cached authz token
+		cachePath := filepath.Join(authzDir, host+".token")
+		var authzToken string
+		if data, err := os.ReadFile(cachePath); err == nil {
+			authzToken = strings.TrimSpace(string(data))
+		}
+
+		// Step 3: Mint if no cache
+		if authzToken == "" {
+			authzToken, err = vaultSSHMint(cfg.Vault, host, upstream.Methods, upstream.Paths)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: mint %s failed: %v\n", host, err)
+				continue
+			}
+			// Step 4: Cache authz token
+			os.WriteFile(cachePath, []byte(authzToken+"\n"), 0600)
+		}
+		authzCache[host] = authzToken
+
+		// Step 5: Get discharge
+		discharge, err := vaultSSHDischarge(cfg.Vault, authzToken)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: discharge %s failed: %v\n", host, err)
+			continue
+		}
+
+		// Step 6: Store combined token
+		combined := authzToken + "," + discharge
+		tokens = append(tokens, TokenEntry{EnvVar: envVar, Combined: combined, Host: host})
+
+		fmt.Fprintf(os.Stderr, "  %s → %s ✓\n", host, envVar)
+	}
+
+	return tokens, authzCache
 }
 
 func sortedUpstreamKeys(m map[string]UpstreamConfig) []string {

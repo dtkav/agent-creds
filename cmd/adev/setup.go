@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -18,6 +20,8 @@ const (
 	viewCredentialSelect setupView = iota
 	viewEndpointConfig
 	viewReview
+	viewNLInput
+	viewNLProposal
 )
 
 // credential represents a vault credential available for selection.
@@ -45,6 +49,27 @@ type setupModel struct {
 	endpointCursor int
 	editingField   int // 0 = methods, 1 = paths
 	inputBuf       string
+
+	// natural language sub-view
+	nlInput     string
+	nlProposals []nlProposal
+	nlCursor    int
+	nlLoading   bool
+	nlError     string
+}
+
+// nlProposal represents a proposed upstream config from NL interpretation.
+type nlProposal struct {
+	Host       string   `json:"host"`
+	Credential string   `json:"credential"`
+	Methods    []string `json:"methods"`
+	Paths      []string `json:"paths"`
+	Accepted   bool
+}
+
+// nlResponse is the expected JSON output from claude -p.
+type nlResponse struct {
+	Upstreams []nlProposal `json:"upstreams"`
 }
 
 // Available HTTP methods for toggling
@@ -137,8 +162,27 @@ func (m setupModel) Init() tea.Cmd {
 	return nil
 }
 
+// nlResultMsg carries the result of the claude -p invocation.
+type nlResultMsg struct {
+	proposals []nlProposal
+	err       error
+}
+
 func (m setupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case nlResultMsg:
+		m.nlLoading = false
+		if msg.err != nil {
+			m.nlError = msg.err.Error()
+			return m, nil
+		}
+		m.nlProposals = msg.proposals
+		for i := range m.nlProposals {
+			m.nlProposals[i].Accepted = true
+		}
+		m.nlCursor = 0
+		m.view = viewNLProposal
+		return m, nil
 	case tea.KeyMsg:
 		switch m.view {
 		case viewCredentialSelect:
@@ -147,6 +191,10 @@ func (m setupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateEndpointConfig(msg)
 		case viewReview:
 			return m.updateReview(msg)
+		case viewNLInput:
+			return m.updateNLInput(msg)
+		case viewNLProposal:
+			return m.updateNLProposal(msg)
 		}
 	}
 	return m, nil
@@ -176,6 +224,11 @@ func (m setupModel) updateCredentialSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 			m.editingField = -1
 			m.inputBuf = ""
 		}
+	case "/":
+		m.view = viewNLInput
+		m.nlInput = ""
+		m.nlError = ""
+		return m, nil
 	case "tab":
 		// Move to review if any credentials selected
 		hasSelected := false
@@ -273,6 +326,146 @@ func (m setupModel) updateReview(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m setupModel) updateNLInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.view = viewCredentialSelect
+		m.nlError = ""
+	case "enter":
+		if strings.TrimSpace(m.nlInput) == "" {
+			return m, nil
+		}
+		m.nlLoading = true
+		m.nlError = ""
+		input := m.nlInput
+		creds := m.credentials
+		return m, func() tea.Msg {
+			proposals, err := runClaudeNL(input, creds)
+			return nlResultMsg{proposals: proposals, err: err}
+		}
+	case "backspace":
+		if len(m.nlInput) > 0 {
+			m.nlInput = m.nlInput[:len(m.nlInput)-1]
+		}
+	case "ctrl+c":
+		m.quitting = true
+		return m, tea.Quit
+	default:
+		if len(msg.String()) == 1 {
+			m.nlInput += msg.String()
+		}
+	}
+	return m, nil
+}
+
+func (m setupModel) updateNLProposal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.view = viewCredentialSelect
+	case "q", "ctrl+c":
+		m.quitting = true
+		return m, tea.Quit
+	case "up", "k":
+		if m.nlCursor > 0 {
+			m.nlCursor--
+		}
+	case "down", "j":
+		if m.nlCursor < len(m.nlProposals)-1 {
+			m.nlCursor++
+		}
+	case " ":
+		if m.nlCursor < len(m.nlProposals) {
+			m.nlProposals[m.nlCursor].Accepted = !m.nlProposals[m.nlCursor].Accepted
+		}
+	case "/":
+		// Refine: go back to NL input keeping existing proposals
+		m.view = viewNLInput
+		m.nlInput = ""
+		m.nlError = ""
+	case "enter":
+		// Apply accepted proposals to credentials
+		m.applyNLProposals()
+		m.view = viewReview
+	}
+	return m, nil
+}
+
+func (m *setupModel) applyNLProposals() {
+	for _, p := range m.nlProposals {
+		if !p.Accepted {
+			continue
+		}
+		// Find matching credential
+		for i := range m.credentials {
+			if m.credentials[i].Path == p.Credential {
+				m.credentials[i].Selected = true
+				m.credentials[i].Methods = p.Methods
+				m.credentials[i].Paths = p.Paths
+				break
+			}
+		}
+	}
+}
+
+// runClaudeNL shells out to claude -p with credential context and parses the response.
+func runClaudeNL(description string, creds []credential) ([]nlProposal, error) {
+	// Build context about available credentials
+	var ctx strings.Builder
+	ctx.WriteString("Available credentials:\n")
+	for _, c := range creds {
+		ctx.WriteString(fmt.Sprintf("- Path: %s", c.Path))
+		if c.Info != nil {
+			ctx.WriteString(fmt.Sprintf(", Type: %s", c.Info.Type))
+			if len(c.Info.Hosts) > 0 {
+				ctx.WriteString(fmt.Sprintf(", Hosts: %s", strings.Join(c.Info.Hosts, ", ")))
+			}
+		}
+		ctx.WriteString("\n")
+	}
+
+	prompt := fmt.Sprintf(`You are configuring API access for an AI agent sandbox. Given the user's description and available credentials, output a JSON object with an "upstreams" array. Each entry has: "host" (API hostname), "credential" (credential path from the list), "methods" (HTTP methods like GET, POST, etc.), "paths" (URL path patterns with ** for wildcards).
+
+%s
+User request: %s
+
+Respond with ONLY valid JSON, no markdown fences or explanation.`, ctx.String(), description)
+
+	cmd := exec.Command("claude", "-p", prompt)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("claude -p failed: %w", err)
+	}
+
+	// Parse JSON response
+	var resp nlResponse
+	// Try to extract JSON from response (claude may add extra text)
+	output := strings.TrimSpace(string(out))
+	// Find first { and last }
+	start := strings.Index(output, "{")
+	end := strings.LastIndex(output, "}")
+	if start >= 0 && end > start {
+		output = output[start : end+1]
+	}
+
+	if err := json.Unmarshal([]byte(output), &resp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	// Validate proposals reference known credentials
+	credPaths := make(map[string]bool)
+	for _, c := range creds {
+		credPaths[c.Path] = true
+	}
+	var valid []nlProposal
+	for _, p := range resp.Upstreams {
+		if credPaths[p.Credential] {
+			valid = append(valid, p)
+		}
+	}
+
+	return valid, nil
+}
+
 func (m setupModel) View() string {
 	switch m.view {
 	case viewCredentialSelect:
@@ -281,6 +474,10 @@ func (m setupModel) View() string {
 		return m.viewEndpointConfig()
 	case viewReview:
 		return m.viewReview()
+	case viewNLInput:
+		return m.viewNLInput()
+	case viewNLProposal:
+		return m.viewNLProposal()
 	}
 	return ""
 }
@@ -330,7 +527,7 @@ func (m setupModel) viewCredentialSelect() string {
 		b.WriteString("\n")
 	}
 
-	b.WriteString(setupHelpStyle.Render("\n  [space] toggle  [enter] configure endpoints  [tab] review  [q] quit"))
+	b.WriteString(setupHelpStyle.Render("\n  [space] toggle  [enter] configure endpoints  [/] describe access  [tab] review  [q] quit"))
 
 	return setupBorderStyle.Render(b.String())
 }
@@ -402,6 +599,65 @@ func (m setupModel) viewReview() string {
 	}
 
 	b.WriteString(setupHelpStyle.Render("\n  [enter] apply  [esc] back  [q] quit"))
+
+	return setupBorderStyle.Render(b.String())
+}
+
+func (m setupModel) viewNLInput() string {
+	var b strings.Builder
+	b.WriteString(setupTitleStyle.Render("Describe access"))
+	b.WriteString("\n\n")
+	b.WriteString("  What should the agent be able to do?\n\n")
+	b.WriteString(fmt.Sprintf("  > %s█\n", m.nlInput))
+
+	if m.nlLoading {
+		b.WriteString("\n  Interpreting with claude...\n")
+	}
+	if m.nlError != "" {
+		b.WriteString(fmt.Sprintf("\n  Error: %s\n", m.nlError))
+	}
+
+	b.WriteString(setupHelpStyle.Render("\n  [enter] submit  [esc] back"))
+
+	return setupBorderStyle.Render(b.String())
+}
+
+func (m setupModel) viewNLProposal() string {
+	var b strings.Builder
+	b.WriteString(setupTitleStyle.Render("Proposed configuration"))
+	b.WriteString("\n\n")
+
+	if len(m.nlProposals) == 0 {
+		b.WriteString("  No matching configuration found.\n")
+	} else {
+		for i, p := range m.nlProposals {
+			cursor := "  "
+			if i == m.nlCursor {
+				cursor = "> "
+			}
+			marker := "●"
+			style := setupSelectedStyle
+			if !p.Accepted {
+				marker = "○"
+				style = setupDimStyle
+			}
+
+			b.WriteString(style.Render(fmt.Sprintf("%s%s %s (using %s)", cursor, marker, p.Host, p.Credential)))
+			b.WriteString("\n")
+
+			for _, method := range p.Methods {
+				paths := "/**"
+				if len(p.Paths) > 0 {
+					paths = strings.Join(p.Paths, ", ")
+				}
+				b.WriteString(style.Render(fmt.Sprintf("      %-6s %s", method, paths)))
+				b.WriteString("\n")
+			}
+			b.WriteString("\n")
+		}
+	}
+
+	b.WriteString(setupHelpStyle.Render("  [space] toggle  [enter] accept  [/] refine  [esc] cancel"))
 
 	return setupBorderStyle.Render(b.String())
 }

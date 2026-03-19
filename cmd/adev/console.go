@@ -390,8 +390,9 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		}
 	}
 
-	// Track current upstream hosts for hot-reload detection
+	// Track current upstream configs for hot-reload detection
 	currentHosts := sortedUpstreamKeys(cfg.Upstream)
+	currentUpstreams := copyUpstreamMap(cfg.Upstream)
 
 	// Watch config file for changes
 	configPath := filepath.Join(workDir, "agent-creds.toml")
@@ -472,6 +473,10 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 									}
 								}
 							}
+
+							// Handle credential/caveat changes: re-mint affected tokens
+							remintTokens(newCfg, scriptDir, currentUpstreams)
+							currentUpstreams = copyUpstreamMap(newCfg.Upstream)
 						}
 					case _, ok := <-watcher.Errors:
 						if !ok {
@@ -879,6 +884,126 @@ func sortDomains(domains []string) {
 	sort.Slice(domains, func(i, j int) bool {
 		return reverseDomain(domains[i]) < reverseDomain(domains[j])
 	})
+}
+
+// copyUpstreamMap returns a shallow copy of the upstream config map.
+func copyUpstreamMap(m map[string]UpstreamConfig) map[string]UpstreamConfig {
+	c := make(map[string]UpstreamConfig, len(m))
+	for k, v := range m {
+		c[k] = v
+	}
+	return c
+}
+
+// upstreamChanged returns true if the credential or caveats differ between old and new.
+func upstreamChanged(old, new UpstreamConfig) bool {
+	if old.Credential != new.Credential {
+		return true
+	}
+	if !slices.Equal(old.Methods, new.Methods) {
+		return true
+	}
+	if !slices.Equal(old.Paths, new.Paths) {
+		return true
+	}
+	return false
+}
+
+// remintTokens detects credential/caveat changes and re-mints tokens for affected upstreams.
+// Unchanged upstreams retain their existing tokens.
+func remintTokens(newCfg ProjectConfig, scriptDir string, oldUpstreams map[string]UpstreamConfig) {
+	authzDir := filepath.Join(scriptDir, "generated", "authz")
+
+	// Determine which hosts need re-minting
+	var remintHosts []string
+	for host, newUp := range newCfg.Upstream {
+		if newUp.Credential == "" {
+			continue
+		}
+		oldUp, existed := oldUpstreams[host]
+		if !existed || upstreamChanged(oldUp, newUp) {
+			remintHosts = append(remintHosts, host)
+		}
+	}
+
+	if len(remintHosts) == 0 {
+		// No credential changes — check if we still have credentialed upstreams for env regen
+		return
+	}
+
+	// Delete old cache and re-mint for changed hosts
+	for _, host := range remintHosts {
+		cachePath := filepath.Join(authzDir, host+".token")
+		os.Remove(cachePath)
+		fmt.Fprintf(os.Stderr, "  re-minting %s (config changed)\n", host)
+	}
+
+	// Re-mint all credentialed upstreams (changed ones lost their cache, unchanged use cache)
+	var tokens []TokenEntry
+	for host, upstream := range newCfg.Upstream {
+		if upstream.Credential == "" {
+			continue
+		}
+
+		info, err := vaultSSHInfo(newCfg.Vault, upstream.Credential)
+		if err != nil {
+			continue
+		}
+		envVar := ""
+		if len(info.EnvVars) > 0 {
+			envVar = info.EnvVars[0]
+		}
+		if envVar == "" {
+			continue
+		}
+
+		// Check cache (unchanged upstreams still have their cached token)
+		cachePath := filepath.Join(authzDir, host+".token")
+		var authzToken string
+		if data, err := os.ReadFile(cachePath); err == nil {
+			authzToken = strings.TrimSpace(string(data))
+		}
+
+		if authzToken == "" {
+			authzToken, err = vaultSSHMint(newCfg.Vault, host, upstream.Methods, upstream.Paths)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: re-mint %s failed: %v\n", host, err)
+				continue
+			}
+			os.WriteFile(cachePath, []byte(authzToken+"\n"), 0600)
+		}
+
+		discharge, err := vaultSSHDischarge(newCfg.Vault, authzToken)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: discharge %s failed: %v\n", host, err)
+			continue
+		}
+
+		tokens = append(tokens, TokenEntry{EnvVar: envVar, Combined: authzToken + "," + discharge, Host: host})
+	}
+
+	if len(tokens) == 0 {
+		return
+	}
+
+	// Regenerate sandbox.env
+	infos := make(map[string]*CredentialInfo)
+	for _, e := range tokens {
+		if info, err := vaultSSHInfo(newCfg.Vault, newCfg.Upstream[e.Host].Credential); err == nil {
+			infos[e.Host] = info
+		}
+	}
+	shaped := shapeTokens(tokens, infos)
+
+	vaultYAMLPath := filepath.Join(scriptDir, "generated", "vault.yaml")
+	staticResolved, err := resolveStaticEnv(newCfg.StaticEnv, vaultYAMLPath)
+	if err != nil {
+		staticResolved = make(map[string]string)
+	}
+
+	if err := generateSandboxEnv(shaped, staticResolved); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: hot-reload env update failed: %v\n", err)
+	}
 }
 
 // reverseDomain reverses domain labels for sorting: "api.stripe.com" → "com.stripe.api"

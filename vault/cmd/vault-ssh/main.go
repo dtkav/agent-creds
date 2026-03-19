@@ -120,9 +120,12 @@ Commands:
   help              Show this help
   whoami            Show your identity and status
   mint <host>       Mint a token for the given host
-    --methods       Restrict HTTP methods (e.g., GET,POST)
-    --paths         Restrict paths (e.g., /v1/*)
-    --valid-for     Token validity (e.g., 1h, 24h)
+    --methods              Restrict HTTP methods (e.g., GET,POST)
+    --paths                Restrict paths (e.g., /v1/*)
+    --valid-for            Token validity (e.g., 1h, 24h)
+    --require-attestation  Require SSH attestation for discharge
+  discharge <token> Discharge a token's SSH attestation caveat
+  info <cred-path>  Show credential info (type, env vars, hosts)
   keys              List your SSH keys
   keys add          Add a new SSH key (paste pubkey)
   users             List users (admin only)

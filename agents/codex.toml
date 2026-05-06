@@ -50,6 +50,7 @@ let
       chmod +x "$out/libexec/codex/path/"* 2>/dev/null || true
       mkdir -p "$out/bin"
       makeWrapper "$out/libexec/codex/codex/codex" "$out/bin/codex" \
+        --add-flags "--dangerously-bypass-approvals-and-sandbox" \
         --prefix PATH : "$out/libexec/codex/path"
       runHook postInstall
     '';

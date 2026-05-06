@@ -4,6 +4,8 @@
 
 [sandbox]
 name = "myproject"
+# Bundled agents: "claude" or "codex"
+# agent = "claude"
 
 # Browser forwarding: allow sandbox to open URLs in host browser
 # use_host_browser = true  # default

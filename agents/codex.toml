@@ -1,0 +1,71 @@
+# Codex Agent
+# OpenAI Codex CLI with ChatGPT/API authentication
+
+name = "codex"
+description = "OpenAI Codex CLI coding agent"
+plugins = ["python", "nodejs", "go", "rust", "cli-tools", "build-tools", "github"]
+
+nix = """
+let
+  version = "0.128.0";
+  platforms = {
+    "x86_64-linux" = {
+      suffix = "linux-x64";
+      triple = "x86_64-unknown-linux-musl";
+      hash = "sha512-2lnSPA05CRRuKAzFW8BCmmNCSieDcToLwfC2ALLbBYilGLgzhRibjlDglK9F1BkEzfohSSWJu4PBbRu/aG60lQ==";
+    };
+    "aarch64-linux" = {
+      suffix = "linux-arm64";
+      triple = "aarch64-unknown-linux-musl";
+      hash = "sha512-+SvH73H60qvCXFuQGP/EsmR//s1hHMBR22PvJkXvM/hdnTIGucx+JqRUjAWdmmQ1IU6j3kgwVvdLW/6ICB+M6w==";
+    };
+    "x86_64-darwin" = {
+      suffix = "darwin-x64";
+      triple = "x86_64-apple-darwin";
+      hash = "sha512-SDbn6fO22Puy8xmMIbZi4f2znMrUEPwABApke4mo+4ihaauwuVjeqzXvW5SPJz5ty/bG11/mSupQgReT7T8BBw==";
+    };
+    "aarch64-darwin" = {
+      suffix = "darwin-arm64";
+      triple = "aarch64-apple-darwin";
+      hash = "sha512-w+6zohfHx/kHBdles/CyFKaY57u9I3nK8QI9+NrdwMliKA0b7xn13yblRNkMpe09j6vL1oAWoxYsMOQ/vjBGug==";
+    };
+  };
+  platform = platforms.${pkgs.stdenv.hostPlatform.system} or
+    (throw "codex: unsupported system ${pkgs.stdenv.hostPlatform.system}");
+
+  codex = pkgs.stdenvNoCC.mkDerivation {
+    pname = "codex";
+    inherit version;
+    src = pkgs.fetchurl {
+      url = "https://registry.npmjs.org/@openai/codex/-/codex-${version}-${platform.suffix}.tgz";
+      hash = platform.hash;
+    };
+    nativeBuildInputs = [ pkgs.makeWrapper ];
+    dontBuild = true;
+    installPhase = ''
+      runHook preInstall
+      mkdir -p "$out/libexec/codex"
+      cp -R "vendor/${platform.triple}/"* "$out/libexec/codex/"
+      chmod +x "$out/libexec/codex/codex/codex"
+      chmod +x "$out/libexec/codex/path/"* 2>/dev/null || true
+      mkdir -p "$out/bin"
+      makeWrapper "$out/libexec/codex/codex/codex" "$out/bin/codex" \
+        --prefix PATH : "$out/libexec/codex/path"
+      runHook postInstall
+    '';
+  };
+in [ codex ]
+"""
+
+[upstream."api.openai.com"]
+[upstream."auth.openai.com"]
+[upstream."chatgpt.com"]
+
+[[browser_target]]
+url = "https://auth.openai.com/*"
+
+[[browser_target]]
+url = "https://chatgpt.com/*"
+
+[[browser_target]]
+url = "http://localhost:*"

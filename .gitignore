@@ -34,8 +34,9 @@ cmd/odev
 # User config
 agent-creds.toml
 
-# Sandbox claude config mount directory
+# Sandbox agent config mount directories
 claude-dev/claude-config/
+claude-dev/codex-config/
 
 # Local sandbox customizations
 local/

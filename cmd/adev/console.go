@@ -290,6 +290,10 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		os.WriteFile(claudeJSON, []byte("{}"), 0600)
 	}
 
+	// Create codex config dir (persisted across sandbox restarts)
+	codexConfigDir := filepath.Join(scriptDir, "claude-dev/codex-config")
+	os.MkdirAll(codexConfigDir, 0755)
+
 	// Create per-sandbox network (remove stale one first if it exists without containers)
 	spinner.Status("creating network...")
 	run("docker", "network", "rm", networkName) // ignore error - may not exist
@@ -516,6 +520,7 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		"-v", workDir+":/workspace",
 		"-v", claudeConfigDir+":/home/devuser/.claude",
 		"-v", claudeConfigDir+"/.claude.json:/home/devuser/.claude.json",
+		"-v", codexConfigDir+":/home/devuser/.codex",
 		// Mount agent-creds CA so proxy TLS is trusted system-wide
 		"-v", scriptDir+"/generated/certs/ca.crt:/etc/ssl/agent-creds-ca.crt:ro",
 		// Mount entrypoint and binaries so changes take effect without image rebuild

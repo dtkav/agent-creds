@@ -63,6 +63,8 @@ This turns "full API access" into precisely scoped capabilities that match the a
 cat > agent-creds.toml << 'EOF'
 [sandbox]
 name = "myproject"
+# Bundled agents: "claude" or "codex"
+agent = "claude"
 
 [upstream."api.anthropic.com"]
 [upstream."claude.ai"]
@@ -108,6 +110,17 @@ adev stop foo     # Stop sandbox named "foo"
 - Attaches to existing instances instead of creating duplicates
 
 Multiple named sandboxes can run concurrently.
+
+### Agent Profiles
+
+Set `[sandbox].agent` to use a bundled agent profile. Profiles add the agent's
+packages, network allowlist entries, and browser login targets to the merged
+sandbox config.
+
+```toml
+[sandbox]
+agent = "claude"  # or "codex"
+```
 
 ### actl
 

@@ -18,17 +18,23 @@ services:
       - R2_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}
       - PB_EMAIL=${PB_EMAIL}
       - PB_PASSWORD=${PB_PASSWORD}
+      - VAULT_CONFIG=/run/secrets/vault_config
       - WEBAUTHN_RP_ID=${WEBAUTHN_RP_ID:-localhost}
       - WEBAUTHN_RP_ORIGIN=${WEBAUTHN_RP_ORIGIN:-http://localhost:8033}
       - WEBAUTHN_RP_NAME=${WEBAUTHN_RP_NAME:-Agent Credentials}
     volumes:
       - vault-data:/data
-      - ./generated/vault.yaml:/app/vault.yaml:ro
+    secrets:
+      - vault_config
     networks:
       - agent-creds
 
 volumes:
   vault-data:
+
+secrets:
+  vault_config:
+    environment: AGENT_CREDS_VAULT_CONFIG
 
 networks:
   agent-creds:

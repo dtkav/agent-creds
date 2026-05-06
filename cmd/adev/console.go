@@ -20,7 +20,6 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
-
 func runConsole(args []string) {
 	// Get directories
 	workDir, _ := os.Getwd()
@@ -121,21 +120,20 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		os.Exit(1)
 	}
 
-	// Decrypt vault.yaml for mounting into vault container.
-	// Write placeholder first so docker compose mount never creates a directory.
-	vaultDecrypted := filepath.Join(scriptDir, "generated", "vault.yaml")
-	if _, err := os.Stat(vaultDecrypted); os.IsNotExist(err) {
-		os.WriteFile(vaultDecrypted, []byte("signing_key: \"\"\ncredentials: {}\n"), 0600)
-	}
-	exec.Command("actl", "vault", "decrypt", vaultDecrypted).Run()
-
-	// Fallback: export legacy secrets.env as env vars for docker compose.
-	if out, err := exec.Command("actl", "vault", "export").Output(); err == nil {
-		for _, line := range strings.Split(string(out), "\n") {
-			if k, v, ok := strings.Cut(line, "="); ok && k != "" {
-				os.Setenv(k, v)
-			}
+	vaultConfigYAML, vaultConfigErr := decryptVaultConfigYAML()
+	legacyEnvLoaded := exportLegacyVaultEnv()
+	if !cfg.Vault.IsRemote() {
+		if vaultConfigErr != nil && !legacyEnvLoaded {
+			spinner.Stop()
+			fmt.Fprintf(os.Stderr, "Error preparing vault config: %v\n", vaultConfigErr)
+			os.Exit(1)
 		}
+		if err := validateVaultStartupConfig(vaultConfigYAML); err != nil {
+			spinner.Stop()
+			fmt.Fprintf(os.Stderr, "Error preparing vault config: %v\n", err)
+			os.Exit(1)
+		}
+		setVaultComposeSecret(vaultConfigYAML)
 	}
 
 	// Ensure vault is running (local only)
@@ -143,7 +141,12 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		out, _ := runOutput("docker", "compose", "ps", "--status", "running")
 		if len(out) == 0 || !contains(string(out), "vault") {
 			spinner.Status("starting vault...")
-			if err := run("docker", "compose", "up", "-d", "--build", "--quiet-pull"); err != nil {
+			if err := runWithOutput("docker", "compose", "up", "-d", "--build", "--quiet-pull"); err != nil {
+				spinner.Stop()
+				fmt.Fprintf(os.Stderr, "Error starting vault: %v\n", err)
+				os.Exit(1)
+			}
+			if err := waitForVaultRunning(); err != nil {
 				spinner.Stop()
 				fmt.Fprintf(os.Stderr, "Error starting vault: %v\n", err)
 				os.Exit(1)
@@ -167,8 +170,7 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		shaped := shapeTokens(tokenEntries, infos)
 
 		// Resolve static env vars
-		vaultYAMLPath := filepath.Join(scriptDir, "generated", "vault.yaml")
-		staticResolved, err := resolveStaticEnv(cfg.StaticEnv, vaultYAMLPath)
+		staticResolved, err := resolveStaticEnvForConsole(cfg.StaticEnv, vaultConfigYAML, scriptDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: resolving static env: %v\n", err)
 			staticResolved = make(map[string]string)
@@ -498,8 +500,8 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	// Build sandbox args
 	args := []string{"run", "--rm",
 		"--name", sandboxName,
-		"--tmpfs", "/run:exec",  // s6-svscan creates service dirs here
-		"--tmpfs", "/tmp:exec",  // dropbear host key, ready signal, etc.
+		"--tmpfs", "/run:exec", // s6-svscan creates service dirs here
+		"--tmpfs", "/tmp:exec", // dropbear host key, ready signal, etc.
 	}
 	// Network configuration depends on runtime:
 	// - gvisor (default): connect directly to network, sandbox-net uses --network=host
@@ -693,7 +695,7 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	refreshCtx, refreshCancel := context.WithCancel(context.Background())
 	defer refreshCancel()
 	if len(tokenEntries) > 0 {
-		startDischargeRefresh(refreshCtx, cfg, scriptDir)
+		startDischargeRefresh(refreshCtx, cfg, scriptDir, vaultConfigYAML)
 	}
 
 	// Start denial monitoring
@@ -814,7 +816,7 @@ func sortedUpstreamKeys(m map[string]UpstreamConfig) []string {
 // startDischargeRefresh launches a background goroutine that refreshes discharge
 // tokens every 45 minutes. It re-discharges cached authz tokens and regenerates
 // sandbox.env atomically. Stops when ctx is cancelled.
-func startDischargeRefresh(ctx context.Context, cfg ProjectConfig, scriptDir string) {
+func startDischargeRefresh(ctx context.Context, cfg ProjectConfig, scriptDir string, vaultConfigYAML []byte) {
 	go func() {
 		for {
 			select {
@@ -876,8 +878,7 @@ func startDischargeRefresh(ctx context.Context, cfg ProjectConfig, scriptDir str
 			}
 			shaped := shapeTokens(tokens, infos)
 
-			vaultYAMLPath := filepath.Join(scriptDir, "generated", "vault.yaml")
-			staticResolved, err := resolveStaticEnv(cfg.StaticEnv, vaultYAMLPath)
+			staticResolved, err := resolveStaticEnvForConsole(cfg.StaticEnv, vaultConfigYAML, scriptDir)
 			if err != nil {
 				staticResolved = make(map[string]string)
 			}
@@ -1006,8 +1007,8 @@ func remintTokens(newCfg ProjectConfig, scriptDir string, oldUpstreams map[strin
 	}
 	shaped := shapeTokens(tokens, infos)
 
-	vaultYAMLPath := filepath.Join(scriptDir, "generated", "vault.yaml")
-	staticResolved, err := resolveStaticEnv(newCfg.StaticEnv, vaultYAMLPath)
+	vaultConfigYAML, _ := decryptVaultConfigYAML()
+	staticResolved, err := resolveStaticEnvForConsole(newCfg.StaticEnv, vaultConfigYAML, scriptDir)
 	if err != nil {
 		staticResolved = make(map[string]string)
 	}

@@ -93,34 +93,49 @@ func shapeTokens(entries []TokenEntry, infos map[string]*CredentialInfo) map[str
 // $secret references against the vault.yaml secrets map. Plain string values
 // pass through unchanged. Returns a map of env var name → resolved value.
 func resolveStaticEnv(staticEnv map[string]interface{}, vaultYAMLPath string) (map[string]string, error) {
-	result := make(map[string]string)
 	if len(staticEnv) == 0 {
-		return result, nil
+		return make(map[string]string), nil
 	}
 
-	// Load secrets map from vault.yaml (only if we have $secret refs)
-	var secrets map[string]map[string]string
-	needSecrets := false
+	if !staticEnvNeedsSecrets(staticEnv) {
+		return resolveStaticEnvWithSecrets(staticEnv, nil)
+	}
+
+	data, err := os.ReadFile(vaultYAMLPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading vault.yaml for secret resolution: %w", err)
+	}
+	return resolveStaticEnvFromYAML(staticEnv, data)
+}
+
+func resolveStaticEnvFromYAML(staticEnv map[string]interface{}, vaultYAML []byte) (map[string]string, error) {
+	if len(staticEnv) == 0 {
+		return make(map[string]string), nil
+	}
+	if !staticEnvNeedsSecrets(staticEnv) {
+		return resolveStaticEnvWithSecrets(staticEnv, nil)
+	}
+
+	var raw struct {
+		Secrets map[string]map[string]string `yaml:"secrets"`
+	}
+	if err := yaml.Unmarshal(vaultYAML, &raw); err != nil {
+		return nil, fmt.Errorf("parsing vault.yaml secrets: %w", err)
+	}
+	return resolveStaticEnvWithSecrets(staticEnv, raw.Secrets)
+}
+
+func staticEnvNeedsSecrets(staticEnv map[string]interface{}) bool {
 	for _, v := range staticEnv {
 		if _, ok := v.(map[string]interface{}); ok {
-			needSecrets = true
-			break
+			return true
 		}
 	}
+	return false
+}
 
-	if needSecrets {
-		data, err := os.ReadFile(vaultYAMLPath)
-		if err != nil {
-			return nil, fmt.Errorf("reading vault.yaml for secret resolution: %w", err)
-		}
-		var raw struct {
-			Secrets map[string]map[string]string `yaml:"secrets"`
-		}
-		if err := yaml.Unmarshal(data, &raw); err != nil {
-			return nil, fmt.Errorf("parsing vault.yaml secrets: %w", err)
-		}
-		secrets = raw.Secrets
-	}
+func resolveStaticEnvWithSecrets(staticEnv map[string]interface{}, secrets map[string]map[string]string) (map[string]string, error) {
+	result := make(map[string]string)
 
 	for k, v := range staticEnv {
 		switch val := v.(type) {

@@ -828,12 +828,6 @@ func main() {
 	}
 	defer database.Close()
 
-	// Load keystore
-	keyStore, err = tfmac.LoadKeyStore()
-	if err != nil {
-		log.Fatalf("Failed to load keystore: %v", err)
-	}
-
 	// Load vault config (optional — missing config is not fatal)
 	vaultConfigPath := os.Getenv("VAULT_CONFIG")
 	if vaultConfigPath == "" {
@@ -842,6 +836,16 @@ func main() {
 	vaultConfig, err = vaultcfg.Load(vaultConfigPath)
 	if err != nil {
 		log.Printf("Warning: Could not load vault config from %s: %v", vaultConfigPath, err)
+	}
+
+	// Load keystore from vault config when present; otherwise fall back to env vars.
+	if vaultConfig != nil && vaultConfig.SigningKey != "" {
+		keyStore, err = tfmac.LoadKeyStoreFromConfig(vaultConfig.SigningKey, vaultConfig.EncryptionKey)
+	} else {
+		keyStore, err = tfmac.LoadKeyStore()
+	}
+	if err != nil {
+		log.Fatalf("Failed to load keystore: %v", err)
 	}
 
 	host := os.Getenv("SSH_HOST")

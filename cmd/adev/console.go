@@ -51,6 +51,12 @@ func runConsole(args []string) {
 	}
 	slug := Slug(name)
 
+	// bwrap runtime: zmx-hosted namespace sandbox instead of docker containers.
+	if cfg.Sandbox.Runtime == "bwrap" {
+		runBwrapConsole(workDir, scriptDir, slug, cfg)
+		return
+	}
+
 	mgr := NewInstanceManager(scriptDir)
 	inst := mgr.GetInstance(slug)
 
@@ -79,6 +85,12 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	envoyName := "adev-" + slug + "-envoy"
 	sandboxName := "adev-" + slug + "-sandbox"
 	networkName := "adev-" + slug
+	instanceGenDir := filepath.Join(scriptDir, "generated", "instances", slug)
+	instanceLogsDir := filepath.Join(instanceGenDir, "logs")
+	if err := os.MkdirAll(instanceLogsDir, 0700); err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating instance directory: %v\n", err)
+		os.Exit(1)
+	}
 
 	if err := os.Chdir(scriptDir); err != nil {
 		fmt.Fprintf(os.Stderr, "Error changing to %s: %v\n", scriptDir, err)
@@ -108,7 +120,7 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 
 	// Run generator to ensure configs are up to date
 	spinner.Status("generating configs...")
-	gen, err := NewGenerator(scriptDir, cfg)
+	gen, err := NewGenerator(scriptDir, instanceGenDir, cfg)
 	if err != nil {
 		spinner.Stop()
 		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
@@ -155,7 +167,7 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	}
 
 	// Mint tokens for credentialed upstreams
-	tokenEntries, _ := mintTokens(cfg, scriptDir, spinner)
+	tokenEntries, _ := mintTokens(cfg, instanceGenDir, spinner)
 
 	// Generate sandbox.env if there are credentialed upstreams or static env vars
 	sandboxEnvGenerated := false
@@ -176,7 +188,7 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 			staticResolved = make(map[string]string)
 		}
 
-		if err := generateSandboxEnv(shaped, staticResolved); err != nil {
+		if err := generateSandboxEnv(instanceGenDir, shaped, staticResolved); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: generating sandbox.env: %v\n", err)
 		} else {
 			sandboxEnvGenerated = true
@@ -226,9 +238,6 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 		cmd.Run()
 	}
-
-	// Create logs directory for network activity log
-	os.MkdirAll(filepath.Join(scriptDir, "generated", "logs"), 0755)
 
 	// Generate SSH key pair if not present (used by adev console to SSH into sandbox)
 	sshKeyPath := filepath.Join(scriptDir, "generated", "sandbox-key")
@@ -296,6 +305,10 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	codexConfigDir := filepath.Join(scriptDir, "claude-dev/codex-config")
 	os.MkdirAll(codexConfigDir, 0755)
 
+	// Create Pi config dir (persisted across sandbox restarts)
+	piConfigDir := filepath.Join(scriptDir, "claude-dev/pi-config")
+	os.MkdirAll(piConfigDir, 0755)
+
 	// Create per-sandbox network (remove stale one first if it exists without containers)
 	spinner.Status("creating network...")
 	run("docker", "network", "rm", networkName) // ignore error - may not exist
@@ -314,11 +327,11 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		"--ulimit", "nofile=65536:65536",
 		"-v", scriptDir+"/generated/certs/ca.crt:/certs/ca.crt:ro",
 		"-v", scriptDir+"/generated/certs/ca.key:/certs/ca.key:ro",
-		"-v", scriptDir+"/generated/domains.json:/etc/envoy/domains.json:ro",
-		"-v", scriptDir+"/generated/envoy.json:/etc/envoy/envoy.json:ro",
+		"-v", filepath.Join(instanceGenDir, "domains.json")+":/etc/envoy/domains.json:ro",
+		"-v", filepath.Join(instanceGenDir, "envoy.json")+":/etc/envoy/envoy.json:ro",
 		"-v", scriptDir+"/envoy-entrypoint.sh:/entrypoint.sh:ro",
 		"-v", scriptDir+"/generated/dns-responder:/usr/local/bin/dns-responder:ro",
-		"-v", scriptDir+"/generated/logs:/var/log/adev",
+		"-v", instanceLogsDir+":/var/log/adev",
 		"--entrypoint", "/entrypoint.sh",
 		"envoyproxy/envoy:v1.28-latest",
 		"-c", "/etc/envoy/envoy.json"); err != nil {
@@ -332,6 +345,24 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		if err := run("docker", "network", "connect", "agent-creds_agent-creds", envoyName); err != nil {
 			spinner.Stop()
 			fmt.Fprintf(os.Stderr, "Error connecting envoy to vault network: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	// An upstream may live on another isolated Docker network. Attach only
+	// Envoy: the sandbox remains unable to resolve or connect to the origin
+	// directly, preserving the proxy authorization boundary.
+	extraNetworks := make(map[string]struct{})
+	for _, upstream := range cfg.Upstream {
+		if upstream.Network != "" && upstream.Network != networkName {
+			extraNetworks[upstream.Network] = struct{}{}
+		}
+	}
+	for network := range extraNetworks {
+		if err := run("docker", "network", "connect", network, envoyName); err != nil {
+			spinner.Stop()
+			fmt.Fprintf(os.Stderr, "Error connecting envoy to upstream network %s: %v\n", network, err)
+			cleanup()
 			os.Exit(1)
 		}
 	}
@@ -473,8 +504,17 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 
 							// Handle upstream changes: regenerate configs and restart envoy
 							newHosts := sortedUpstreamKeys(newCfg.Upstream)
-							if !slices.Equal(newHosts, currentHosts) {
-								newGen, err := NewGenerator(scriptDir, newCfg)
+							routingChanged := !slices.Equal(newHosts, currentHosts)
+							if !routingChanged {
+								for host, upstream := range newCfg.Upstream {
+									if upstreamChanged(currentUpstreams[host], upstream) {
+										routingChanged = true
+										break
+									}
+								}
+							}
+							if routingChanged {
+								newGen, err := NewGenerator(scriptDir, instanceGenDir, newCfg)
 								if err == nil {
 									if err := newGen.Generate(); err == nil {
 										run("docker", "restart", envoyName)
@@ -484,7 +524,7 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 							}
 
 							// Handle credential/caveat changes: re-mint affected tokens
-							remintTokens(newCfg, scriptDir, currentUpstreams)
+							remintTokens(newCfg, scriptDir, instanceGenDir, currentUpstreams)
 							currentUpstreams = copyUpstreamMap(newCfg.Upstream)
 						}
 					case _, ok := <-watcher.Errors:
@@ -511,7 +551,7 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		// gVisor doesn't work with Docker's embedded DNS (127.0.0.11)
 		// Write placeholder resolv.conf (overwritten with envoy IP after sandbox starts)
 		// Uses 127.0.0.1 as fail-safe so DNS fails rather than bypasses during the brief window
-		resolvConf := filepath.Join(scriptDir, "generated", "resolv.conf")
+		resolvConf := filepath.Join(instanceGenDir, "resolv.conf")
 		os.WriteFile(resolvConf, []byte("nameserver 127.0.0.1\n"), 0644)
 		args = append(args, "-v", resolvConf+":/etc/resolv.conf:ro")
 	} else {
@@ -523,6 +563,7 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		"-v", claudeConfigDir+":/home/devuser/.claude",
 		"-v", claudeConfigDir+"/.claude.json:/home/devuser/.claude.json",
 		"-v", codexConfigDir+":/home/devuser/.codex",
+		"-v", piConfigDir+":/home/devuser/.pi",
 		// Mount agent-creds CA so proxy TLS is trusted system-wide
 		"-v", scriptDir+"/generated/certs/ca.crt:/etc/ssl/agent-creds-ca.crt:ro",
 		// Mount entrypoint and binaries so changes take effect without image rebuild
@@ -533,11 +574,11 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		// SSH public key for passwordless login (mounted to /etc/adev/ so tmpfs on /tmp doesn't hide it)
 		"-v", sshPubKeyPath+":/etc/adev/pubkey:ro",
 		// Network activity logs (DNS + HTTP access log, written by envoy container)
-		"-v", scriptDir+"/generated/logs:/etc/adev/logs:ro",
+		"-v", instanceLogsDir+":/etc/adev/logs:ro",
 	)
 	// Mount sandbox.env as /workspace/.env (read-only) when generated
 	if sandboxEnvGenerated {
-		sandboxEnvPath := filepath.Join(scriptDir, "generated", "sandbox.env")
+		sandboxEnvPath := filepath.Join(instanceGenDir, "sandbox.env")
 		args = append(args, "-v", sandboxEnvPath+":/workspace/.env:ro")
 	}
 	// Mount host Nix store for sandbox-env (local builds only)
@@ -566,7 +607,7 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	args = append(args, gitConfigMounts...)
 	// Mount merged config for aenv display (includes agent + plugin upstreams),
 	// and raw project config in workspace for user reference.
-	mergedConfigToml := filepath.Join(scriptDir, "generated", "merged-config.toml")
+	mergedConfigToml := filepath.Join(instanceGenDir, "merged-config.toml")
 	agentCredsToml := filepath.Join(workDir, "agent-creds.toml")
 	if fileExists(mergedConfigToml) {
 		args = append(args, "-v", mergedConfigToml+":/etc/aenv/agent-creds.toml:ro")
@@ -591,11 +632,16 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	}
 
 	// Plugin environment variables
+	var projectEnvNames []string
 	for _, env := range cfg.Env {
-		value := resolveEnvValue(env.Value)
+		value := resolveEnvValueFrom(env.Value, workDir)
 		if value != "" {
 			args = append(args, "-e", env.Name+"="+value)
+			projectEnvNames = append(projectEnvNames, env.Name)
 		}
+	}
+	if len(projectEnvNames) > 0 {
+		args = append(args, "-e", "ADEV_PROJECT_ENV_NAMES="+strings.Join(projectEnvNames, " "))
 	}
 
 	// Resource limits
@@ -644,7 +690,7 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		}
 
 		// Write resolv.conf pointing to envoy (dns-responder runs there)
-		resolvConf := filepath.Join(scriptDir, "generated", "resolv.conf")
+		resolvConf := filepath.Join(instanceGenDir, "resolv.conf")
 		os.WriteFile(resolvConf, []byte(fmt.Sprintf("nameserver %s\n", envoyIP)), 0644)
 
 		// Get IPv6 addresses for dual-stack DNAT
@@ -695,21 +741,29 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	refreshCtx, refreshCancel := context.WithCancel(context.Background())
 	defer refreshCancel()
 	if len(tokenEntries) > 0 {
-		startDischargeRefresh(refreshCtx, cfg, scriptDir, vaultConfigYAML)
+		startDischargeRefresh(refreshCtx, cfg, scriptDir, instanceGenDir, vaultConfigYAML)
 	}
 
 	// Start denial monitoring
 	startDenialMonitor(refreshCtx, cfg.Vault)
 
 	// SSH into the sandbox (dropbear runs as devuser on port 2222)
-	sshCmd := exec.Command("ssh",
+	sshArgs := []string{
 		"-i", sshKeyPath,
 		"-p", "2222",
 		"-o", "StrictHostKeyChecking=no",
 		"-o", "UserKnownHostsFile=/dev/null",
 		"-o", "LogLevel=ERROR",
 		"-o", "ConnectTimeout=10",
-		"devuser@"+sshIP)
+		"devuser@" + sshIP,
+	}
+	// The session runs the resolved entrypoint (agent profile default,
+	// project [sandbox] override). Empty entrypoint keeps the plain
+	// login shell.
+	if cfg.Entrypoint != "" {
+		sshArgs = append(sshArgs, "-t", "bash", "-lc", fmt.Sprintf("%q", cfg.Entrypoint))
+	}
+	sshCmd := exec.Command("ssh", sshArgs...)
 	sshCmd.Stdin = os.Stdin
 	sshCmd.Stdout = os.Stdout
 	sshCmd.Stderr = os.Stderr
@@ -726,15 +780,15 @@ type TokenEntry struct {
 
 // mintTokens mints tokens for all credentialed upstreams.
 // Returns token entries keyed by env var name, plus cached authz tokens keyed by host.
-func mintTokens(cfg ProjectConfig, scriptDir string, spinner *Spinner) ([]TokenEntry, map[string]string) {
-	authzDir := filepath.Join(scriptDir, "generated", "authz")
+func mintTokens(cfg ProjectConfig, instanceGenDir string, spinner *Spinner) ([]TokenEntry, map[string]string) {
+	authzDir := filepath.Join(instanceGenDir, "authz")
 	os.MkdirAll(authzDir, 0755)
 
 	var tokens []TokenEntry
 	authzCache := make(map[string]string) // host → authz token
 
 	for host, upstream := range cfg.Upstream {
-		if upstream.Credential == "" {
+		if !upstream.MintsToken() {
 			continue
 		}
 
@@ -816,7 +870,7 @@ func sortedUpstreamKeys(m map[string]UpstreamConfig) []string {
 // startDischargeRefresh launches a background goroutine that refreshes discharge
 // tokens every 45 minutes. It re-discharges cached authz tokens and regenerates
 // sandbox.env atomically. Stops when ctx is cancelled.
-func startDischargeRefresh(ctx context.Context, cfg ProjectConfig, scriptDir string, vaultConfigYAML []byte) {
+func startDischargeRefresh(ctx context.Context, cfg ProjectConfig, scriptDir, instanceGenDir string, vaultConfigYAML []byte) {
 	go func() {
 		for {
 			select {
@@ -826,10 +880,10 @@ func startDischargeRefresh(ctx context.Context, cfg ProjectConfig, scriptDir str
 			}
 
 			// Refresh discharge for each credentialed upstream
-			authzDir := filepath.Join(scriptDir, "generated", "authz")
+			authzDir := filepath.Join(instanceGenDir, "authz")
 			var tokens []TokenEntry
 			for host, upstream := range cfg.Upstream {
-				if upstream.Credential == "" {
+				if !upstream.MintsToken() {
 					continue
 				}
 
@@ -883,7 +937,7 @@ func startDischargeRefresh(ctx context.Context, cfg ProjectConfig, scriptDir str
 				staticResolved = make(map[string]string)
 			}
 
-			if err := generateSandboxEnv(shaped, staticResolved); err != nil {
+			if err := generateSandboxEnv(instanceGenDir, shaped, staticResolved); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: discharge refresh env update failed: %v (old tokens valid for ~15 more minutes)\n", err)
 			}
 		}
@@ -907,8 +961,11 @@ func copyUpstreamMap(m map[string]UpstreamConfig) map[string]UpstreamConfig {
 	return c
 }
 
-// upstreamChanged returns true if the credential or caveats differ between old and new.
+// upstreamChanged returns true if the transport, credential, or caveats differ.
 func upstreamChanged(old, new UpstreamConfig) bool {
+	if old.Mode != new.Mode || old.Scheme != new.Scheme || old.Port != new.Port || old.Address != new.Address || old.Network != new.Network || old.ForwardToken != new.ForwardToken {
+		return true
+	}
 	if old.Credential != new.Credential {
 		return true
 	}
@@ -923,13 +980,13 @@ func upstreamChanged(old, new UpstreamConfig) bool {
 
 // remintTokens detects credential/caveat changes and re-mints tokens for affected upstreams.
 // Unchanged upstreams retain their existing tokens.
-func remintTokens(newCfg ProjectConfig, scriptDir string, oldUpstreams map[string]UpstreamConfig) {
-	authzDir := filepath.Join(scriptDir, "generated", "authz")
+func remintTokens(newCfg ProjectConfig, scriptDir, instanceGenDir string, oldUpstreams map[string]UpstreamConfig) {
+	authzDir := filepath.Join(instanceGenDir, "authz")
 
 	// Determine which hosts need re-minting
 	var remintHosts []string
 	for host, newUp := range newCfg.Upstream {
-		if newUp.Credential == "" {
+		if !newUp.MintsToken() {
 			continue
 		}
 		oldUp, existed := oldUpstreams[host]
@@ -953,7 +1010,7 @@ func remintTokens(newCfg ProjectConfig, scriptDir string, oldUpstreams map[strin
 	// Re-mint all credentialed upstreams (changed ones lost their cache, unchanged use cache)
 	var tokens []TokenEntry
 	for host, upstream := range newCfg.Upstream {
-		if upstream.Credential == "" {
+		if !upstream.MintsToken() {
 			continue
 		}
 
@@ -1013,7 +1070,7 @@ func remintTokens(newCfg ProjectConfig, scriptDir string, oldUpstreams map[strin
 		staticResolved = make(map[string]string)
 	}
 
-	if err := generateSandboxEnv(shaped, staticResolved); err != nil {
+	if err := generateSandboxEnv(instanceGenDir, shaped, staticResolved); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: hot-reload env update failed: %v\n", err)
 	}
 }

@@ -52,9 +52,15 @@ export COLORTERM=truecolor
 
 # --- Export env vars for SSH sessions ---
 # dropbear creates a clean environment, so SSH shells lose all env vars above.
-# Write them to /tmp/adev-env.sh which .bashrc sources.
+# Write runtime variables plus the project-declared variables selected by adev
+# to /tmp/adev-env.sh, which .bashrc sources.
 {
-    for var in PATH TERMINFO_DIRS XDG_DATA_DIRS SSL_CERT_FILE NIX_SSL_CERT_FILE SANDBOX_ENV COLORTERM BROWSER TCP_BROWSER_PORT CDP_PORT_MAP NODE_EXTRA_CA_CERTS; do
+    for var in PATH TERMINFO_DIRS XDG_DATA_DIRS SSL_CERT_FILE NIX_SSL_CERT_FILE SANDBOX_ENV COLORTERM BROWSER TCP_BROWSER_PORT CDP_PORT_MAP NODE_EXTRA_CA_CERTS $ADEV_PROJECT_ENV_NAMES; do
+        case "$var" in
+            ''|*[!A-Za-z0-9_]*)
+                continue
+                ;;
+        esac
         eval "val=\${$var:-}"
         [ -n "$val" ] && printf 'export %s="%s"\n' "$var" "$val"
     done

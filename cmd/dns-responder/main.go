@@ -44,6 +44,7 @@ func main() {
 
 	// Load allowed domains
 	allowed := make(map[string]bool)
+	enforceAllowlist := *domainsFile != ""
 	if *domainsFile != "" {
 		data, err := os.ReadFile(*domainsFile)
 		if err == nil {
@@ -98,12 +99,19 @@ func main() {
 		pkt := buf[:n]
 		domain, qtype := parseQuestion(pkt)
 
-		// Log
+		// Log and fail DNS closed when an allowlist is configured. Returning
+		// Envoy's address for unknown names would still be blocked by its
+		// listeners, but refusing the name here removes that extra path.
 		domainLower := strings.ToLower(strings.TrimSuffix(domain, "."))
-		if allowed[domainLower] {
+		isAllowed := allowed[domainLower]
+		if isAllowed {
 			writeLog(domainLower, "allowed")
 		} else if domainLower != "" {
 			writeLog(domainLower, "not in allowlist")
+		}
+		if enforceAllowlist && !isAllowed {
+			conn.WriteTo(buildEmptyResponse(pkt), addr)
+			continue
 		}
 
 		var resp []byte

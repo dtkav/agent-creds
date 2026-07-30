@@ -225,6 +225,17 @@ name = "myproject"
 
 [upstream."api.stripe.com"]
 [upstream."pocketbase.example.com"]
+
+# Authenticate a request without injecting a credential. Vault overwrites
+# x-agent-creds-* identity headers with facts from the verified macaroon.
+[upstream."service.internal"]
+mode = "identity"
+scheme = "http"
+port = 8890
+address = "adev-service-sandbox"
+network = "adev-service"
+methods = ["POST"]
+paths = ["/graphql"]
 ```
 
 ### vault.toml (vault service)

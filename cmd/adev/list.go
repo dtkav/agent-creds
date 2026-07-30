@@ -23,6 +23,7 @@ type listModel struct {
 	quitting  bool
 	action    string // "attach" or ""
 	mgr       *InstanceManager
+	bwrap     map[string]bool // slugs backed by the bwrap runtime (zmx session)
 }
 
 func (m listModel) Init() tea.Cmd {
@@ -80,6 +81,9 @@ func (m listModel) View() string {
 
 			name := style.Render(inst.Slug)
 			status := statusStyle.Render(inst.Status)
+			if m.bwrap[inst.Slug] {
+				status += unselectedStyle.Render(" (bwrap)")
+			}
 			s += fmt.Sprintf("%s%-20s %s\n", cursor, name, status)
 		}
 	}
@@ -101,6 +105,9 @@ func runList() {
 	mgr := NewInstanceManager(scriptDir)
 	instances := mgr.ListInstances()
 
+	// Fold in bwrap instances (zmx sessions alongside container ones)
+	instances, bwrapSlugs := mergeBwrapInstances(instances)
+
 	// Filter to only running or partial instances
 	var runningInstances []Instance
 	for _, inst := range instances {
@@ -112,6 +119,7 @@ func runList() {
 	m := listModel{
 		instances: runningInstances,
 		mgr:       mgr,
+		bwrap:     bwrapSlugs,
 	}
 
 	p := tea.NewProgram(m)
@@ -125,6 +133,14 @@ func runList() {
 	fm := finalModel.(listModel)
 	if fm.action == "attach" && len(fm.instances) > 0 {
 		selected := fm.instances[fm.selected]
+		if fm.bwrap[selected.Slug] {
+			fmt.Printf("Attaching to '%s' (bwrap)...\n", selected.Slug)
+			if err := attachBwrapInstance(selected.Slug); err != nil {
+				fmt.Fprintf(os.Stderr, "Error attaching: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
 		if mgr.CanAttach(&selected) {
 			fmt.Printf("Attaching to '%s'...\n", selected.Slug)
 			if err := mgr.AttachToInstance(&selected); err != nil {

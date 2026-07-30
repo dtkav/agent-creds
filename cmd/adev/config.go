@@ -14,18 +14,30 @@ import (
 type SandboxConfig struct {
 	Name              string   `toml:"name"`
 	Image             string   `toml:"image"`
-	Runtime           string   `toml:"runtime"` // "runc" or "gvisor" (default: gvisor)
-	Memory            string   `toml:"memory"`  // docker --memory limit (e.g., "8g", "512m")
-	CPUs              string   `toml:"cpus"`    // docker --cpus limit (e.g., "4", "1.5")
+	Runtime           string   `toml:"runtime"`              // "runc" or "gvisor" (default: gvisor)
+	Memory            string   `toml:"memory"`               // docker --memory limit (e.g., "8g", "512m")
+	CPUs              string   `toml:"cpus"`                 // docker --cpus limit (e.g., "4", "1.5")
 	UseHostBrowser    *bool    `toml:"use_host_browser"`     // default true
 	UseHostBrowserCDP bool     `toml:"use_host_browser_cdp"` // enable CDP forwarding
 	Agent             string   `toml:"agent"`                // agent to use (e.g., "claude")
+	Entrypoint        string   `toml:"entrypoint"`           // console session command; outranks the agent profile's
 	Plugins           []string `toml:"plugins"`              // additional plugins to enable
 	DisabledPlugins   []string `toml:"disabled_plugins"`     // plugins to disable
 }
 
-func (s SandboxConfig) UseHostBrowserEnabled() bool    { return s.UseHostBrowser == nil || *s.UseHostBrowser }
+func (s SandboxConfig) UseHostBrowserEnabled() bool {
+	return s.UseHostBrowser == nil || *s.UseHostBrowser
+}
 func (s SandboxConfig) UseHostBrowserCDPEnabled() bool { return s.UseHostBrowserCDP }
+
+// ValidateRuntime checks the configured sandbox runtime is a known backend.
+func (s SandboxConfig) ValidateRuntime() error {
+	switch s.Runtime {
+	case "", "gvisor", "runc", "bwrap":
+		return nil
+	}
+	return fmt.Errorf("sandbox runtime %q: must be gvisor, runc, or bwrap", s.Runtime)
+}
 
 // RuntimeArg returns the --runtime flag value for docker.
 // Default is gVisor (runsc), explicit "runc" uses docker default.
@@ -65,9 +77,50 @@ func (v VaultConfig) IsRemote() bool {
 }
 
 type UpstreamConfig struct {
-	Credential string   `toml:"credential,omitempty"` // vault credential path (e.g., /stripe/live)
-	Methods    []string `toml:"methods"`              // allowed HTTP methods (empty = all)
-	Paths      []string `toml:"paths"`                // allowed path patterns with glob support (empty = all)
+	Credential   string   `toml:"credential,omitempty"`    // vault credential path (e.g., /stripe/live)
+	Mode         string   `toml:"mode,omitempty"`          // "credential" (default) or "identity"
+	Scheme       string   `toml:"scheme,omitempty"`        // "https" (default) or "http"
+	Port         int      `toml:"port,omitempty"`          // defaults to 443 for https, 80 for http
+	Address      string   `toml:"address,omitempty"`       // fixed upstream origin (default: public host)
+	Network      string   `toml:"network,omitempty"`       // extra Docker network attached to Envoy only
+	ForwardToken bool     `toml:"forward_token,omitempty"` // caller supplies macaroon; do not mint/expose env token
+	Methods      []string `toml:"methods"`                 // allowed HTTP methods (empty = all)
+	Paths        []string `toml:"paths"`                   // allowed path patterns with glob support (empty = all)
+}
+
+func (u UpstreamConfig) MintsToken() bool {
+	return u.Credential != "" && !u.ForwardToken
+}
+
+func (u UpstreamConfig) AddressValue(host string) string {
+	if u.Address == "" {
+		return host
+	}
+	return u.Address
+}
+
+func (u UpstreamConfig) ModeValue() string {
+	if u.Mode == "" {
+		return "credential"
+	}
+	return u.Mode
+}
+
+func (u UpstreamConfig) SchemeValue() string {
+	if u.Scheme == "" {
+		return "https"
+	}
+	return u.Scheme
+}
+
+func (u UpstreamConfig) PortValue() int {
+	if u.Port != 0 {
+		return u.Port
+	}
+	if u.SchemeValue() == "http" {
+		return 80
+	}
+	return 443
 }
 
 // CDPTargetConfig defines an allowed CDP target pattern.
@@ -118,64 +171,64 @@ type EnvConfig struct {
 
 // PluginConfig represents a plugin's configuration.
 type PluginConfig struct {
-	Name              string                             `toml:"name"`
-	Description       string                             `toml:"description"`
-	Nix               string                             `toml:"nix"`           // inline nix expression (list of derivations, pkgs in scope)
-	NixPkgFields                                          // embedded Nix package set fields ([packages], [python3Packages], etc.)
-	Upstream          map[string]UpstreamConfig           `toml:"upstream"`
-	BrowserTargets    []BrowserTargetConfig               `toml:"browser_target"`
-	CDPTargets        []CDPTargetConfig                   `toml:"cdp_target"`
-	Mounts            []MountConfig                       `toml:"mount"`
-	Env               []EnvConfig                         `toml:"env"`
+	Name           string                    `toml:"name"`
+	Description    string                    `toml:"description"`
+	Nix            string                    `toml:"nix"` // inline nix expression (list of derivations, pkgs in scope)
+	NixPkgFields                             // embedded Nix package set fields ([packages], [python3Packages], etc.)
+	Upstream       map[string]UpstreamConfig `toml:"upstream"`
+	BrowserTargets []BrowserTargetConfig     `toml:"browser_target"`
+	CDPTargets     []CDPTargetConfig         `toml:"cdp_target"`
+	Mounts         []MountConfig             `toml:"mount"`
+	Env            []EnvConfig               `toml:"env"`
 }
 
 // AgentConfig represents an agent's configuration.
 // Agents are like plugins but also define entrypoint and can require plugins.
 type AgentConfig struct {
-	Name              string                             `toml:"name"`
-	Description       string                             `toml:"description"`
-	Entrypoint        string                             `toml:"entrypoint"`    // command to run
-	Nix               string                             `toml:"nix"`           // inline nix expression (list of derivations, pkgs in scope)
-	Plugins           []string                           `toml:"plugins"`       // plugins this agent requires
-	NixPkgFields                                          // embedded Nix package set fields ([packages], [python3Packages], etc.)
-	Upstream          map[string]UpstreamConfig           `toml:"upstream"`
-	BrowserTargets    []BrowserTargetConfig               `toml:"browser_target"`
-	CDPTargets        []CDPTargetConfig                   `toml:"cdp_target"`
-	Mounts            []MountConfig                       `toml:"mount"`
-	Env               []EnvConfig                         `toml:"env"`
+	Name           string                    `toml:"name"`
+	Description    string                    `toml:"description"`
+	Entrypoint     string                    `toml:"entrypoint"` // command to run
+	Nix            string                    `toml:"nix"`        // inline nix expression (list of derivations, pkgs in scope)
+	Plugins        []string                  `toml:"plugins"`    // plugins this agent requires
+	NixPkgFields                             // embedded Nix package set fields ([packages], [python3Packages], etc.)
+	Upstream       map[string]UpstreamConfig `toml:"upstream"`
+	BrowserTargets []BrowserTargetConfig     `toml:"browser_target"`
+	CDPTargets     []CDPTargetConfig         `toml:"cdp_target"`
+	Mounts         []MountConfig             `toml:"mount"`
+	Env            []EnvConfig               `toml:"env"`
 }
 
 type ProjectConfig struct {
-	Sandbox        SandboxConfig                      `toml:"sandbox"`
-	Vault          VaultConfig                        `toml:"vault"`
-	Entrypoint     string                             // set by agent
-	NixExprs       []string                           // inline nix expressions from plugins/agents
-	NixPkgFields                                       // embedded Nix package set fields
-	Upstream       map[string]UpstreamConfig           `toml:"upstream"`
-	CDPTargets     []CDPTargetConfig                   `toml:"cdp_target"`
-	BrowserTargets []BrowserTargetConfig               `toml:"browser_target"`
-	Mounts         []MountConfig                       `toml:"mount"`
-	Env            []EnvConfig                         `toml:"env"`
-	StaticEnv      map[string]interface{}              `toml:"env,omitempty"`
+	Sandbox        SandboxConfig             `toml:"sandbox"`
+	Vault          VaultConfig               `toml:"vault"`
+	Entrypoint     string                    // set by agent
+	NixExprs       []string                  // inline nix expressions from plugins/agents
+	NixPkgFields                             // embedded Nix package set fields
+	Upstream       map[string]UpstreamConfig `toml:"upstream"`
+	CDPTargets     []CDPTargetConfig         `toml:"cdp_target"`
+	BrowserTargets []BrowserTargetConfig     `toml:"browser_target"`
+	Mounts         []MountConfig             `toml:"mount"`
+	Env            []EnvConfig               `toml:"-"`
+	StaticEnv      map[string]interface{}    `toml:"-"`
 }
 
 // NixPkgFields holds Nix package set fields shared by PluginConfig, AgentConfig, and ProjectConfig.
 // Each field maps to a TOML section like [python3Packages] with boolean entries.
 // To add a new Nix namespace: add a field here and an entry in nixPkgSets().
 type NixPkgFields struct {
-	NixPackages       map[string]bool                    `toml:"packages"`          // top-level pkgs.*
-	Python3Packages   map[string]bool                    `toml:"python3Packages"`
-	NodePackages      map[string]bool                    `toml:"nodePackages"`
-	LuaPackages       map[string]bool                    `toml:"luaPackages"`
-	PerlPackages      map[string]bool                    `toml:"perlPackages"`
-	HaskellPackages   map[string]bool                    `toml:"haskellPackages"`
-	RubyPackages      map[string]bool                    `toml:"rubyPackages"`
-	EmacsPackages     map[string]bool                    `toml:"emacsPackages"`
-	PhpPackages       map[string]bool                    `toml:"phpPackages"`
-	OcamlPackages     map[string]bool                    `toml:"ocamlPackages"`
-	RPackages         map[string]bool                    `toml:"rPackages"`
-	BeamPackages      map[string]bool                    `toml:"beamPackages"`
-	NixPackageSets    map[string]map[string]bool          // aggregated; not from TOML directly
+	NixPackages     map[string]bool            `toml:"packages"` // top-level pkgs.*
+	Python3Packages map[string]bool            `toml:"python3Packages"`
+	NodePackages    map[string]bool            `toml:"nodePackages"`
+	LuaPackages     map[string]bool            `toml:"luaPackages"`
+	PerlPackages    map[string]bool            `toml:"perlPackages"`
+	HaskellPackages map[string]bool            `toml:"haskellPackages"`
+	RubyPackages    map[string]bool            `toml:"rubyPackages"`
+	EmacsPackages   map[string]bool            `toml:"emacsPackages"`
+	PhpPackages     map[string]bool            `toml:"phpPackages"`
+	OcamlPackages   map[string]bool            `toml:"ocamlPackages"`
+	RPackages       map[string]bool            `toml:"rPackages"`
+	BeamPackages    map[string]bool            `toml:"beamPackages"`
+	NixPackageSets  map[string]map[string]bool // aggregated; not from TOML directly
 }
 
 // nixPkgSets returns all package set fields as prefix→map pairs.
@@ -258,11 +311,26 @@ func MatchGlob(pattern, value string) bool {
 // for upstreams that have methods/paths caveats but no credential.
 func ValidateUpstreams(upstreams map[string]UpstreamConfig) error {
 	for host, u := range upstreams {
+		if mode := u.ModeValue(); mode != "credential" && mode != "identity" {
+			return fmt.Errorf("upstream %q: mode %q must be credential or identity", host, mode)
+		}
+		if u.ModeValue() == "identity" && u.Credential != "" {
+			return fmt.Errorf("upstream %q: identity mode cannot inject credential %q", host, u.Credential)
+		}
+		if u.ForwardToken && u.Credential == "" {
+			return fmt.Errorf("upstream %q: forward_token requires a credential path", host)
+		}
+		if scheme := u.SchemeValue(); scheme != "http" && scheme != "https" {
+			return fmt.Errorf("upstream %q: scheme %q must be http or https", host, scheme)
+		}
+		if u.Port < 0 || u.Port > 65535 {
+			return fmt.Errorf("upstream %q: port %d is outside 1-65535", host, u.Port)
+		}
 		if u.Credential != "" {
 			if !strings.HasPrefix(u.Credential, "/") {
 				return fmt.Errorf("upstream %q: credential path %q must start with /", host, u.Credential)
 			}
-		} else {
+		} else if u.ModeValue() != "identity" {
 			if len(u.Methods) > 0 || len(u.Paths) > 0 {
 				fmt.Fprintf(os.Stderr, "Warning: upstream %q has methods/paths caveats but no credential; caveats will have no effect\n", host)
 			}
@@ -274,16 +342,41 @@ func ValidateUpstreams(upstreams map[string]UpstreamConfig) error {
 // LoadProjectConfig reads agent-creds.toml from dir if it exists.
 // Returns a zero-value config (not an error) if the file is absent.
 func LoadProjectConfig(dir string) (ProjectConfig, error) {
-	var cfg ProjectConfig
 	path := filepath.Join(dir, "agent-creds.toml")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return cfg, nil
+			return ProjectConfig{}, nil
 		}
-		return cfg, err
+		return ProjectConfig{}, err
 	}
-	if err := toml.Unmarshal(data, &cfg); err != nil {
+
+	// Project configs support either a static [env] map or [[env]] entries
+	// (including from-file values). Decode the section as a Primitive so the
+	// two TOML shapes do not compete for the same struct tag.
+	var decoded struct {
+		ProjectConfig
+		Env toml.Primitive `toml:"env"`
+	}
+	md, err := toml.Decode(string(data), &decoded)
+	if err != nil {
+		return ProjectConfig{}, err
+	}
+	cfg := decoded.ProjectConfig
+	switch md.Type("env") {
+	case "":
+	case "Hash":
+		if err := md.PrimitiveDecode(decoded.Env, &cfg.StaticEnv); err != nil {
+			return ProjectConfig{}, fmt.Errorf("decoding [env]: %w", err)
+		}
+	case "ArrayHash":
+		if err := md.PrimitiveDecode(decoded.Env, &cfg.Env); err != nil {
+			return ProjectConfig{}, fmt.Errorf("decoding [[env]]: %w", err)
+		}
+	default:
+		return ProjectConfig{}, fmt.Errorf("env must be a table or array of tables")
+	}
+	if err := cfg.Sandbox.ValidateRuntime(); err != nil {
 		return cfg, err
 	}
 	if err := ValidateUpstreams(cfg.Upstream); err != nil {
@@ -318,6 +411,14 @@ func LoadProjectConfigWithPlugins(projectDir, scriptDir string) (ProjectConfig, 
 		MergeAgent(&cfg, agent, projectDir)
 		// Collect agent's required plugins
 		agentPlugins = agent.Plugins
+	}
+
+	// Precedence: a project's [sandbox] entrypoint outranks the agent
+	// profile's. Every backend runs cfg.Entrypoint as its session
+	// command, so entrypoint = "bash -l" gives a plain confined shell
+	// regardless of agent.
+	if cfg.Sandbox.Entrypoint != "" {
+		cfg.Entrypoint = cfg.Sandbox.Entrypoint
 	}
 
 	// Discover all plugins

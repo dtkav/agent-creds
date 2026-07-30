@@ -261,9 +261,18 @@ func sliceContains(slice []string, val string) bool {
 // resolveEnvValue resolves an environment variable value.
 // Supports "from-file:path" syntax to read value from a file.
 func resolveEnvValue(value string) string {
+	return resolveEnvValueFrom(value, "")
+}
+
+// resolveEnvValueFrom resolves relative from-file paths against the project
+// directory, not adev's installation directory.
+func resolveEnvValueFrom(value, projectDir string) string {
 	const prefix = "from-file:"
 	if strings.HasPrefix(value, prefix) {
 		path := expandPath(strings.TrimPrefix(value, prefix))
+		if projectDir != "" && !filepath.IsAbs(path) {
+			path = filepath.Join(projectDir, path)
+		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: could not read env file %s: %v\n", path, err)

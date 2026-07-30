@@ -95,6 +95,7 @@ iptables -t nat -N "$NAT_CHAIN" 2>/dev/null || iptables -t nat -F "$NAT_CHAIN"
 iptables -t nat -A "$NAT_CHAIN" -s "$ENVOY_IP" -j RETURN
 iptables -t nat -A "$NAT_CHAIN" -d "$ENVOY_IP" -j RETURN
 iptables -t nat -A "$NAT_CHAIN" -d "$GATEWAY_IP" -j RETURN
+iptables -t nat -A "$NAT_CHAIN" -p tcp --dport 80 -j DNAT --to-destination "$ENVOY_IP:80"
 iptables -t nat -A "$NAT_CHAIN" -p tcp -j DNAT --to-destination "$ENVOY_IP:443"
 
 # Insert into PREROUTING for traffic from sandbox subnet
@@ -126,6 +127,7 @@ if [ -n "$SUBNET6" ] && [ -n "$ENVOY_IP6" ]; then
     ip6tables -t nat -A "$NAT6_CHAIN" -s "$ENVOY_IP6" -j RETURN
     ip6tables -t nat -A "$NAT6_CHAIN" -d "$ENVOY_IP6" -j RETURN
     [ -n "$GATEWAY_IP6" ] && ip6tables -t nat -A "$NAT6_CHAIN" -d "$GATEWAY_IP6" -j RETURN
+    ip6tables -t nat -A "$NAT6_CHAIN" -p tcp --dport 80 -j DNAT --to-destination "[$ENVOY_IP6]:80"
     ip6tables -t nat -A "$NAT6_CHAIN" -p tcp -j DNAT --to-destination "[$ENVOY_IP6]:443"
 
     ip6tables -t nat -I PREROUTING -s "$SUBNET6" -j "$NAT6_CHAIN"

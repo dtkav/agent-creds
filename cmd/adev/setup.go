@@ -816,11 +816,11 @@ func (m setupModel) writeConfig() error {
 			continue
 		}
 		for _, host := range c.Info.Hosts {
-			cfg.Upstream[host] = UpstreamConfig{
-				Credential: c.Path,
-				Methods:    c.Methods,
-				Paths:      c.Paths,
-			}
+			upstream := cfg.Upstream[host]
+			upstream.Credential = c.Path
+			upstream.Methods = c.Methods
+			upstream.Paths = c.Paths
+			cfg.Upstream[host] = upstream
 		}
 	}
 

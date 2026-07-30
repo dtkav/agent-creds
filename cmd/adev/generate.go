@@ -18,16 +18,16 @@ type Generator struct {
 	upstream  map[string]UpstreamConfig
 	vaultHost string
 	vaultPort int
-	vaultDNS  string // optional DNS server for resolving vault host
+	vaultDNS  string        // optional DNS server for resolving vault host
 	cfg       ProjectConfig // full merged config for aenv display
 }
 
-func NewGenerator(rootDir string, cfg ProjectConfig) (*Generator, error) {
+func NewGenerator(rootDir, genDir string, cfg ProjectConfig) (*Generator, error) {
 	vaultHost, vaultPort := cfg.Vault.VaultAddr()
 	g := &Generator{
 		rootDir:   rootDir,
 		certsDir:  filepath.Join(rootDir, "generated", "certs"),
-		genDir:    filepath.Join(rootDir, "generated"),
+		genDir:    genDir,
 		upstream:  cfg.Upstream,
 		vaultHost: vaultHost,
 		vaultPort: vaultPort,
@@ -42,6 +42,7 @@ func NewGenerator(rootDir string, cfg ProjectConfig) (*Generator, error) {
 
 	// Ensure directories
 	os.MkdirAll(g.certsDir, 0755)
+	os.MkdirAll(g.genDir, 0700)
 
 	return g, nil
 }
@@ -98,6 +99,27 @@ func (g *Generator) generateMergedConfig() error {
 	for _, host := range g.hosts {
 		sb.WriteString(fmt.Sprintf("[upstream.%q]\n", host))
 		ucfg := g.upstream[host]
+		if ucfg.Mode != "" {
+			sb.WriteString(fmt.Sprintf("mode = %q\n", ucfg.Mode))
+		}
+		if ucfg.Credential != "" {
+			sb.WriteString(fmt.Sprintf("credential = %q\n", ucfg.Credential))
+		}
+		if ucfg.Scheme != "" {
+			sb.WriteString(fmt.Sprintf("scheme = %q\n", ucfg.Scheme))
+		}
+		if ucfg.Port != 0 {
+			sb.WriteString(fmt.Sprintf("port = %d\n", ucfg.Port))
+		}
+		if ucfg.Address != "" {
+			sb.WriteString(fmt.Sprintf("address = %q\n", ucfg.Address))
+		}
+		if ucfg.Network != "" {
+			sb.WriteString(fmt.Sprintf("network = %q\n", ucfg.Network))
+		}
+		if ucfg.ForwardToken {
+			sb.WriteString("forward_token = true\n")
+		}
 		if len(ucfg.Methods) > 0 {
 			sb.WriteString(fmt.Sprintf("methods = [%s]\n", quotedList(ucfg.Methods)))
 		}
@@ -215,10 +237,7 @@ func accessLogConfig() []map[string]interface{} {
 	}
 }
 
-// tlsFilterChain builds a per-domain filter chain with SNI matching, TLS termination,
-// ext_authz, and routing to the domain's upstream cluster. Used by both the DNAT
-// listener (port 443) and the internal listener (CONNECT TLS bumping).
-func (g *Generator) tlsFilterChain(host, statPrefix string) map[string]interface{} {
+func (g *Generator) routeForHost(host string) map[string]interface{} {
 	safeName := strings.ReplaceAll(host, ".", "_")
 	clusterName := safeName + "_cluster"
 	upstreamCfg := g.upstream[host]
@@ -231,8 +250,9 @@ func (g *Generator) tlsFilterChain(host, statPrefix string) map[string]interface
 			"timeout":              "300s",
 		},
 	}
-	if len(upstreamCfg.Methods) > 0 || len(upstreamCfg.Paths) > 0 || upstreamCfg.Credential != "" {
+	if len(upstreamCfg.Methods) > 0 || len(upstreamCfg.Paths) > 0 || upstreamCfg.Credential != "" || upstreamCfg.Mode != "" {
 		contextExtensions := map[string]string{}
+		contextExtensions["agent_creds_mode"] = upstreamCfg.ModeValue()
 		if upstreamCfg.Credential != "" {
 			contextExtensions["credential"] = upstreamCfg.Credential
 		}
@@ -252,6 +272,14 @@ func (g *Generator) tlsFilterChain(host, statPrefix string) map[string]interface
 		}
 	}
 
+	return route
+}
+
+// tlsFilterChain builds a per-domain filter chain with SNI matching, TLS termination,
+// ext_authz, and routing to the domain's upstream cluster. Used by both the DNAT
+// listener (port 443) and the internal listener (CONNECT TLS bumping).
+func (g *Generator) tlsFilterChain(host, statPrefix string) map[string]interface{} {
+	safeName := strings.ReplaceAll(host, ".", "_")
 	return map[string]interface{}{
 		"filter_chain_match": map[string]interface{}{
 			"server_names": []string{host},
@@ -283,7 +311,7 @@ func (g *Generator) tlsFilterChain(host, statPrefix string) map[string]interface
 					"virtual_hosts": []map[string]interface{}{{
 						"name":    safeName + "_vhost",
 						"domains": []string{"*"},
-						"routes":  []map[string]interface{}{route},
+						"routes":  []map[string]interface{}{g.routeForHost(host)},
 					}},
 				},
 			},
@@ -291,14 +319,106 @@ func (g *Generator) tlsFilterChain(host, statPrefix string) map[string]interface
 	}
 }
 
+func (g *Generator) httpVirtualHosts(hosts []string) []map[string]interface{} {
+	virtualHosts := make([]map[string]interface{}, 0, len(hosts))
+	for _, host := range hosts {
+		safeName := strings.ReplaceAll(host, ".", "_")
+		virtualHosts = append(virtualHosts, map[string]interface{}{
+			"name":    safeName + "_vhost",
+			"domains": []string{host, host + ":*"},
+			"routes":  []map[string]interface{}{g.routeForHost(host)},
+		})
+	}
+	return virtualHosts
+}
+
+// httpFilterChain routes plaintext HTTP by Host header while applying the
+// same vault authorization and credential injection as HTTPS upstreams.
+func (g *Generator) httpFilterChain(hosts []string) map[string]interface{} {
+	return map[string]interface{}{
+		"filters": []map[string]interface{}{{
+			"name": "envoy.filters.network.http_connection_manager",
+			"typed_config": map[string]interface{}{
+				"@type":       "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
+				"stat_prefix": "ingress_http_plaintext",
+				"access_log":  accessLogConfig(),
+				"http_filters": []map[string]interface{}{
+					g.extAuthzFilter(),
+					routerFilter(),
+				},
+				"route_config": map[string]interface{}{
+					"name":          "plaintext_route",
+					"virtual_hosts": g.httpVirtualHosts(hosts),
+				},
+			},
+		}},
+	}
+}
+
+// connectFilterChain accepts HTTPS CONNECT tunnels and plaintext forward-proxy
+// requests on the bwrap runtime's single Envoy port.
+func (g *Generator) connectFilterChain(httpHosts []string) map[string]interface{} {
+	connectRoute := map[string]interface{}{
+		"match": map[string]interface{}{
+			"connect_matcher": map[string]interface{}{},
+		},
+		"route": map[string]interface{}{
+			"cluster": "connect_internal",
+			"upgrade_configs": []map[string]interface{}{{
+				"upgrade_type":   "CONNECT",
+				"connect_config": map[string]interface{}{},
+			}},
+		},
+		"typed_per_filter_config": map[string]interface{}{
+			"envoy.filters.http.ext_authz": map[string]interface{}{
+				"@type":    "type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute",
+				"disabled": true,
+			},
+		},
+	}
+	virtualHosts := g.httpVirtualHosts(httpHosts)
+	virtualHosts = append(virtualHosts, map[string]interface{}{
+		"name":    "connect_vhost",
+		"domains": []string{"*"},
+		"routes":  []map[string]interface{}{connectRoute},
+	})
+	return map[string]interface{}{
+		"filters": []map[string]interface{}{{
+			"name": "envoy.filters.network.http_connection_manager",
+			"typed_config": map[string]interface{}{
+				"@type":       "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
+				"stat_prefix": "connect_proxy",
+				"access_log":  accessLogConfig(),
+				"http_protocol_options": map[string]interface{}{
+					"allow_absolute_url": true,
+				},
+				"http2_protocol_options": map[string]interface{}{
+					"allow_connect": true,
+				},
+				"upgrade_configs": []map[string]interface{}{{
+					"upgrade_type": "CONNECT",
+				}},
+				"http_filters": []map[string]interface{}{
+					g.extAuthzFilter(),
+					routerFilter(),
+				},
+				"route_config": map[string]interface{}{
+					"name":          "connect_route",
+					"virtual_hosts": virtualHosts,
+				},
+			},
+		}},
+	}
+}
+
 // upstreamCluster builds a cluster definition for an upstream domain.
-func upstreamCluster(host string) map[string]interface{} {
+func upstreamCluster(host string, cfg UpstreamConfig) map[string]interface{} {
 	safeName := strings.ReplaceAll(host, ".", "_")
 	clusterName := safeName + "_cluster"
-	return map[string]interface{}{
+	cluster := map[string]interface{}{
 		"name":              clusterName,
 		"type":              "LOGICAL_DNS",
-		"dns_lookup_family": "V4_ONLY",
+		"dns_lookup_family": "AUTO",
 		"load_assignment": map[string]interface{}{
 			"cluster_name": clusterName,
 			"endpoints": []map[string]interface{}{{
@@ -306,29 +426,27 @@ func upstreamCluster(host string) map[string]interface{} {
 					"endpoint": map[string]interface{}{
 						"address": map[string]interface{}{
 							"socket_address": map[string]interface{}{
-								"address":    host,
-								"port_value": 443,
+								"address":    cfg.AddressValue(host),
+								"port_value": cfg.PortValue(),
 							},
 						},
 					},
 				}},
 			}},
 		},
-		"transport_socket": map[string]interface{}{
+	}
+	if cfg.SchemeValue() == "https" {
+		cluster["transport_socket"] = map[string]interface{}{
 			"name": "envoy.transport_sockets.tls",
 			"typed_config": map[string]interface{}{
 				"@type": "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext",
 				"sni":   host,
 			},
-		},
-		// Use real DNS so envoy bypasses the local dns-responder
-		"dns_resolvers": []map[string]interface{}{{
-			"socket_address": map[string]interface{}{
-				"address":    "8.8.8.8",
-				"port_value": 53,
-			},
-		}},
+		}
 	}
+	// Use the Envoy container's resolver. Besides public DNS, this supports
+	// private resolvers installed for Flycast/WireGuard names.
+	return cluster
 }
 
 func (g *Generator) generateEnvoyJSON() error {
@@ -337,12 +455,18 @@ func (g *Generator) generateEnvoyJSON() error {
 
 	var filterChains []map[string]interface{}
 	var internalFilterChains []map[string]interface{}
+	var httpHosts []string
 	var clusters []map[string]interface{}
 
 	for _, host := range g.hosts {
+		cfg := g.upstream[host]
+		clusters = append(clusters, upstreamCluster(host, cfg))
+		if cfg.SchemeValue() == "http" {
+			httpHosts = append(httpHosts, host)
+			continue
+		}
 		filterChains = append(filterChains, g.tlsFilterChain(host, "ingress_http"))
 		internalFilterChains = append(internalFilterChains, g.tlsFilterChain(host, "connect_bump"))
-		clusters = append(clusters, upstreamCluster(host))
 	}
 
 	// Add vault cluster
@@ -386,8 +510,8 @@ func (g *Generator) generateEnvoyJSON() error {
 
 	// Cluster that routes to the internal listener for TLS bumping
 	clusters = append(clusters, map[string]interface{}{
-		"name":              "connect_internal",
-		"type":              "STATIC",
+		"name": "connect_internal",
+		"type": "STATIC",
 		"load_assignment": map[string]interface{}{
 			"cluster_name": "connect_internal",
 			"endpoints": []map[string]interface{}{{
@@ -435,47 +559,9 @@ func (g *Generator) generateEnvoyJSON() error {
 				"ipv4_compat": true,
 			},
 		},
-		"filter_chains": []map[string]interface{}{{
-			"filters": []map[string]interface{}{{
-				"name": "envoy.filters.network.http_connection_manager",
-				"typed_config": map[string]interface{}{
-					"@type":       "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
-					"stat_prefix": "connect_proxy",
-					"access_log":  accessLogConfig(),
-					"http_protocol_options": map[string]interface{}{
-						"allow_absolute_url": true,
-					},
-					"http2_protocol_options": map[string]interface{}{
-						"allow_connect": true,
-					},
-					"upgrade_configs": []map[string]interface{}{{
-						"upgrade_type": "CONNECT",
-					}},
-					"http_filters": []map[string]interface{}{
-						routerFilter(),
-					},
-					"route_config": map[string]interface{}{
-						"name": "connect_route",
-						"virtual_hosts": []map[string]interface{}{{
-							"name":    "connect_vhost",
-							"domains": []string{"*"},
-							"routes": []map[string]interface{}{{
-								"match": map[string]interface{}{
-									"connect_matcher": map[string]interface{}{},
-								},
-								"route": map[string]interface{}{
-									"cluster": "connect_internal",
-									"upgrade_configs": []map[string]interface{}{{
-										"upgrade_type":   "CONNECT",
-										"connect_config": map[string]interface{}{},
-									}},
-								},
-							}},
-						}},
-					},
-				},
-			}},
-		}},
+		"filter_chains": []map[string]interface{}{
+			g.connectFilterChain(httpHosts),
+		},
 	}
 
 	// Listener 3: Internal listener for TLS bumping
@@ -493,14 +579,34 @@ func (g *Generator) generateEnvoyJSON() error {
 		"filter_chains": internalFilterChains,
 	}
 
+	listeners := make([]map[string]interface{}, 0, 4)
+	if len(httpHosts) > 0 {
+		listeners = append(listeners, map[string]interface{}{
+			"name": "http_listener",
+			"address": map[string]interface{}{
+				"socket_address": map[string]interface{}{
+					"address":     "::",
+					"port_value":  80,
+					"ipv4_compat": true,
+				},
+			},
+			"filter_chains": []map[string]interface{}{g.httpFilterChain(httpHosts)},
+		})
+	}
+	if len(filterChains) > 0 {
+		listeners = append(listeners, httpsListener)
+	}
+	if len(httpHosts) > 0 || len(filterChains) > 0 {
+		listeners = append(listeners, connectListener)
+	}
+	if len(internalFilterChains) > 0 {
+		listeners = append(listeners, internalListener)
+	}
+
 	envoyConfig := map[string]interface{}{
 		"static_resources": map[string]interface{}{
-			"listeners": []map[string]interface{}{
-				httpsListener,
-				connectListener,
-				internalListener,
-			},
-			"clusters": clusters,
+			"listeners": listeners,
+			"clusters":  clusters,
 		},
 		"bootstrap_extensions": []map[string]interface{}{{
 			"name": "envoy.bootstrap.internal_listener",

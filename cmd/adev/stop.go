@@ -31,8 +31,17 @@ func runStop(args []string) {
 	mgr := NewInstanceManager(scriptDir)
 	inst := mgr.GetInstance(slug)
 
+	// bwrap runtime: kill the zmx session, slirp4netns helper, and scope
+	// first; the envoy container + network fall through to CleanupInstance.
+	hadBwrap := stopBwrapInstance(scriptDir, slug)
+	if hadBwrap {
+		fmt.Printf("Stopped bwrap session '%s'\n", slug)
+	}
+
 	if inst == nil {
-		fmt.Printf("No instance '%s' found\n", slug)
+		if !hadBwrap {
+			fmt.Printf("No instance '%s' found\n", slug)
+		}
 		return
 	}
 

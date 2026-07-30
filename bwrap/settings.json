@@ -1,0 +1,10 @@
+{
+  "sandbox": {
+    "enabled": true,
+    "autoAllowBashIfSandboxed": true,
+    "network": {
+      "httpProxyPort": 10000,
+      "allowedDomains": ["api.github.com", "api.anthropic.com", "statsig.anthropic.com", "sentry.io"]
+    }
+  }
+}

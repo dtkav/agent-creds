@@ -19,6 +19,11 @@ type Access struct {
 
 	// Timestamp is when the request was made
 	Timestamp time.Time
+
+	// Subject is populated by the verifier from the signed Subject caveat.
+	// It is never accepted from an HTTP header or other caller-controlled
+	// request metadata.
+	Subject *string
 }
 
 // Now returns the request timestamp (required by macaroon.Access interface)
@@ -56,4 +61,11 @@ func (a *Access) GetMethod() string {
 // GetPath returns the request path
 func (a *Access) GetPath() string {
 	return a.Path
+}
+
+// GetSubject returns the subject proven by the macaroon signature. This
+// satisfies SubjectGetter so Subject caveats participate in normal caveat
+// validation without requiring the proxy target to supply identity metadata.
+func (a *Access) GetSubject() *string {
+	return a.Subject
 }

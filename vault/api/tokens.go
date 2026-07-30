@@ -13,14 +13,10 @@ import (
 	tfmac "vault/macaroon"
 )
 
-// TokenStore interface for token minting (injected from main)
-type TokenStore interface {
-	MintToken(hosts []string, methods []string, paths []string, validFor time.Duration, requireAttestation bool) (string, error)
-}
-
 // CreateTokenRequest is the request to create a token
 type CreateTokenRequest struct {
 	ID                 string   `json:"id"`                 // Token name
+	Subject            string   `json:"subject,omitempty"`  // opaque application subject
 	Hosts              []string `json:"hosts,omitempty"`    // Allowed hosts
 	Methods            []string `json:"methods,omitempty"`  // Allowed HTTP methods
 	Paths              []string `json:"paths,omitempty"`    // Allowed path patterns
@@ -111,6 +107,12 @@ func (s *Server) createToken(w http.ResponseWriter, r *http.Request, userID []by
 		writeError(w, http.StatusBadRequest, "id is required")
 		return
 	}
+	if req.Subject != "" {
+		if err := tfmac.ValidateSubject(req.Subject); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 
 	// Check if token already exists
 	existing, err := s.db.GetToken(req.ID)
@@ -135,7 +137,7 @@ func (s *Server) createToken(w http.ResponseWriter, r *http.Request, userID []by
 	}
 
 	// Mint the token
-	tokenStr, err := s.mintToken(req.Hosts, req.Methods, req.Paths, validFor, req.RequireAttestation)
+	tokenStr, err := s.mintToken(req.Subject, req.Hosts, req.Methods, req.Paths, validFor, req.RequireAttestation)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to mint token: "+err.Error())
 		return
@@ -168,13 +170,12 @@ func (s *Server) createToken(w http.ResponseWriter, r *http.Request, userID []by
 }
 
 // mintToken creates a new macaroon token
-func (s *Server) mintToken(hosts, methods, paths []string, validFor time.Duration, requireAttestation bool) (string, error) {
-	keyStore, err := tfmac.LoadKeyStore()
-	if err != nil {
-		return "", err
+func (s *Server) mintToken(subject string, hosts, methods, paths []string, validFor time.Duration, requireAttestation bool) (string, error) {
+	if s.keyStore == nil {
+		return "", &tokenError{"vault token store is not configured"}
 	}
 
-	m, err := keyStore.NewToken()
+	m, err := s.keyStore.NewToken()
 	if err != nil {
 		return "", err
 	}
@@ -186,6 +187,17 @@ func (s *Server) mintToken(hosts, methods, paths []string, validFor time.Duratio
 		NotAfter:  now.Add(validFor).Unix(),
 	}); err != nil {
 		return "", err
+	}
+
+	// Add subject caveat
+	if subject != "" {
+		caveat, err := tfmac.NewSubjectCaveat(subject)
+		if err != nil {
+			return "", err
+		}
+		if err := m.Add(caveat); err != nil {
+			return "", err
+		}
 	}
 
 	// Add host caveat
@@ -214,10 +226,10 @@ func (s *Server) mintToken(hosts, methods, paths []string, validFor time.Duratio
 
 	// Add attestation requirement
 	if requireAttestation {
-		if len(keyStore.EncryptionKey) == 0 {
+		if len(s.keyStore.EncryptionKey) == 0 {
 			return "", errNoEncryptionKey
 		}
-		if err := attestation.Add3PCaveat(m, keyStore.EncryptionKey); err != nil {
+		if err := attestation.Add3PCaveat(m, s.keyStore.EncryptionKey); err != nil {
 			return "", err
 		}
 	}
@@ -313,19 +325,18 @@ func (s *Server) getToken(w http.ResponseWriter, r *http.Request, userID []byte,
 	}
 
 	// Create discharge
-	keyStore, err := tfmac.LoadKeyStore()
-	if err != nil {
+	if s.keyStore == nil {
 		writeError(w, http.StatusInternalServerError, "failed to load keys")
 		return
 	}
 
 	// Create a session manager for discharge creation
-	sessionMgr := attestation.NewSessionManager(keyStore.EncryptionKey)
+	sessionMgr := attestation.NewSessionManager(s.keyStore.EncryptionKey)
 	// Note: In the full implementation, we'd validate the user's FIDO2 assertion here
 	// For now, we assume the session is already authenticated via WebAuthn
 
 	// Create discharge without YubiKey (server-side attestation)
-	discharge, err := createServerSideDischarge(m, keyStore.EncryptionKey)
+	discharge, err := createServerSideDischarge(m, s.keyStore.EncryptionKey)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create discharge: "+err.Error())
 		return

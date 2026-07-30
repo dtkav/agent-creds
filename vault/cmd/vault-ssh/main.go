@@ -120,6 +120,8 @@ Commands:
   help              Show this help
   whoami            Show your identity and status
   mint <host>       Mint a token for the given host
+    --subject              Restrict to an opaque application subject
+    --no-host              Omit host caveat (admin only; for isolated support sessions)
     --methods              Restrict HTTP methods (e.g., GET,POST)
     --paths                Restrict paths (e.g., /v1/*)
     --valid-for            Token validity (e.g., 1h, 24h)
@@ -149,7 +151,7 @@ func cmdMint(sess ssh.Session, userID []byte, status string, args []string) {
 	}
 
 	if len(args) == 0 {
-		fmt.Fprintln(sess, "Usage: mint <host> [--methods GET,POST] [--paths /v1/*] [--valid-for 1h]")
+		fmt.Fprintln(sess, "Usage: mint <host> [--subject <subject>] [--no-host] [--methods GET,POST] [--paths /v1/*] [--valid-for 1h]")
 		fmt.Fprintln(sess, "\nConfigured hosts:")
 		for _, host := range configuredHosts {
 			fmt.Fprintf(sess, "  %s\n", host)
@@ -161,13 +163,22 @@ func cmdMint(sess ssh.Session, userID []byte, status string, args []string) {
 
 	// Parse optional flags
 	var methods, paths []string
+	var subject string
 	validFor := 24 * time.Hour
 	requireAttestation := false
+	noHost := false
 
 	for i := 1; i < len(args); i++ {
 		switch args[i] {
 		case "--require-attestation":
 			requireAttestation = true
+		case "--no-host":
+			noHost = true
+		case "--subject":
+			if i+1 < len(args) {
+				subject = args[i+1]
+				i++
+			}
 		case "--methods":
 			if i+1 < len(args) {
 				methods = strings.Split(args[i+1], ",")
@@ -189,6 +200,10 @@ func cmdMint(sess ssh.Session, userID []byte, status string, args []string) {
 				i++
 			}
 		}
+	}
+	if noHost && status != UserStatusAdmin {
+		fmt.Fprintln(sess, "Error: --no-host requires admin status.")
+		return
 	}
 
 	// Check encryption key if attestation is required
@@ -222,10 +237,23 @@ func cmdMint(sess ssh.Session, userID []byte, status string, args []string) {
 		}
 	}
 
-	// Always restrict to the requested host
-	if err := m.Add(&tfmac.HostCaveat{Hosts: []string{host}}); err != nil {
-		fmt.Fprintf(sess, "Error adding host caveat: %v\n", err)
-		return
+	if subject != "" {
+		caveat, err := tfmac.NewSubjectCaveat(subject)
+		if err != nil {
+			fmt.Fprintf(sess, "Error: %v\n", err)
+			return
+		}
+		if err := m.Add(caveat); err != nil {
+			fmt.Fprintf(sess, "Error adding subject caveat: %v\n", err)
+			return
+		}
+	}
+
+	if !noHost {
+		if err := m.Add(&tfmac.HostCaveat{Hosts: []string{host}}); err != nil {
+			fmt.Fprintf(sess, "Error adding host caveat: %v\n", err)
+			return
+		}
 	}
 
 	if len(methods) > 0 {

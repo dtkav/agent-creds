@@ -58,6 +58,9 @@ Usage:
   mint test-attestation        Test YubiKey attestation
 
 Examples:
+  # Create a subject-scoped support token
+  mint create --subject customer-123 --valid-for 8h
+
   # Create an .akey file for Gmail drafts (requires attestation)
   mint create --hosts gmail.googleapis.com \
               --methods POST \
@@ -82,6 +85,7 @@ Environment:
 func createCmd(args []string) {
 	fs := flag.NewFlagSet("create", flag.ExitOnError)
 	hosts := fs.String("hosts", "", "Comma-separated list of allowed hosts")
+	subject := fs.String("subject", "", "Opaque subject scope")
 	methods := fs.String("methods", "", "Comma-separated list of allowed HTTP methods")
 	paths := fs.String("paths", "", "Comma-separated list of allowed path patterns")
 	validFor := fs.Duration("valid-for", 24*time.Hour, "Token validity duration")
@@ -119,6 +123,17 @@ func createCmd(args []string) {
 		NotAfter:  notAfterTime.Unix(),
 	}); err != nil {
 		log.Fatalf("failed to add validity window: %v", err)
+	}
+
+	// Add subject caveat
+	if *subject != "" {
+		caveat, err := tfmac.NewSubjectCaveat(*subject)
+		if err != nil {
+			log.Fatalf("invalid subject: %v", err)
+		}
+		if err := m.Add(caveat); err != nil {
+			log.Fatalf("failed to add subject caveat: %v", err)
+		}
 	}
 
 	// Add host caveat
@@ -168,6 +183,9 @@ func createCmd(args []string) {
 	if *showCaveats {
 		fmt.Fprintln(os.Stderr, "Caveats:")
 		fmt.Fprintf(os.Stderr, "  ValidityWindow: %s to %s\n", notBeforeTime.Format(time.RFC3339), notAfterTime.Format(time.RFC3339))
+		if *subject != "" {
+			fmt.Fprintf(os.Stderr, "  Subject: %s\n", *subject)
+		}
 		if *hosts != "" {
 			fmt.Fprintf(os.Stderr, "  Hosts: %s\n", *hosts)
 		}
@@ -190,6 +208,7 @@ func createCmd(args []string) {
 func createCmdOld(args []string) {
 	fs := flag.NewFlagSet("mint", flag.ExitOnError)
 	hosts := fs.String("hosts", "", "Comma-separated list of allowed hosts")
+	subject := fs.String("subject", "", "Opaque subject scope")
 	methods := fs.String("methods", "", "Comma-separated list of allowed HTTP methods")
 	paths := fs.String("paths", "", "Comma-separated list of allowed path patterns")
 	validFor := fs.Duration("valid-for", 24*time.Hour, "Token validity duration")
@@ -205,6 +224,9 @@ func createCmdOld(args []string) {
 
 	// Build args for createCmd
 	var newArgs []string
+	if *subject != "" {
+		newArgs = append(newArgs, "--subject", *subject)
+	}
 	if *hosts != "" {
 		newArgs = append(newArgs, "--hosts", *hosts)
 	}
@@ -355,6 +377,8 @@ func inspectCmd(args []string) {
 			fmt.Printf("  ValidityWindow: %s to %s\n", notBefore.Format(time.RFC3339), notAfter.Format(time.RFC3339))
 		case *tfmac.HostCaveat:
 			fmt.Printf("  Hosts: %s\n", strings.Join(cv.Hosts, ", "))
+		case *tfmac.SubjectCaveat:
+			fmt.Printf("  Subject: %s\n", cv.Subject)
 		case *tfmac.MethodCaveat:
 			fmt.Printf("  Methods: %s\n", strings.Join(cv.Methods, ", "))
 		case *tfmac.PathCaveat:

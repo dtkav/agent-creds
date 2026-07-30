@@ -7,20 +7,23 @@ import (
 	"strings"
 
 	"vault/db"
+	tfmac "vault/macaroon"
 )
 
 // Server is the HTTP API server
 type Server struct {
-	db      *db.DB
-	mux     *http.ServeMux
+	db       *db.DB
+	mux      *http.ServeMux
 	webauthn *WebAuthnHandler
+	keyStore *tfmac.KeyStore
 }
 
 // NewServer creates a new API server
-func NewServer(database *db.DB, rpID, rpOrigin, rpName string) (*Server, error) {
+func NewServer(database *db.DB, keyStore *tfmac.KeyStore, rpID, rpOrigin, rpName string) (*Server, error) {
 	s := &Server{
-		db:  database,
-		mux: http.NewServeMux(),
+		db:       database,
+		mux:      http.NewServeMux(),
+		keyStore: keyStore,
 	}
 
 	// Initialize WebAuthn handler

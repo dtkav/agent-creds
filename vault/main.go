@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -225,8 +226,51 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 		}
 	}
 
-	// Look up credential config for this host
-	cred, ok := s.credentials[host]
+	mode := contextExtensions["agent_creds_mode"]
+	if mode == "identity" {
+		if result.Subject == nil {
+			reason := "identity route requires a subject-scoped token"
+			s.logAudit("deny", access.Method, host, access.Path, reason, tokenID)
+			return &authv3.CheckResponse{
+				Status: &status.Status{Code: int32(codes.PermissionDenied)},
+				HttpResponse: &authv3.CheckResponse_DeniedResponse{
+					DeniedResponse: &authv3.DeniedHttpResponse{
+						Status: &typev3.HttpStatus{Code: typev3.StatusCode_Forbidden},
+						Body:   "A user- or relay-scoped support token is required",
+					},
+				},
+			}, nil
+		}
+		log.Printf("Identity verified for %s %s %s", access.Method, host, access.Path)
+		s.logAudit("allow", access.Method, host, access.Path, "", tokenID)
+		return &authv3.CheckResponse{
+			Status: &status.Status{Code: int32(codes.OK)},
+			HttpResponse: &authv3.CheckResponse_OkResponse{
+				OkResponse: &authv3.OkHttpResponse{Headers: identityHeaderOptions(result)},
+			},
+		}, nil
+	}
+	if mode != "" && mode != "credential" {
+		reason := fmt.Sprintf("unknown agent-creds route mode %q", mode)
+		s.logAudit("deny", access.Method, host, access.Path, reason, tokenID)
+		return &authv3.CheckResponse{
+			Status: &status.Status{Code: int32(codes.PermissionDenied)},
+			HttpResponse: &authv3.CheckResponse_DeniedResponse{
+				DeniedResponse: &authv3.DeniedHttpResponse{
+					Status: &typev3.HttpStatus{Code: typev3.StatusCode_Forbidden},
+					Body:   "Unknown agent-creds route mode",
+				},
+			},
+		}, nil
+	}
+
+	// Envoy binds a route to a configured vault credential path. Fall back to
+	// the host key for legacy configs that predate named credential paths.
+	credentialKey := host
+	if configured := strings.TrimPrefix(contextExtensions["credential"], "/"); configured != "" {
+		credentialKey = configured
+	}
+	cred, ok := s.credentials[credentialKey]
 	if !ok {
 		log.Printf("Auth failed: no credentials configured for %s", host)
 		s.logAudit("deny", access.Method, host, access.Path, "no credentials configured for host", tokenID)
@@ -269,8 +313,30 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 	}, nil
 }
 
+func identityHeaderOptions(result *macaroon.VerifyResult) []*corev3.HeaderValueOption {
+	headers := result.IdentityHeaders()
+	keys := make([]string, 0, len(headers))
+	for key := range headers {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	options := make([]*corev3.HeaderValueOption, 0, len(keys))
+	for _, key := range keys {
+		options = append(options, &corev3.HeaderValueOption{
+			Header:       &corev3.HeaderValue{Key: key, Value: headers[key]},
+			AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
+		})
+	}
+	return options
+}
+
 // resolveCredentialHeaders returns the headers to inject based on credential type
-func (s *authServer) resolveCredentialHeaders(cred domainCredential, host string, httpReq interface{ GetMethod() string; GetPath() string; GetHeaders() map[string]string }) ([]*corev3.HeaderValueOption, error) {
+func (s *authServer) resolveCredentialHeaders(cred domainCredential, host string, httpReq interface {
+	GetMethod() string
+	GetPath() string
+	GetHeaders() map[string]string
+}) ([]*corev3.HeaderValueOption, error) {
 	switch cred.authType {
 	case "static":
 		return []*corev3.HeaderValueOption{{
@@ -395,7 +461,7 @@ func main() {
 		vaultCfg = &vault.Config{
 			SigningKey:    os.Getenv("MACAROON_SIGNING_KEY"),
 			EncryptionKey: os.Getenv("MACAROON_ENCRYPTION_KEY"),
-			Credentials:  make(map[string]vault.CredentialConfig),
+			Credentials:   make(map[string]vault.CredentialConfig),
 		}
 	}
 
@@ -442,9 +508,9 @@ func main() {
 		case "sigv4":
 			dc.authType = "sigv4"
 			dc.sigv4Config = &sigv4.Config{
-				Region:         cred.SigV4Config.Region,
-				Service:        cred.SigV4Config.Service,
-				AccessKeyID:    cred.SigV4Config.AccessKeyID,
+				Region:          cred.SigV4Config.Region,
+				Service:         cred.SigV4Config.Service,
+				AccessKeyID:     cred.SigV4Config.AccessKeyID,
 				SecretAccessKey: cred.SigV4Config.SecretAccessKey,
 			}
 		case "basic":
@@ -529,7 +595,7 @@ func main() {
 		rpName = "Agent Credentials"
 	}
 
-	apiServer, err := api.NewServer(database, rpID, rpOrigin, rpName)
+	apiServer, err := api.NewServer(database, keyStore, rpID, rpOrigin, rpName)
 	if err != nil {
 		log.Fatalf("Failed to create API server: %v", err)
 	}

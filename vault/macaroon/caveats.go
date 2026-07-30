@@ -10,16 +10,18 @@ import (
 
 // Caveat type constants (using user-registerable range: 1<<32 to 1<<48-1)
 const (
-	CavAPIHost    macaroon.CaveatType = 1<<32 + 1
-	CavAPIMethod  macaroon.CaveatType = 1<<32 + 2
-	CavAPIPath    macaroon.CaveatType = 1<<32 + 3
+	CavAPIHost     macaroon.CaveatType = 1<<32 + 1
+	CavAPIMethod   macaroon.CaveatType = 1<<32 + 2
+	CavAPIPath     macaroon.CaveatType = 1<<32 + 3
 	CavAttestation macaroon.CaveatType = 1<<32 + 4
+	CavSubject     macaroon.CaveatType = 1<<32 + 5
 )
 
 func init() {
 	macaroon.RegisterCaveatType(&HostCaveat{})
 	macaroon.RegisterCaveatType(&MethodCaveat{})
 	macaroon.RegisterCaveatType(&PathCaveat{})
+	macaroon.RegisterCaveatType(&SubjectCaveat{})
 }
 
 // HostCaveat restricts token to specific API hosts

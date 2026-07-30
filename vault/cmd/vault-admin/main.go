@@ -57,6 +57,7 @@ User Commands:
 
 Token Commands:
   vault-admin token create <id> [options]
+    --subject <subject>       Restrict to an opaque application subject
     --hosts <hosts>           Comma-separated list of allowed hosts
     --methods <methods>       Comma-separated list of HTTP methods
     --paths <patterns>        Comma-separated list of path patterns
@@ -309,6 +310,7 @@ func tokenCmd(args []string) {
 func tokenCreate(args []string) {
 	fs := flag.NewFlagSet("token create", flag.ExitOnError)
 	hosts := fs.String("hosts", "", "Comma-separated list of allowed hosts")
+	subject := fs.String("subject", "", "Opaque application subject scope")
 	methods := fs.String("methods", "", "Comma-separated list of HTTP methods")
 	paths := fs.String("paths", "", "Comma-separated list of path patterns")
 	validFor := fs.Duration("valid-for", 8760*time.Hour, "Token validity duration")
@@ -347,6 +349,16 @@ func tokenCreate(args []string) {
 	}
 
 	// Add caveats
+	if *subject != "" {
+		caveat, err := tfmac.NewSubjectCaveat(*subject)
+		if err != nil {
+			log.Fatalf("Invalid subject: %v", err)
+		}
+		if err := m.Add(caveat); err != nil {
+			log.Fatalf("Failed to add subject caveat: %v", err)
+		}
+	}
+
 	if *hosts != "" {
 		hostList := splitAndTrim(*hosts)
 		if err := m.Add(&tfmac.HostCaveat{Hosts: hostList}); err != nil {
@@ -466,6 +478,8 @@ func tokenGet(args []string) {
 				fmt.Printf("  ValidityWindow: %s to %s\n", notBefore.Format(time.RFC3339), notAfter.Format(time.RFC3339))
 			case *tfmac.HostCaveat:
 				fmt.Printf("  Hosts: %s\n", strings.Join(cv.Hosts, ", "))
+			case *tfmac.SubjectCaveat:
+				fmt.Printf("  Subject: %s\n", cv.Subject)
 			case *tfmac.MethodCaveat:
 				fmt.Printf("  Methods: %s\n", strings.Join(cv.Methods, ", "))
 			case *tfmac.PathCaveat:

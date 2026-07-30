@@ -3,31 +3,32 @@
 
 name = "codex"
 description = "OpenAI Codex CLI coding agent"
+entrypoint = "codex --dangerously-bypass-approvals-and-sandbox"
 plugins = ["python", "nodejs", "go", "rust", "cli-tools", "build-tools", "github"]
 
 nix = """
 let
-  version = "0.128.0";
+  version = "0.144.1";
   platforms = {
     "x86_64-linux" = {
       suffix = "linux-x64";
       triple = "x86_64-unknown-linux-musl";
-      hash = "sha512-2lnSPA05CRRuKAzFW8BCmmNCSieDcToLwfC2ALLbBYilGLgzhRibjlDglK9F1BkEzfohSSWJu4PBbRu/aG60lQ==";
+      hash = "sha512-HNGVI+BulrOaC/0IzBvd6EL62j7LrlbFKibrhw6hZjjCjAeUYzRB2jB4qDzXN1NfqDi6Xrvniof3kwbwab24lg==";
     };
     "aarch64-linux" = {
       suffix = "linux-arm64";
       triple = "aarch64-unknown-linux-musl";
-      hash = "sha512-+SvH73H60qvCXFuQGP/EsmR//s1hHMBR22PvJkXvM/hdnTIGucx+JqRUjAWdmmQ1IU6j3kgwVvdLW/6ICB+M6w==";
+      hash = "sha512-451o15+XtaXCCb35t/KCyyPqXHnTPxPxtdqEYOnE3e4sH5AfnI/uVJwfdjOksMG6vRLy6R+fLvSDOMguRFLmQw==";
     };
     "x86_64-darwin" = {
       suffix = "darwin-x64";
       triple = "x86_64-apple-darwin";
-      hash = "sha512-SDbn6fO22Puy8xmMIbZi4f2znMrUEPwABApke4mo+4ihaauwuVjeqzXvW5SPJz5ty/bG11/mSupQgReT7T8BBw==";
+      hash = "sha512-K2g3Q3tNxzFhV0SuzO6HcsYK7EQrp/o4HyeReyhkwVrwwUPoYwyIbB0IRjHIiDzRhbKriDccid2iyF5aPqdTcg==";
     };
     "aarch64-darwin" = {
       suffix = "darwin-arm64";
       triple = "aarch64-apple-darwin";
-      hash = "sha512-w+6zohfHx/kHBdles/CyFKaY57u9I3nK8QI9+NrdwMliKA0b7xn13yblRNkMpe09j6vL1oAWoxYsMOQ/vjBGug==";
+      hash = "sha512-dABeDK+ATqMG54MGBd3VjpKfh5EOoqx9PKVQB2QYDaEXx3F6CdUCXue5QIMfr4OxziUj8pUcLAQyd+KFqiTUFw==";
     };
   };
   platform = platforms.${pkgs.stdenv.hostPlatform.system} or
@@ -46,12 +47,12 @@ let
       runHook preInstall
       mkdir -p "$out/libexec/codex"
       cp -R "vendor/${platform.triple}/"* "$out/libexec/codex/"
-      chmod +x "$out/libexec/codex/codex/codex"
-      chmod +x "$out/libexec/codex/path/"* 2>/dev/null || true
+      chmod +x "$out/libexec/codex/bin/"*
+      chmod +x "$out/libexec/codex/codex-path/"* 2>/dev/null || true
       mkdir -p "$out/bin"
-      makeWrapper "$out/libexec/codex/codex/codex" "$out/bin/codex" \
+      makeWrapper "$out/libexec/codex/bin/codex" "$out/bin/codex" \
         --add-flags "--dangerously-bypass-approvals-and-sandbox" \
-        --prefix PATH : "$out/libexec/codex/path"
+        --prefix PATH : "$out/libexec/codex/codex-path"
       runHook postInstall
     '';
   };

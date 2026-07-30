@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+msg_file="$1"
+
+first_line="$(grep -v '^#' "$msg_file" | sed -e '/./,$!d' | head -n 1)"
+
+if [ -z "$first_line" ]; then
+  exit 0
+fi
+
+pattern='^([a-z]+!?:|(fixup|squash|amend)! [a-z]+!?:)'
+existing_prefixes='build, chore, ci, debug, deps, docs, feat, fix, fixup, flags, lint, perf, refactor, test, tools, types, ui, version, wip'
+
+if ! printf '%s' "$first_line" | grep -Eq "$pattern"; then
+  echo "commit-msg: subject must match '<type>[!]: <subject>' or '<fixup|squash|amend>! <type>[!]: <subject>' with a lowercase type; options: ${existing_prefixes}; got: ${first_line}" >&2
+  exit 1
+fi
+
+exit 0

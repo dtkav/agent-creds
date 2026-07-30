@@ -326,19 +326,19 @@ func secretsShow(args []string) {
 
 		// Masked secrets
 		if cc.Token != "" {
-			fmt.Printf("  token: %s\n", maskSecret(cc.Token))
+			fmt.Printf("  token: %s\n", maskSecret(string(cc.Token)))
 		}
 		if cc.Username != "" {
 			fmt.Printf("  username: %s\n", cc.Username)
 		}
 		if cc.Password != "" {
-			fmt.Printf("  password: %s\n", maskSecret(cc.Password))
+			fmt.Printf("  password: %s\n", maskSecret(string(cc.Password)))
 		}
 		if cc.AccessKeyID != "" {
-			fmt.Printf("  access_key_id: %s\n", maskSecret(cc.AccessKeyID))
+			fmt.Printf("  access_key_id: %s\n", maskSecret(string(cc.AccessKeyID)))
 		}
 		if cc.SecretAccessKey != "" {
-			fmt.Printf("  secret_access_key: %s\n", maskSecret(cc.SecretAccessKey))
+			fmt.Printf("  secret_access_key: %s\n", maskSecret(string(cc.SecretAccessKey)))
 		}
 
 		// Host hints from capabilities
@@ -393,20 +393,39 @@ func showCapabilities(credentials map[string]credentialShowConfig, path string) 
 
 // credentialShowConfig mirrors the credential fields needed for display.
 type credentialShowConfig struct {
-	Type           string                  `yaml:"type"`
-	Token          string                  `yaml:"token,omitempty"`
-	Username       string                  `yaml:"username,omitempty"`
-	Password       string                  `yaml:"password,omitempty"`
-	Env            string                  `yaml:"env,omitempty"`
-	EnvUser        string                  `yaml:"env_user,omitempty"`
-	EnvPass        string                  `yaml:"env_pass,omitempty"`
-	AccessKeyID    string                  `yaml:"access_key_id,omitempty"`
-	SecretAccessKey string                 `yaml:"secret_access_key,omitempty"`
-	Capabilities   *credentialShowCaps     `yaml:"capabilities,omitempty"`
+	Type            string               `yaml:"type"`
+	Token           credentialShowSecret `yaml:"token,omitempty"`
+	Username        credentialShowSecret `yaml:"username,omitempty"`
+	Password        credentialShowSecret `yaml:"password,omitempty"`
+	Env             string               `yaml:"env,omitempty"`
+	EnvUser         string               `yaml:"env_user,omitempty"`
+	EnvPass         string               `yaml:"env_pass,omitempty"`
+	AccessKeyID     credentialShowSecret `yaml:"access_key_id,omitempty"`
+	SecretAccessKey credentialShowSecret `yaml:"secret_access_key,omitempty"`
+	Capabilities    *credentialShowCaps  `yaml:"capabilities,omitempty"`
+}
+
+// credentialShowSecret accepts either a literal scalar or the {$secret: ref}
+// form written by `actl vault credentials add`. It never resolves the ref;
+// masked inventory output must not load or print secret values.
+type credentialShowSecret string
+
+func (s *credentialShowSecret) UnmarshalYAML(node *yaml.Node) error {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		*s = credentialShowSecret(node.Value)
+		return nil
+	case yaml.MappingNode:
+		if len(node.Content) == 2 && node.Content[0].Value == "$secret" {
+			*s = credentialShowSecret("$secret:" + node.Content[1].Value)
+			return nil
+		}
+	}
+	return fmt.Errorf("credential secret must be a string or $secret reference")
 }
 
 type credentialShowCaps struct {
-	Hosts     []string              `yaml:"hosts,omitempty"`
+	Hosts     []string                 `yaml:"hosts,omitempty"`
 	Endpoints []credentialShowEndpoint `yaml:"endpoints,omitempty"`
 }
 

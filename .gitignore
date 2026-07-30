@@ -37,6 +37,7 @@ agent-creds.toml
 # Sandbox agent config mount directories
 claude-dev/claude-config/
 claude-dev/codex-config/
+claude-dev/pi-config/
 
 # Local sandbox customizations
 local/

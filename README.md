@@ -63,7 +63,7 @@ This turns "full API access" into precisely scoped capabilities that match the a
 cat > agent-creds.toml << 'EOF'
 [sandbox]
 name = "myproject"
-# Bundled agents: "claude" or "codex"
+# Bundled agents: "claude", "codex", or "pi"
 agent = "claude"
 
 [upstream."api.anthropic.com"]
@@ -119,7 +119,16 @@ sandbox config.
 
 ```toml
 [sandbox]
-agent = "claude"  # or "codex"
+agent = "claude"  # or "codex" / "pi"
+```
+
+The Pi profile includes OpenRouter network access. To inject an OpenRouter API
+key through the vault, configure the upstream with a bearer credential whose
+environment variable is `OPENROUTER_API_KEY`:
+
+```toml
+[upstream."openrouter.ai"]
+credential = "/openrouter"
 ```
 
 ### actl

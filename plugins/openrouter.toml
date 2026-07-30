@@ -1,0 +1,7 @@
+# OpenRouter Plugin
+# API access for OpenRouter-backed models
+
+name = "openrouter"
+description = "OpenRouter API access"
+
+[upstream."openrouter.ai"]

@@ -4,7 +4,7 @@
 
 [sandbox]
 name = "myproject"
-# Bundled agents: "claude" or "codex"
+# Bundled agents: "claude", "codex", or "pi"
 # agent = "claude"
 
 # Browser forwarding: allow sandbox to open URLs in host browser
@@ -29,6 +29,26 @@ name = "myproject"
 [upstream."api.github.com"]
 # methods = ["GET"]
 # paths = ["/repos/myorg/**"]
+# Set `forward_token = true` when the application supplies its own macaroon;
+# the route still selects `credential`, but adev does not mint an env token.
+
+# Identity-only ingress: verifies a subject macaroon and forwards Vault-owned
+# x-agent-creds-* identity headers without selecting or injecting a credential.
+# `address` fixes the upstream origin. `network` is attached to Envoy only;
+# the sandbox cannot use it as a route around the proxy.
+# [upstream."service.internal"]
+# mode = "identity"
+# scheme = "http"
+# port = 8890
+# address = "adev-service-sandbox"
+# network = "adev-service"
+# methods = ["POST"]
+# paths = ["/graphql"]
+
+# Pi supports OpenRouter via OPENROUTER_API_KEY. Set credential to the path of
+# a bearer credential configured with that environment variable.
+[upstream."openrouter.ai"]
+# credential = "/openrouter"
 
 # Claude Code requires these endpoints for API and OAuth
 [upstream."api.anthropic.com"]

@@ -92,6 +92,9 @@ func (c *PathCaveat) Prohibits(f macaroon.Access) error {
 	}
 
 	path := a.GetPath()
+	if index := strings.IndexByte(path, '?'); index >= 0 {
+		path = path[:index]
+	}
 	for _, pattern := range c.Patterns {
 		if matchPath(pattern, path) {
 			return nil

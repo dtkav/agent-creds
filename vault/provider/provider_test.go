@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"encoding/base64"
 	"testing"
 )
 
@@ -53,5 +54,23 @@ func TestValidateHeaders(t *testing.T) {
 				t.Fatalf("ValidateHeaders() error = %v, wantErr %v", err, test.wantErr)
 			}
 		})
+	}
+}
+
+func TestBasicProviderAllowsExplicitEmptyPassword(t *testing.T) {
+	built, err := newBasicProvider(map[string]any{
+		"username": "sk_test_example",
+		"password": "",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := built.Resolve(context.Background(), Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("sk_test_example:"))
+	if got := result.Headers["authorization"]; got != want {
+		t.Fatalf("authorization = %q, want %q", got, want)
 	}
 }

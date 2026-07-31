@@ -58,7 +58,7 @@ func newBasicProvider(config map[string]any) (CredentialProvider, error) {
 	if err != nil {
 		return nil, err
 	}
-	password, err := requiredString(config, "password")
+	password, err := configuredString(config, "password", true)
 	if err != nil {
 		return nil, err
 	}
@@ -161,6 +161,10 @@ func (p *sigV4Provider) Resolve(_ context.Context, request Request) (Result, err
 }
 
 func requiredString(config map[string]any, key string) (string, error) {
+	return configuredString(config, key, false)
+}
+
+func configuredString(config map[string]any, key string, allowEmpty bool) (string, error) {
 	value, ok := config[key]
 	if !ok {
 		return "", fmt.Errorf("%s is required", key)
@@ -169,8 +173,10 @@ func requiredString(config map[string]any, key string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("%s must be a string", key)
 	}
-	text = strings.TrimSpace(text)
-	if text == "" {
+	if !allowEmpty {
+		text = strings.TrimSpace(text)
+	}
+	if text == "" && !allowEmpty {
 		return "", fmt.Errorf("%s is required", key)
 	}
 	return text, nil

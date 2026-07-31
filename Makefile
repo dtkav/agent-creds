@@ -41,7 +41,7 @@ test:
 	bin/arun curl -v https://api.stripe.com/v1/customers -H "Authorization: Bearer $$(cat /creds/stripe)"
 
 # Build all binaries
-binaries: bin/actl bin/adev bin/aenv bin/arun bin/odev bin/cdp-proxy bin/tcp-bridge bin/mint bin/mintfs bin/vault-admin bin/vault-ssh
+binaries: bin/actl bin/adev bin/aenv bin/arun bin/cdp-proxy bin/tcp-bridge bin/mint bin/mintfs bin/vault-admin bin/vault-ssh
 
 
 # Root-level cmd binaries
@@ -56,9 +56,6 @@ bin/arun: cmd/arun/main.go cmd/arun/go.mod
 
 bin/aenv: cmd/aenv/main.go cmd/aenv/go.mod
 	cd cmd/aenv && go build -o ../../bin/aenv .
-
-bin/odev: cmd/odev/main.go cmd/odev/go.mod
-	cd cmd/odev && go build -o ../../bin/odev .
 
 bin/cdp-proxy: cmd/cdp-proxy/main.go cmd/cdp-proxy/go.mod
 	cd cmd/cdp-proxy && go build -o ../../bin/cdp-proxy .

@@ -172,16 +172,19 @@ func sopsEncrypt(plainPath string) ([]byte, error) {
 	return cmd.Output()
 }
 
-func vaultTemplate(signingKey string) string {
+func vaultTemplate(signingKey, encryptionKey string) string {
 	return fmt.Sprintf(`secrets:
   vault:
     SIGNING_KEY: %s
+    ENCRYPTION_KEY: %s
 
 signing_key:
   $secret: 'vault#SIGNING_KEY'
+encryption_key:
+  $secret: 'vault#ENCRYPTION_KEY'
 
 credentials: {}
-`, signingKey)
+`, signingKey, encryptionKey)
 }
 
 func secretsInit() {
@@ -215,6 +218,12 @@ func secretsInit() {
 		fmt.Fprintf(os.Stderr, "Error generating signing key: %v\n", err)
 		os.Exit(1)
 	}
+	// Third-party caveats use a separate 32-byte encryption key.
+	encKey := make([]byte, 32)
+	if _, err := rand.Read(encKey); err != nil {
+		fmt.Fprintf(os.Stderr, "Error generating encryption key: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Write template to temp file, encrypt, write to final path
 	tmpFile, err := os.CreateTemp("", "vault-*.yaml")
@@ -225,7 +234,10 @@ func secretsInit() {
 	tmpPath := tmpFile.Name()
 	defer os.Remove(tmpPath)
 
-	if _, err := tmpFile.WriteString(vaultTemplate(base64.StdEncoding.EncodeToString(sigKey))); err != nil {
+	if _, err := tmpFile.WriteString(vaultTemplate(
+		base64.StdEncoding.EncodeToString(sigKey),
+		base64.StdEncoding.EncodeToString(encKey),
+	)); err != nil {
 		tmpFile.Close()
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)

@@ -189,6 +189,8 @@ func main() {
 		runList()
 	case "console", "c":
 		runConsole(args)
+	case "start":
+		runStart(args)
 	case "stop":
 		runStop(args)
 	case "generate-nix", "nix":
@@ -212,6 +214,7 @@ Usage:
 Commands:
   list, ls        Interactive TUI showing running instances (default)
   console [name]  Start or attach to a sandbox
+  start [name]    Start a bwrap sandbox without attaching
   setup           Interactive TUI for credential configuration
   stop [name]     Stop a running instance
   help            Show this help
@@ -222,6 +225,7 @@ Examples:
   adev              Show running instances (TUI)
   adev console      Start/attach to sandbox for current directory
   adev console foo  Start/attach to sandbox named "foo"
+  adev start        Start a bwrap sandbox in the background
   adev stop         Stop the sandbox for current directory
   adev stop foo     Stop the sandbox named "foo"`)
 }

@@ -17,13 +17,13 @@ type ContainerInfo struct {
 
 // Instance represents a running adev instance.
 type Instance struct {
-	Name              string
-	Slug              string
-	Status            string // "running", "partial", "stopped"
-	Sandbox           *ContainerInfo
-	Envoy             *ContainerInfo
-	Net               *ContainerInfo
-	HasNetwork        bool
+	Name                  string
+	Slug                  string
+	Status                string // "running", "partial", "stopped"
+	Sandbox               *ContainerInfo
+	Envoy                 *ContainerInfo
+	Net                   *ContainerInfo
+	HasNetwork            bool
 	UsesInternalNetfilter bool // true if sandbox uses direct network (firecracker), false if it needs net container
 }
 

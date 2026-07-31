@@ -38,10 +38,14 @@ func runStop(args []string) {
 		fmt.Printf("Stopped bwrap session '%s'\n", slug)
 	}
 
+	// A crashed or manually removed bwrap Envoy leaves no container for the
+	// instance manager to discover, but its Docker network still needs to be
+	// removed before the session can be re-hosted.
+	if inst == nil && hadBwrap {
+		inst = &Instance{Slug: slug}
+	}
 	if inst == nil {
-		if !hadBwrap {
-			fmt.Printf("No instance '%s' found\n", slug)
-		}
+		fmt.Printf("No instance '%s' found\n", slug)
 		return
 	}
 

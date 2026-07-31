@@ -60,6 +60,35 @@ func TestBwrapAgentBindsAbsolutePath(t *testing.T) {
 	}
 }
 
+func TestBwrapAgentBindsHostCommand(t *testing.T) {
+	binds, paths, err := bwrapAgentBinds([]string{"go"})
+	if err != nil {
+		t.Fatalf("resolving host command: %v", err)
+	}
+	if !slices.Contains(paths, filepath.Dir(mustLookPath(t, "go"))) {
+		t.Fatalf("PATH entries = %v, want launcher directory containing go", paths)
+	}
+	real, err := filepath.EvalSymlinks(mustLookPath(t, "go"))
+	if err != nil {
+		t.Fatalf("resolving go: %v", err)
+	}
+	if !slices.Contains(paths, filepath.Dir(real)) {
+		t.Fatalf("PATH entries = %v, want resolved binary directory", paths)
+	}
+	if len(binds) == 0 {
+		t.Fatal("host command outside system directories needs a read-only bind")
+	}
+}
+
+func mustLookPath(t *testing.T, name string) string {
+	t.Helper()
+	path, err := exec.LookPath(name)
+	if err != nil {
+		t.Fatalf("looking up %s: %v", name, err)
+	}
+	return path
+}
+
 func TestBwrapFileMountArgsCreatesScratchParents(t *testing.T) {
 	got := bwrapFileMountArgs(
 		"/generated/bwrap-resolv.conf",
@@ -80,6 +109,22 @@ func TestBwrapFileMountArgsLeavesPersistentParentsAlone(t *testing.T) {
 	want := []string{"--ro-bind", "/generated/file", "/etc/regular-file"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("bwrapFileMountArgs() = %q, want %q", got, want)
+	}
+}
+
+func TestBwrapDirMountArgsCreatesHomeParents(t *testing.T) {
+	got := bwrapDirMountArgs(
+		"/host/vault",
+		"/home/dev/work/project",
+		false,
+	)
+	want := []string{
+		"--dir", "/home/dev",
+		"--dir", "/home/dev/work",
+		"--bind", "/host/vault", "/home/dev/work/project",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("bwrapDirMountArgs() = %q, want %q", got, want)
 	}
 }
 

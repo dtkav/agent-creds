@@ -253,6 +253,16 @@ func bwrapAgentBinds(argv []string) (bindArgs []string, pathDirs []string, err e
 	lpDir := filepath.Dir(lp)
 	addBind(lpDir)
 	pathDirs = append(pathDirs, lpDir)
+	// Also put the resolved binary directory on PATH. Some launchers are
+	// symlinks into state below the agent config directory (Codex standalone
+	// uses ~/.local/bin/codex -> ~/.codex/.../current/bin/codex). The sandbox
+	// mounts its own ~/.codex, so that alias may not exist even though the
+	// resolved release is mounted below. Calling the mounted binary directly
+	// keeps the launcher independent of config-directory symlinks.
+	realDir := filepath.Dir(real)
+	if realDir != lpDir {
+		pathDirs = append(pathDirs, realDir)
+	}
 	// Install root of the resolved binary. For node-based agents climb to the
 	// prefix that holds both bin/ and lib/node_modules; for bin/ layouts take
 	// the parent so sibling dirs come along.
@@ -285,13 +295,26 @@ func runBwrapConsole(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		}
 		return
 	}
-	createBwrapInstance(workDir, scriptDir, slug, cfg)
+	createBwrapInstance(workDir, scriptDir, slug, cfg, true)
+}
+
+// runBwrapStart starts an instance without attaching the current terminal.
+func runBwrapStart(workDir, scriptDir, slug string, cfg ProjectConfig) {
+	if err := bwrapPreflight(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if bwrapSessionExists(slug) {
+		fmt.Printf("Already running: '%s' (bwrap)\n", slug)
+		return
+	}
+	createBwrapInstance(workDir, scriptDir, slug, cfg, false)
 }
 
 // createBwrapInstance prepares configs, tokens, and the per-instance envoy
-// container, generates the launch scripts, and starts + attaches the
-// zmx-hosted bwrap session.
-func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
+// container, generates the launch scripts, and starts the zmx-hosted bwrap
+// session. When attach is true, the current terminal follows the session.
+func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig, attach bool) {
 	envoyName := "adev-" + slug + "-envoy"
 	networkName := "adev-" + slug
 	sessionName := bwrapSessionName(slug)
@@ -342,7 +365,6 @@ func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		fmt.Fprintf(os.Stderr, "Error generating configs: %v\n", err)
 		os.Exit(1)
 	}
-
 	vaultConfigYAML, vaultConfigErr := decryptVaultConfigYAML()
 	legacyEnvLoaded := exportLegacyVaultEnv()
 	if !cfg.Vault.IsRemote() {
@@ -422,22 +444,26 @@ func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		fmt.Fprintf(os.Stderr, "Error creating network %s: %v\n", networkName, err)
 		os.Exit(1)
 	}
-	if err := run("docker", "run", "-d", "--rm",
+	envoyArgs := []string{"run", "-d",
 		"--name", envoyName,
+		"--restart", "unless-stopped",
 		"--network", networkName,
 		"--network-alias", "envoy",
 		"--ulimit", "nofile=65536:65536",
 		"-p", fmt.Sprintf("127.0.0.1:%d:10000", envoyPort),
-		"-v", scriptDir+"/generated/certs/ca.crt:/certs/ca.crt:ro",
-		"-v", scriptDir+"/generated/certs/ca.key:/certs/ca.key:ro",
-		"-v", filepath.Join(instanceGenDir, "domains.json")+":/etc/envoy/domains.json:ro",
-		"-v", filepath.Join(instanceGenDir, "envoy.json")+":/etc/envoy/envoy.json:ro",
-		"-v", scriptDir+"/envoy-entrypoint.sh:/entrypoint.sh:ro",
-		"-v", scriptDir+"/generated/dns-responder:/usr/local/bin/dns-responder:ro",
-		"-v", instanceLogsDir+":/var/log/adev",
+		"-v", scriptDir + "/generated/certs/ca.crt:/certs/ca.crt:ro",
+		"-v", scriptDir + "/generated/certs/ca.key:/certs/ca.key:ro",
+		"-v", filepath.Join(instanceGenDir, "domains.json") + ":/etc/envoy/domains.json:ro",
+		"-v", filepath.Join(instanceGenDir, "envoy.json") + ":/etc/envoy/envoy.json:ro",
+		"-v", scriptDir + "/envoy-entrypoint.sh:/entrypoint.sh:ro",
+		"-v", scriptDir + "/generated/dns-responder:/usr/local/bin/dns-responder:ro",
+		"-v", instanceLogsDir + ":/var/log/adev",
+	}
+	envoyArgs = append(envoyArgs,
 		"--entrypoint", "/entrypoint.sh",
 		"envoyproxy/envoy:v1.28-latest",
-		"-c", "/etc/envoy/envoy.json"); err != nil {
+		"-c", "/etc/envoy/envoy.json")
+	if err := run("docker", envoyArgs...); err != nil {
 		spinner.Stop()
 		fmt.Fprintf(os.Stderr, "Error starting envoy: %v\n", err)
 		cleanup()
@@ -466,7 +492,6 @@ func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 			os.Exit(1)
 		}
 	}
-
 	// Generated files consumed by the sandbox.
 	spinner.Status("generating sandbox...")
 	resolvConf := filepath.Join(instanceGenDir, "bwrap-resolv.conf")
@@ -486,6 +511,24 @@ func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		cleanup()
 		os.Exit(1)
+	}
+	// Agent profiles normally supply their entrypoint as a shell command, so
+	// agentArgv starts with /bin/bash even though that command later invokes
+	// codex/claude/pi. Resolve and mount the configured agent binary as well;
+	// otherwise the bwrap PATH contains only system directories and the shell
+	// entrypoint fails with "<agent>: command not found".
+	if cfg.Sandbox.Agent != "" && agentArgv[0] != cfg.Sandbox.Agent {
+		profileBinds, profilePathDirs, bindErr := bwrapAgentBinds(
+			[]string{cfg.Sandbox.Agent},
+		)
+		if bindErr != nil {
+			spinner.Stop()
+			fmt.Fprintf(os.Stderr, "Error: %v\n", bindErr)
+			cleanup()
+			os.Exit(1)
+		}
+		agentBinds = append(agentBinds, profileBinds...)
+		agentPathDirs = append(agentPathDirs, profilePathDirs...)
 	}
 
 	bwrapArgs, err := buildBwrapArgs(workDir, scriptDir, slug, cfg, agentBinds, agentPathDirs)
@@ -530,12 +573,25 @@ func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 
 	// Session command: scope-wrapped launcher, hosted by zmx.
 	sessionCmd := append(systemdScopeArgs(slug, cfg), "/bin/bash", launchScript)
+	if !attach {
+		start := exec.Command(
+			"zmx", append([]string{"run", sessionName, "-d"}, sessionCmd...)...)
+		start.Stdout = os.Stdout
+		start.Stderr = os.Stderr
+		if err := start.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error starting zmx session: %v\n", err)
+			cleanup()
+			os.Exit(1)
+		}
+		fmt.Printf("Started '%s' (bwrap, envoy 127.0.0.1:%d).\n", slug, envoyPort)
+		return
+	}
 	fmt.Printf("Starting '%s' (bwrap, envoy 127.0.0.1:%d, ctrl+\\ detaches)...\n", slug, envoyPort)
-	attach := exec.Command("zmx", append([]string{"attach", sessionName}, sessionCmd...)...)
-	attach.Stdin = os.Stdin
-	attach.Stdout = os.Stdout
-	attach.Stderr = os.Stderr
-	attach.Run()
+	attached := exec.Command("zmx", append([]string{"attach", sessionName}, sessionCmd...)...)
+	attached.Stdin = os.Stdin
+	attached.Stdout = os.Stdout
+	attached.Stderr = os.Stderr
+	attached.Run()
 	// No cleanup: the session keeps running detached; use 'adev stop'.
 }
 
@@ -559,11 +615,11 @@ func writeBwrapCABundle(scriptDir, dest string) error {
 	return os.WriteFile(dest, buf, 0644)
 }
 
-// bwrapFileMountArgs returns the arguments needed to bind a file at target.
-// The sandbox replaces these trees with tmpfs mounts, so recreate every
-// parent below the scratch root before binding a resolved symlink target such
-// as /run/resolvconf/resolv.conf.
-func bwrapFileMountArgs(source, target string) []string {
+// bwrapMountParentArgs returns the arguments needed to recreate a bind
+// target's parent below a scratch root. The sandbox replaces /home, /run,
+// /var, and /tmp, so an arbitrary project or plugin mount cannot assume its
+// host-side parent hierarchy exists inside the mount namespace.
+func bwrapMountParentArgs(target string) []string {
 	target = filepath.Clean(target)
 	var args []string
 	for _, root := range []string{"/run", "/var", "/tmp", "/home"} {
@@ -585,7 +641,22 @@ func bwrapFileMountArgs(source, target string) []string {
 		}
 		break
 	}
-	return append(args, "--ro-bind", source, target)
+	return args
+}
+
+// bwrapFileMountArgs returns the arguments needed to bind a file at target.
+func bwrapFileMountArgs(source, target string) []string {
+	return append(bwrapMountParentArgs(target), "--ro-bind", source, target)
+}
+
+// bwrapDirMountArgs returns the arguments needed to bind a directory at an
+// arbitrary target inside one of the sandbox's scratch roots.
+func bwrapDirMountArgs(source, target string, readonly bool) []string {
+	bind := "--bind"
+	if readonly {
+		bind = "--ro-bind"
+	}
+	return append(bwrapMountParentArgs(target), bind, source, target)
 }
 
 // bwrapResolvMountArgs follows the host's /etc/resolv.conf symlink before
@@ -669,10 +740,8 @@ func buildBwrapArgs(workDir, scriptDir, slug string, cfg ProjectConfig, agentBin
 	}
 
 	// Project rw at its real path; instance gen dir ro (CA, tokens, configs).
-	args = append(args,
-		"--bind", workDir, workDir,
-		"--ro-bind", instanceGenDir, "/run/adev-instance",
-	)
+	args = append(args, bwrapDirMountArgs(workDir, workDir, false)...)
+	args = append(args, "--ro-bind", instanceGenDir, "/run/adev-instance")
 	args = append(args, bwrapResolvMountArgs(filepath.Join(instanceGenDir, "bwrap-resolv.conf"))...)
 
 	// Host binds for the agent installation (resolved from host PATH).
@@ -684,11 +753,9 @@ func buildBwrapArgs(workDir, scriptDir, slug string, cfg ProjectConfig, agentBin
 			fmt.Fprintf(os.Stderr, "Warning: mount source %s does not exist, skipping\n", mount.Source)
 			continue
 		}
-		bind := "--bind"
-		if mount.Readonly {
-			bind = "--ro-bind"
-		}
-		args = append(args, bind, mount.Source, mount.Target)
+		args = append(args, bwrapDirMountArgs(
+			mount.Source, mount.Target, mount.Readonly,
+		)...)
 	}
 
 	// Environment: cleared, then rebuilt. --clearenv also scrubs the

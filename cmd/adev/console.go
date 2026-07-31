@@ -80,6 +80,34 @@ func runConsole(args []string) {
 	createInstance(workDir, scriptDir, slug, cfg)
 }
 
+func runStart(args []string) {
+	workDir, _ := os.Getwd()
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error finding executable: %v\n", err)
+		os.Exit(1)
+	}
+	exe, _ = filepath.EvalSymlinks(exe)
+	scriptDir := filepath.Dir(filepath.Dir(exe))
+	cfg, err := LoadProjectConfigWithPlugins(workDir, scriptDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
+		os.Exit(1)
+	}
+	name := cfg.Sandbox.Name
+	if name == "" {
+		name = filepath.Base(workDir)
+	}
+	if len(args) > 0 {
+		name = args[0]
+	}
+	if cfg.Sandbox.Runtime != "bwrap" {
+		fmt.Fprintln(os.Stderr, "Error: detached start currently requires runtime = \"bwrap\"")
+		os.Exit(1)
+	}
+	runBwrapStart(workDir, scriptDir, Slug(name), cfg)
+}
+
 func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	containerName := "adev-" + slug + "-net"
 	envoyName := "adev-" + slug + "-envoy"
@@ -131,7 +159,6 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		fmt.Fprintf(os.Stderr, "Error generating configs: %v\n", err)
 		os.Exit(1)
 	}
-
 	vaultConfigYAML, vaultConfigErr := decryptVaultConfigYAML()
 	legacyEnvLoaded := exportLegacyVaultEnv()
 	if !cfg.Vault.IsRemote() {
@@ -320,23 +347,28 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 
 	// Start per-sandbox envoy
 	spinner.Status("starting envoy...")
-	if err := run("docker", "run", "-d", "--rm",
+	envoyArgs := []string{"run", "-d",
 		"--name", envoyName,
+		"--restart", "unless-stopped",
 		"--network", networkName,
 		"--network-alias", "envoy",
 		"--ulimit", "nofile=65536:65536",
-		"-v", scriptDir+"/generated/certs/ca.crt:/certs/ca.crt:ro",
-		"-v", scriptDir+"/generated/certs/ca.key:/certs/ca.key:ro",
-		"-v", filepath.Join(instanceGenDir, "domains.json")+":/etc/envoy/domains.json:ro",
-		"-v", filepath.Join(instanceGenDir, "envoy.json")+":/etc/envoy/envoy.json:ro",
-		"-v", scriptDir+"/envoy-entrypoint.sh:/entrypoint.sh:ro",
-		"-v", scriptDir+"/generated/dns-responder:/usr/local/bin/dns-responder:ro",
-		"-v", instanceLogsDir+":/var/log/adev",
+		"-v", scriptDir + "/generated/certs/ca.crt:/certs/ca.crt:ro",
+		"-v", scriptDir + "/generated/certs/ca.key:/certs/ca.key:ro",
+		"-v", filepath.Join(instanceGenDir, "domains.json") + ":/etc/envoy/domains.json:ro",
+		"-v", filepath.Join(instanceGenDir, "envoy.json") + ":/etc/envoy/envoy.json:ro",
+		"-v", scriptDir + "/envoy-entrypoint.sh:/entrypoint.sh:ro",
+		"-v", scriptDir + "/generated/dns-responder:/usr/local/bin/dns-responder:ro",
+		"-v", instanceLogsDir + ":/var/log/adev",
+	}
+	envoyArgs = append(envoyArgs,
 		"--entrypoint", "/entrypoint.sh",
 		"envoyproxy/envoy:v1.28-latest",
-		"-c", "/etc/envoy/envoy.json"); err != nil {
+		"-c", "/etc/envoy/envoy.json")
+	if err := run("docker", envoyArgs...); err != nil {
 		spinner.Stop()
 		fmt.Fprintf(os.Stderr, "Error starting envoy: %v\n", err)
+		cleanup()
 		os.Exit(1)
 	}
 
@@ -366,7 +398,6 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 			os.Exit(1)
 		}
 	}
-
 	// gVisor (default): sandbox-net starts later with --network=host
 	// runc: sandbox-net starts now, sandbox shares its network namespace
 	useHostNetfilter := cfg.Sandbox.UsesHostNetfilter()
@@ -736,7 +767,6 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 
 	spinner.Stop()
 	signal.Stop(sigChan)
-
 	// Start background discharge refresh for credentialed upstreams
 	refreshCtx, refreshCancel := context.WithCancel(context.Background())
 	defer refreshCancel()

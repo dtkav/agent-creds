@@ -42,22 +42,27 @@ reach a prompt, tool log, dependency, or compromised subprocess.
 
 ## How it works
 
-```mermaid
-flowchart LR
-  subgraph agent[Per agent]
-    sandbox["bwrap / gVisor / runc<br/>Codex · Claude · Pi<br/>CLIs · SDKs"]
-    envoy["Envoy<br/>per sandbox"]
-    sandbox -->|"configured hosts only<br/>acm_ capability"| envoy
-  end
+```text
+  PER-AGENT SANDBOX
 
-  subgraph deployment[Per deployment]
-    vault["Vault · shared singleton<br/>encrypted config<br/>JS providers and policies"]
-  end
-
-  api["Configured API"]
-  envoy -->|"authorize + resolve"| vault
-  vault -->|"approved headers"| envoy
-  envoy -->|"real upstream credential"| api
++----------------------+
+| bwrap, gVisor, runc  |
+| Codex, Claude, Pi    |
+| TOKEN=acm_...        |
++----------+-----------+
+           |
+           | configured hosts only
+           v                                   SHARED DEPLOYMENT
++----------------------+                       +----------------------+
+| Envoy                | --------------------> | Vault                |
+| one per sandbox      | <-------------------- | one per deployment   |
++----------+-----------+   approved headers    | secrets + JS policy  |
+           |                                   +----------------------+
+           | real upstream credential
+           v
++----------------------+
+| Configured API       |
++----------------------+
 ```
 
 For a credentialed request:

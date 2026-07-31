@@ -24,6 +24,10 @@ type VerifyResult struct {
 	KeyID     string
 	Location  string
 	ExpiresAt *int64
+
+	// ApplicationConstraints are verified, deployment-owned restrictions.
+	// They are interpreted by the selected upstream policy, never by callers.
+	ApplicationConstraints []*ApplicationConstraint
 }
 
 // Verifier handles token verification
@@ -133,12 +137,13 @@ func (v *Verifier) VerifyRequest(authHeader string, access *Access) *VerifyResul
 	}
 
 	return &VerifyResult{
-		Valid:     true,
-		Caveats:   caveats,
-		Subject:   subject,
-		KeyID:     string(m.Nonce.KID),
-		Location:  m.Location,
-		ExpiresAt: expiresAt,
+		Valid:                  true,
+		Caveats:                caveats,
+		Subject:                subject,
+		KeyID:                  string(m.Nonce.KID),
+		Location:               m.Location,
+		ExpiresAt:              expiresAt,
+		ApplicationConstraints: macaroon.GetCaveats[*ApplicationConstraint](caveats),
 	}
 }
 

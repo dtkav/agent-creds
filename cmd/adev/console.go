@@ -275,11 +275,12 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		cmd.Run()
 	}
 
-	// Get sandbox image (default to registry)
+	// Get sandbox image. The public default builds locally; deployments can
+	// select a prebuilt image in agent-creds.toml.
 	sandboxImage := cfg.Sandbox.Image
 	var envPath string // Nix store path for sandbox-env (only for local builds)
 	if sandboxImage == "" {
-		sandboxImage = "docker.system3.md/sandbox"
+		sandboxImage = "sandbox-local"
 	}
 	if sandboxImage == "sandbox-local" {
 		// Build base image + env separately (env rebuilds are fast)
@@ -996,7 +997,7 @@ func upstreamChanged(old, new UpstreamConfig) bool {
 	if old.Mode != new.Mode || old.Scheme != new.Scheme || old.Port != new.Port || old.Address != new.Address || old.Network != new.Network || old.ForwardToken != new.ForwardToken {
 		return true
 	}
-	if old.Credential != new.Credential {
+	if old.Credential != new.Credential || old.Policy != new.Policy {
 		return true
 	}
 	if !slices.Equal(old.Methods, new.Methods) {

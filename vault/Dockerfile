@@ -7,6 +7,7 @@ WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
+RUN mkdir -p providers.d
 
 # Build with CGO enabled for sqlite3
 RUN CGO_ENABLED=1 go build -o vault .
@@ -23,6 +24,7 @@ COPY --from=builder /app/mint .
 COPY --from=builder /app/mintfs .
 COPY --from=builder /app/vault-admin .
 COPY --from=builder /app/vault-ssh .
+COPY --from=builder /app/providers.d ./providers.d
 COPY vault_host_key .
 
 # Create data directory for SQLite database

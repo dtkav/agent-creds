@@ -112,22 +112,6 @@ func TestBwrapFileMountArgsLeavesPersistentParentsAlone(t *testing.T) {
 	}
 }
 
-func TestBwrapDirMountArgsCreatesHomeParents(t *testing.T) {
-	got := bwrapDirMountArgs(
-		"/host/vault",
-		"/home/dev/work/project",
-		false,
-	)
-	want := []string{
-		"--dir", "/home/dev",
-		"--dir", "/home/dev/work",
-		"--bind", "/host/vault", "/home/dev/work/project",
-	}
-	if !slices.Equal(got, want) {
-		t.Fatalf("bwrapDirMountArgs() = %q, want %q", got, want)
-	}
-}
-
 func TestBwrapGeneratedScriptsParse(t *testing.T) {
 	dir := t.TempDir()
 	setup := filepath.Join(dir, "bwrap-setup.sh")

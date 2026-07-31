@@ -42,6 +42,9 @@ claude-dev/pi-config/
 # Local sandbox customizations
 local/
 
+# Local deployment extensions
+vault/providers.d/
+
 # Tokens
 .base-token
 

@@ -15,14 +15,20 @@ import (
 
 // CreateTokenRequest is the request to create a token
 type CreateTokenRequest struct {
-	ID                 string   `json:"id"`                 // Token name
-	Subject            string   `json:"subject,omitempty"`  // opaque application subject
-	Hosts              []string `json:"hosts,omitempty"`    // Allowed hosts
-	Methods            []string `json:"methods,omitempty"`  // Allowed HTTP methods
-	Paths              []string `json:"paths,omitempty"`    // Allowed path patterns
-	ValidFor           string   `json:"validFor,omitempty"` // Duration string (e.g., "24h")
-	RequireAttestation bool     `json:"requireAttestation"` // Require FIDO2 attestation
-	Description        string   `json:"description,omitempty"`
+	ID                 string                         `json:"id"`                 // Token name
+	Subject            string                         `json:"subject,omitempty"`  // opaque application subject
+	Hosts              []string                       `json:"hosts,omitempty"`    // Allowed hosts
+	Methods            []string                       `json:"methods,omitempty"`  // Allowed HTTP methods
+	Paths              []string                       `json:"paths,omitempty"`    // Allowed path patterns
+	ValidFor           string                         `json:"validFor,omitempty"` // Duration string (e.g., "24h")
+	RequireAttestation bool                           `json:"requireAttestation"` // Require FIDO2 attestation
+	Description        string                         `json:"description,omitempty"`
+	Constraints        []ApplicationConstraintRequest `json:"constraints,omitempty"`
+}
+
+type ApplicationConstraintRequest struct {
+	Namespace  string         `json:"namespace"`
+	Constraint map[string]any `json:"constraint"`
 }
 
 // TokenResponse represents a token in API responses
@@ -113,6 +119,12 @@ func (s *Server) createToken(w http.ResponseWriter, r *http.Request, userID []by
 			return
 		}
 	}
+	for _, constraint := range req.Constraints {
+		if err := tfmac.ValidateApplicationConstraint(constraint.Namespace, constraint.Constraint); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 
 	// Check if token already exists
 	existing, err := s.db.GetToken(req.ID)
@@ -137,7 +149,15 @@ func (s *Server) createToken(w http.ResponseWriter, r *http.Request, userID []by
 	}
 
 	// Mint the token
-	tokenStr, err := s.mintToken(req.Subject, req.Hosts, req.Methods, req.Paths, validFor, req.RequireAttestation)
+	tokenStr, err := s.mintToken(
+		req.Subject,
+		req.Hosts,
+		req.Methods,
+		req.Paths,
+		req.Constraints,
+		validFor,
+		req.RequireAttestation,
+	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to mint token: "+err.Error())
 		return
@@ -170,7 +190,7 @@ func (s *Server) createToken(w http.ResponseWriter, r *http.Request, userID []by
 }
 
 // mintToken creates a new macaroon token
-func (s *Server) mintToken(subject string, hosts, methods, paths []string, validFor time.Duration, requireAttestation bool) (string, error) {
+func (s *Server) mintToken(subject string, hosts, methods, paths []string, constraints []ApplicationConstraintRequest, validFor time.Duration, requireAttestation bool) (string, error) {
 	if s.keyStore == nil {
 		return "", &tokenError{"vault token store is not configured"}
 	}
@@ -220,6 +240,16 @@ func (s *Server) mintToken(subject string, hosts, methods, paths []string, valid
 	// Add path caveat
 	if len(paths) > 0 {
 		if err := m.Add(&tfmac.PathCaveat{Patterns: paths}); err != nil {
+			return "", err
+		}
+	}
+
+	for _, request := range constraints {
+		constraint, err := tfmac.NewApplicationConstraint(request.Namespace, request.Constraint)
+		if err != nil {
+			return "", err
+		}
+		if err := m.Add(constraint); err != nil {
 			return "", err
 		}
 	}

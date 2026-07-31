@@ -176,3 +176,33 @@ func TestForwardTokenBindsCredentialWithoutMintingEnvToken(t *testing.T) {
 		t.Fatal("forward_token without a credential was accepted")
 	}
 }
+
+func TestUpstreamPolicyIsBoundIntoExtAuthzContext(t *testing.T) {
+	g := &Generator{upstream: map[string]UpstreamConfig{
+		"records.internal": {
+			Mode:   "identity",
+			Scheme: "http",
+			Policy: "/records/read",
+		},
+	}}
+	route := g.routeForHost("records.internal")
+	typed := route["typed_per_filter_config"].(map[string]interface{})
+	extAuthz := typed["envoy.filters.http.ext_authz"].(map[string]interface{})
+	settings := extAuthz["check_settings"].(map[string]interface{})
+	extensions := settings["context_extensions"].(map[string]string)
+	if got := extensions["policy"]; got != "/records/read" {
+		t.Fatalf("policy context extension = %q", got)
+	}
+	if err := ValidateUpstreams(g.upstream); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUpstreamPolicyPathMustBeAbsolute(t *testing.T) {
+	err := ValidateUpstreams(map[string]UpstreamConfig{
+		"records.internal": {Mode: "identity", Policy: "records/read"},
+	})
+	if err == nil {
+		t.Fatal("relative upstream policy path was accepted")
+	}
+}

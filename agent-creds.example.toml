@@ -4,6 +4,7 @@
 
 [sandbox]
 name = "myproject"
+# runtime = "bwrap"  # or "gvisor" / "runc"
 # Bundled agents: "claude", "codex", or "pi"
 # agent = "claude"
 
@@ -23,6 +24,8 @@ name = "myproject"
 # Only these domains are reachable from the sandbox. All other traffic is blocked.
 
 [upstream."api.stripe.com"]
+# credential = "/stripe/prod"
+# policy = "/stripe/write"
 # methods = ["GET", "POST"]       # restrict to specific HTTP methods
 # paths = ["/v1/customers/*"]     # restrict to specific path patterns (* = segment, ** = multi-segment)
 
@@ -38,6 +41,7 @@ name = "myproject"
 # the sandbox cannot use it as a route around the proxy.
 # [upstream."service.internal"]
 # mode = "identity"
+# policy = "/service/read"
 # scheme = "http"
 # port = 8890
 # address = "adev-service-sandbox"

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -94,6 +95,8 @@ func createCmd(args []string) {
 	signingKey := fs.String("signing-key", "", "Base64-encoded signing key")
 	encryptionKey := fs.String("encryption-key", "", "Base64-encoded encryption key (for attestation)")
 	showCaveats := fs.Bool("show-caveats", false, "Show the caveats being added")
+	var constraints repeatedFlag
+	fs.Var(&constraints, "constraint", "Application constraint as namespace=JSON (repeatable)")
 
 	if err := fs.Parse(args); err != nil {
 		log.Fatal(err)
@@ -162,6 +165,9 @@ func createCmd(args []string) {
 			log.Fatalf("failed to add path caveat: %v", err)
 		}
 	}
+	if err := addApplicationConstraints(m, constraints); err != nil {
+		log.Fatalf("invalid application constraint: %v", err)
+	}
 
 	// Add attestation requirement (3P caveat)
 	if *requireAttestation {
@@ -195,6 +201,9 @@ func createCmd(args []string) {
 		if *paths != "" {
 			fmt.Fprintf(os.Stderr, "  Paths: %s\n", *paths)
 		}
+		for _, constraint := range constraints {
+			fmt.Fprintf(os.Stderr, "  ApplicationConstraint: %s\n", constraint)
+		}
 		if *requireAttestation {
 			fmt.Fprintln(os.Stderr, "  Attestation: YubiKey required")
 		}
@@ -217,6 +226,8 @@ func createCmdOld(args []string) {
 	signingKey := fs.String("signing-key", "", "Base64-encoded signing key")
 	encryptionKey := fs.String("encryption-key", "", "Base64-encoded encryption key")
 	showCaveats := fs.Bool("show-caveats", false, "Show the caveats being added")
+	var constraints repeatedFlag
+	fs.Var(&constraints, "constraint", "Application constraint as namespace=JSON (repeatable)")
 
 	if err := fs.Parse(args); err != nil {
 		log.Fatal(err)
@@ -235,6 +246,9 @@ func createCmdOld(args []string) {
 	}
 	if *paths != "" {
 		newArgs = append(newArgs, "--paths", *paths)
+	}
+	for _, constraint := range constraints {
+		newArgs = append(newArgs, "--constraint", constraint)
 	}
 	if *validFor != 24*time.Hour {
 		newArgs = append(newArgs, "--valid-for", validFor.String())
@@ -383,6 +397,9 @@ func inspectCmd(args []string) {
 			fmt.Printf("  Methods: %s\n", strings.Join(cv.Methods, ", "))
 		case *tfmac.PathCaveat:
 			fmt.Printf("  Paths: %s\n", strings.Join(cv.Patterns, ", "))
+		case *tfmac.ApplicationConstraint:
+			body, _ := json.Marshal(cv.Constraint)
+			fmt.Printf("  ApplicationConstraint: %s=%s\n", cv.Namespace, body)
 		case *macaroon.Caveat3P:
 			fmt.Printf("  Third-party: %s (attestation required)\n", cv.Location)
 		default:
@@ -476,4 +493,34 @@ func splitAndTrim(s string) []string {
 		}
 	}
 	return result
+}
+
+type repeatedFlag []string
+
+func (f *repeatedFlag) String() string { return strings.Join(*f, ",") }
+
+func (f *repeatedFlag) Set(value string) error {
+	*f = append(*f, value)
+	return nil
+}
+
+func addApplicationConstraints(token *macaroon.Macaroon, specs []string) error {
+	for _, spec := range specs {
+		namespace, body, ok := strings.Cut(spec, "=")
+		if !ok {
+			return fmt.Errorf("%q must use namespace=JSON", spec)
+		}
+		var constraint map[string]any
+		if err := json.Unmarshal([]byte(body), &constraint); err != nil {
+			return fmt.Errorf("%s: %w", namespace, err)
+		}
+		caveat, err := tfmac.NewApplicationConstraint(namespace, constraint)
+		if err != nil {
+			return err
+		}
+		if err := token.Add(caveat); err != nil {
+			return err
+		}
+	}
+	return nil
 }

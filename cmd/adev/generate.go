@@ -105,6 +105,9 @@ func (g *Generator) generateMergedConfig() error {
 		if ucfg.Credential != "" {
 			sb.WriteString(fmt.Sprintf("credential = %q\n", ucfg.Credential))
 		}
+		if ucfg.Policy != "" {
+			sb.WriteString(fmt.Sprintf("policy = %q\n", ucfg.Policy))
+		}
 		if ucfg.Scheme != "" {
 			sb.WriteString(fmt.Sprintf("scheme = %q\n", ucfg.Scheme))
 		}
@@ -258,11 +261,14 @@ func (g *Generator) routeForHost(host string) map[string]interface{} {
 			"timeout":              "300s",
 		},
 	}
-	if len(upstreamCfg.Methods) > 0 || len(upstreamCfg.Paths) > 0 || upstreamCfg.Credential != "" || upstreamCfg.Mode != "" {
+	if len(upstreamCfg.Methods) > 0 || len(upstreamCfg.Paths) > 0 || upstreamCfg.Credential != "" || upstreamCfg.Policy != "" || upstreamCfg.Mode != "" {
 		contextExtensions := map[string]string{}
 		contextExtensions["agent_creds_mode"] = upstreamCfg.ModeValue()
 		if upstreamCfg.Credential != "" {
 			contextExtensions["credential"] = upstreamCfg.Credential
+		}
+		if upstreamCfg.Policy != "" {
+			contextExtensions["policy"] = upstreamCfg.Policy
 		}
 		if len(upstreamCfg.Methods) > 0 {
 			contextExtensions["allowed_methods"] = strings.Join(upstreamCfg.Methods, ",")
@@ -444,8 +450,8 @@ func upstreamCluster(host string, cfg UpstreamConfig) map[string]interface{} {
 			},
 		}
 	}
-	// Use the Envoy container's resolver. Besides public DNS, this supports
-	// private resolvers installed for Flycast/WireGuard names.
+	// Use the Envoy container's resolver so deployment-specific private names
+	// can be supplied by the container's DNS configuration.
 	return cluster
 }
 
@@ -615,7 +621,6 @@ func (g *Generator) generateEnvoyJSON() error {
 			},
 		}},
 	}
-
 	data, _ := json.MarshalIndent(envoyConfig, "", "  ")
 	return writeIfChanged(filepath.Join(g.genDir, "envoy.json"), data, 0644)
 }

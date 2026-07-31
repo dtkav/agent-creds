@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -25,46 +26,27 @@ import (
 	"vault/api"
 	"vault/db"
 	"vault/macaroon"
-	"vault/oauth2"
-	"vault/pocketbase"
+	"vault/policy"
+	"vault/provider"
+	"vault/provider/jsvm"
 	"vault/sigv4"
 	"vault/vault"
 )
 
-type domainCredential struct {
-	authType     string
-	headerName   string
-	headerPrefix string
-
-	// Static API key (for authType="static")
-	apiKey string
-
-	// Basic auth credentials (for authType="basic")
-	username string
-	password string
-
-	// OAuth2 config (for authType="oauth2")
-	oauth2Config *oauth2.OAuth2Config
-
-	// SigV4 config (for authType="sigv4")
-	sigv4Config *sigv4.Config
-
-	// PocketBase config (for authType="pocketbase")
-	pocketbaseConfig *pocketbase.Config
-
-	// Fly OIDC config (for authType="fly_oidc")
-	flyOIDCConfig *pocketbase.OIDCConfig
+type configuredCredential struct {
+	name           string
+	credentialType string
+	provider       provider.CredentialProvider
+	policy         string
 }
 
 type authServer struct {
 	authv3.UnimplementedAuthorizationServer
 	verifier *macaroon.Verifier
-	// Map of host -> credential config
-	credentials map[string]domainCredential
-	// OAuth2 token manager for handling token refresh
-	tokenManager *oauth2.TokenManager
-	// PocketBase token manager for handling PB auth
-	pbTokenManager *pocketbase.TokenManager
+	// Map of configured credential key -> provider.
+	credentials map[string]configuredCredential
+	// Map of configured policy key -> trusted upstream authorizer.
+	policies map[string]policy.Authorizer
 	// StrictMode requires macaroon tokens for all requests (no passthrough)
 	strictMode bool
 	// Database for audit logging
@@ -74,8 +56,11 @@ type authServer struct {
 func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*authv3.CheckResponse, error) {
 	httpReq := req.GetAttributes().GetRequest().GetHttp()
 	headers := httpReq.GetHeaders()
+	contextExtensions := req.GetAttributes().GetContextExtensions()
+	routeMode := contextExtensions["agent_creds_mode"]
+	routePolicy := strings.TrimPrefix(contextExtensions["policy"], "/")
 
-	// Get target host from x-target-host header (flycast rewrites Host)
+	// Prefer the original target host when an upstream proxy rewrites Host.
 	host := headers["x-target-host"]
 	if host == "" {
 		host = headers["host"]
@@ -120,10 +105,15 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 		}
 	}
 
-	// Passthrough: unrecognized token format (unless strict mode)
+	// Identity routes and routes with an explicit policy are authentication
+	// boundaries even when global strict mode is disabled. Never allow the
+	// passthrough path to bypass them.
+	requiresMacaroon := s.strictMode || routeMode == "identity" || routePolicy != ""
+
+	// Passthrough: unrecognized token format (unless this route requires auth)
 	if !isBearerMacaroon && !isSigV4Macaroon && !isBasicMacaroon {
-		if s.strictMode {
-			log.Printf("Strict mode: rejected non-macaroon request to %s %s", host, access.Path)
+		if requiresMacaroon {
+			log.Printf("Rejected non-macaroon request to protected route %s %s", host, access.Path)
 			s.logAudit("deny", access.Method, host, access.Path, "macaroon token required", nil)
 			return &authv3.CheckResponse{
 				Status: &status.Status{Code: int32(codes.PermissionDenied)},
@@ -171,7 +161,6 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 	}
 
 	// Validate upstream restrictions (methods/paths from envoy context_extensions)
-	contextExtensions := req.GetAttributes().GetContextExtensions()
 	if allowedMethods, ok := contextExtensions["allowed_methods"]; ok && allowedMethods != "" {
 		method := strings.ToUpper(httpReq.GetMethod())
 		allowed := false
@@ -226,7 +215,7 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 		}
 	}
 
-	mode := contextExtensions["agent_creds_mode"]
+	mode := routeMode
 	if mode == "identity" {
 		if result.Subject == nil {
 			reason := "identity route requires a subject-scoped token"
@@ -236,10 +225,20 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 				HttpResponse: &authv3.CheckResponse_DeniedResponse{
 					DeniedResponse: &authv3.DeniedHttpResponse{
 						Status: &typev3.HttpStatus{Code: typev3.StatusCode_Forbidden},
-						Body:   "A user- or relay-scoped support token is required",
+						Body:   "A subject-scoped token is required",
 					},
 				},
 			}, nil
+		}
+		decision, policyErr := s.authorizePolicies(ctx, result, access, nil, false, routePolicy)
+		if policyErr != nil {
+			reason := fmt.Sprintf("upstream policy failed: %v", policyErr)
+			s.logAudit("deny", access.Method, host, access.Path, reason, tokenID)
+			return policyErrorResponse(), nil
+		}
+		if !decision.Allow {
+			s.logAudit("deny", access.Method, host, access.Path, decision.Reason, tokenID)
+			return policyDeniedResponse(decision.Reason), nil
 		}
 		log.Printf("Identity verified for %s %s %s", access.Method, host, access.Path)
 		s.logAudit("allow", access.Method, host, access.Path, "", tokenID)
@@ -284,10 +283,41 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 			},
 		}, nil
 	}
+	decision, policyErr := s.authorizePolicies(ctx, result, access, &cred, true, routePolicy, cred.policy)
+	if policyErr != nil {
+		reason := fmt.Sprintf("upstream policy failed: %v", policyErr)
+		log.Printf("%s", reason)
+		s.logAudit("deny", access.Method, host, access.Path, reason, tokenID)
+		return policyErrorResponse(), nil
+	}
+	if !decision.Allow {
+		log.Printf("Upstream policy denied %s %s: %s", access.Method, host, decision.Reason)
+		s.logAudit("deny", access.Method, host, access.Path, decision.Reason, tokenID)
+		return policyDeniedResponse(decision.Reason), nil
+	}
 
-	// Resolve credential headers based on type
-	respHeaders, err := s.resolveCredentialHeaders(cred, host, httpReq)
+	providerResult, err := cred.provider.Resolve(ctx, provider.Request{
+		Credential:     credentialKey,
+		CredentialType: cred.credentialType,
+		Host:           host,
+		Method:         httpReq.GetMethod(),
+		Path:           httpReq.GetPath(),
+		Headers:        headers,
+	})
 	if err != nil {
+		log.Printf("Credential resolution failed for %s: %v", host, err)
+		s.logAudit("deny", access.Method, host, access.Path, fmt.Sprintf("credential resolution failed: %v", err), tokenID)
+		return &authv3.CheckResponse{
+			Status: &status.Status{Code: int32(codes.Internal)},
+			HttpResponse: &authv3.CheckResponse_DeniedResponse{
+				DeniedResponse: &authv3.DeniedHttpResponse{
+					Status: &typev3.HttpStatus{Code: typev3.StatusCode_InternalServerError},
+					Body:   "Failed to resolve credentials",
+				},
+			},
+		}, nil
+	}
+	if err := provider.ValidateHeaders(providerResult.Headers); err != nil {
 		log.Printf("Credential resolution failed for %s: %v", host, err)
 		s.logAudit("deny", access.Method, host, access.Path, fmt.Sprintf("credential resolution failed: %v", err), tokenID)
 		return &authv3.CheckResponse{
@@ -307,10 +337,97 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 		Status: &status.Status{Code: int32(codes.OK)},
 		HttpResponse: &authv3.CheckResponse_OkResponse{
 			OkResponse: &authv3.OkHttpResponse{
-				Headers: respHeaders,
+				Headers: credentialHeaderOptions(providerResult.Headers),
 			},
 		},
 	}, nil
+}
+
+func (s *authServer) authorizePolicies(
+	ctx context.Context,
+	verified *macaroon.VerifyResult,
+	access *macaroon.Access,
+	credential *configuredCredential,
+	requireForConstraints bool,
+	names ...string,
+) (policy.Decision, error) {
+	constraints := make([]policy.Constraint, 0, len(verified.ApplicationConstraints))
+	for _, caveat := range verified.ApplicationConstraints {
+		constraints = append(constraints, policy.Constraint{
+			Namespace: caveat.Namespace,
+			Body:      caveat.Constraint,
+		})
+	}
+
+	seen := make(map[string]bool)
+	var selected []string
+	for _, name := range names {
+		name = strings.TrimPrefix(strings.TrimSpace(name), "/")
+		if name != "" && !seen[name] {
+			seen[name] = true
+			selected = append(selected, name)
+		}
+	}
+	if len(selected) == 0 {
+		if requireForConstraints && len(constraints) > 0 {
+			return policy.Deny("application-scoped token requires an upstream policy"), nil
+		}
+		return policy.Allow(), nil
+	}
+
+	request := policy.Request{
+		Host:        access.Host,
+		Method:      access.Method,
+		Path:        access.Path,
+		Subject:     verified.Subject,
+		Constraints: constraints,
+	}
+	if credential != nil {
+		request.Credential = credential.name
+		request.CredentialType = credential.credentialType
+	}
+	for _, name := range selected {
+		authorizer := s.policies[name]
+		if authorizer == nil {
+			return policy.Decision{}, fmt.Errorf("upstream policy %q is not configured", name)
+		}
+		request.Policy = name
+		decision, err := authorizer.Authorize(ctx, request)
+		if err != nil {
+			return policy.Decision{}, fmt.Errorf("%s: %w", name, err)
+		}
+		if !decision.Allow {
+			return decision, nil
+		}
+	}
+	return policy.Allow(), nil
+}
+
+func policyDeniedResponse(reason string) *authv3.CheckResponse {
+	if strings.TrimSpace(reason) == "" {
+		reason = "request denied by upstream policy"
+	}
+	return &authv3.CheckResponse{
+		Status: &status.Status{Code: int32(codes.PermissionDenied)},
+		HttpResponse: &authv3.CheckResponse_DeniedResponse{
+			DeniedResponse: &authv3.DeniedHttpResponse{
+				Status: &typev3.HttpStatus{Code: typev3.StatusCode_Forbidden},
+				Body:   "Forbidden: " + reason,
+			},
+		},
+	}
+}
+
+func policyErrorResponse() *authv3.CheckResponse {
+	return &authv3.CheckResponse{
+		Status: &status.Status{Code: int32(codes.Internal)},
+		HttpResponse: &authv3.CheckResponse_DeniedResponse{
+			DeniedResponse: &authv3.DeniedHttpResponse{
+				Status: &typev3.HttpStatus{Code: typev3.StatusCode_InternalServerError},
+				Body:   "Upstream policy failed",
+			},
+		},
+	}
 }
 
 func identityHeaderOptions(result *macaroon.VerifyResult) []*corev3.HeaderValueOption {
@@ -331,99 +448,24 @@ func identityHeaderOptions(result *macaroon.VerifyResult) []*corev3.HeaderValueO
 	return options
 }
 
-// resolveCredentialHeaders returns the headers to inject based on credential type
-func (s *authServer) resolveCredentialHeaders(cred domainCredential, host string, httpReq interface {
-	GetMethod() string
-	GetPath() string
-	GetHeaders() map[string]string
-}) ([]*corev3.HeaderValueOption, error) {
-	switch cred.authType {
-	case "static":
-		return []*corev3.HeaderValueOption{{
-			Header: &corev3.HeaderValue{
-				Key:   cred.headerName,
-				Value: cred.headerPrefix + cred.apiKey,
-			},
-			AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
-		}}, nil
-
-	case "oauth2":
-		token, err := s.tokenManager.GetAccessToken(host, cred.oauth2Config)
-		if err != nil {
-			return nil, fmt.Errorf("oauth2 token refresh: %w", err)
-		}
-		return []*corev3.HeaderValueOption{{
-			Header: &corev3.HeaderValue{
-				Key:   cred.headerName,
-				Value: cred.headerPrefix + token,
-			},
-			AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
-		}}, nil
-
-	case "basic":
-		encoded := base64.StdEncoding.EncodeToString([]byte(cred.username + ":" + cred.password))
-		return []*corev3.HeaderValueOption{{
-			Header: &corev3.HeaderValue{
-				Key:   "authorization",
-				Value: "Basic " + encoded,
-			},
-			AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
-		}}, nil
-
-	case "sigv4":
-		cfg := cred.sigv4Config
-		headers := httpReq.GetHeaders()
-		signed, err := sigv4.SignRequest(
-			cfg,
-			httpReq.GetMethod(),
-			host,
-			httpReq.GetPath(),
-			headers,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("sigv4 signing: %w", err)
-		}
-		var result []*corev3.HeaderValueOption
-		for k, v := range signed {
-			result = append(result, &corev3.HeaderValueOption{
-				Header: &corev3.HeaderValue{
-					Key:   k,
-					Value: v,
-				},
-				AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
-			})
-		}
-		return result, nil
-
-	case "pocketbase":
-		token, err := s.pbTokenManager.GetToken(host, cred.pocketbaseConfig)
-		if err != nil {
-			return nil, fmt.Errorf("pocketbase auth: %w", err)
-		}
-		return []*corev3.HeaderValueOption{{
-			Header: &corev3.HeaderValue{
-				Key:   cred.headerName,
-				Value: token,
-			},
-			AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
-		}}, nil
-
-	case "fly_oidc":
-		token, err := s.pbTokenManager.GetOIDCToken(host, cred.flyOIDCConfig)
-		if err != nil {
-			return nil, fmt.Errorf("fly oidc auth: %w", err)
-		}
-		return []*corev3.HeaderValueOption{{
-			Header: &corev3.HeaderValue{
-				Key:   cred.headerName,
-				Value: "Bearer " + token,
-			},
-			AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
-		}}, nil
-
-	default:
-		return nil, fmt.Errorf("unknown auth type: %s", cred.authType)
+func credentialHeaderOptions(headers map[string]string) []*corev3.HeaderValueOption {
+	keys := make([]string, 0, len(headers))
+	for key := range headers {
+		keys = append(keys, key)
 	}
+	sort.Strings(keys)
+
+	options := make([]*corev3.HeaderValueOption, 0, len(keys))
+	for _, key := range keys {
+		options = append(options, &corev3.HeaderValueOption{
+			Header: &corev3.HeaderValue{
+				Key:   key,
+				Value: headers[key],
+			},
+			AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
+		})
+	}
+	return options
 }
 
 // extractBasicAuthMacaroon extracts a macaroon token from a Basic auth header's password field.
@@ -455,7 +497,7 @@ func main() {
 	}
 
 	vaultCfg, err := vault.Load(vaultPath)
-	if err != nil {
+	if errors.Is(err, os.ErrNotExist) {
 		// Fallback: construct config from env vars for backward compatibility
 		log.Printf("No vault.yaml found, falling back to env vars")
 		vaultCfg = &vault.Config{
@@ -463,6 +505,8 @@ func main() {
 			EncryptionKey: os.Getenv("MACAROON_ENCRYPTION_KEY"),
 			Credentials:   make(map[string]vault.CredentialConfig),
 		}
+	} else if err != nil {
+		log.Fatalf("Failed to load vault config %s: %v", vaultPath, err)
 	}
 
 	// Load macaroon keys: from config, or fall back to env vars
@@ -482,74 +526,98 @@ func main() {
 
 	warnings, err := vaultCfg.Validate()
 	if err != nil {
-		// Validation failure is non-fatal when using env var fallback
-		log.Printf("Warning: vault config validation: %v", err)
+		log.Fatalf("Invalid vault config: %v", err)
 	}
 	for _, w := range warnings {
 		log.Printf("Warning: %s", w)
 	}
 
 	verifier := macaroon.NewVerifier(keyStore)
-	tokenManager := oauth2.NewTokenManager()
-	pbTokenManager := pocketbase.NewTokenManager()
 
-	// Resolve credentials
-	credentials := make(map[string]domainCredential)
-
-	resolved, err := vaultCfg.Resolve()
-	if err != nil {
-		log.Printf("Warning: failed to resolve credentials: %v", err)
+	registry := provider.NewRegistry()
+	if err := provider.RegisterBuiltins(registry); err != nil {
+		log.Fatalf("Failed to register built-in credential providers: %v", err)
 	}
-	for host, cred := range resolved {
-		dc := domainCredential{
-			headerName: cred.HeaderName,
+
+	var jsSpecs []jsvm.Spec
+	for name, credential := range vaultCfg.Credentials {
+		if registry.Has(credential.Type) {
+			continue
 		}
-		switch cred.Type {
-		case "sigv4":
-			dc.authType = "sigv4"
-			dc.sigv4Config = &sigv4.Config{
-				Region:          cred.SigV4Config.Region,
-				Service:         cred.SigV4Config.Service,
-				AccessKeyID:     cred.SigV4Config.AccessKeyID,
-				SecretAccessKey: cred.SigV4Config.SecretAccessKey,
-			}
-		case "basic":
-			dc.authType = "basic"
-			// Extract username:password from the resolved "Basic <base64>" value
-			if cred.Value != "" {
-				if encoded, ok := strings.CutPrefix(cred.Value, "Basic "); ok {
-					if decoded, err := base64.StdEncoding.DecodeString(encoded); err == nil {
-						if u, p, ok := strings.Cut(string(decoded), ":"); ok {
-							dc.username = u
-							dc.password = p
-						}
-					}
-				}
-			}
-		case "pocketbase":
-			dc.authType = "pocketbase"
-			dc.pocketbaseConfig = &pocketbase.Config{
-				URL:        cred.PocketBaseConfig.URL,
-				Collection: cred.PocketBaseConfig.Collection,
-				Email:      cred.PocketBaseConfig.Email,
-				Password:   cred.PocketBaseConfig.Password,
-			}
-		case "fly_oidc":
-			dc.authType = "fly_oidc"
-			dc.flyOIDCConfig = &pocketbase.OIDCConfig{
-				Audience:  cred.FlyOIDCConfig.Audience,
-				FlyConfig: cred.FlyOIDCConfig.FlyConfig,
-			}
-		default:
-			dc.authType = "static"
-			dc.apiKey = cred.Value
+		jsSpecs = append(jsSpecs, jsvm.Spec{
+			Name:   name,
+			Type:   credential.Type,
+			Config: credential.ProviderConfig(),
+		})
+	}
+	sort.Slice(jsSpecs, func(i, j int) bool {
+		return jsSpecs[i].Name < jsSpecs[j].Name
+	})
+	var jsPolicySpecs []jsvm.PolicySpec
+	for name, configuredPolicy := range vaultCfg.Policies {
+		jsPolicySpecs = append(jsPolicySpecs, jsvm.PolicySpec{
+			Name:   name,
+			Type:   configuredPolicy.Type,
+			Config: configuredPolicy.Config(),
+		})
+	}
+	sort.Slice(jsPolicySpecs, func(i, j int) bool {
+		return jsPolicySpecs[i].Name < jsPolicySpecs[j].Name
+	})
+
+	var jsManager *jsvm.Manager
+	if len(jsSpecs) > 0 || len(jsPolicySpecs) > 0 {
+		jsManager, err = jsvm.NewManagerWithPolicies(
+			providerPaths(),
+			providerPoolSize(),
+			jsSpecs,
+			jsPolicySpecs,
+		)
+		if err != nil {
+			log.Fatalf("Failed to load JavaScript extensions: %v", err)
 		}
-		credentials[host] = dc
-		log.Printf("Loaded %s credentials for %s", cred.Type, host)
+	}
+
+	policies := make(map[string]policy.Authorizer, len(jsPolicySpecs))
+	for _, spec := range jsPolicySpecs {
+		policies[spec.Name] = jsManager.Policy(spec)
+		log.Printf("Loaded %s upstream policy for %s", spec.Type, spec.Name)
+	}
+
+	credentials := make(map[string]configuredCredential)
+	for name, credential := range vaultCfg.Credentials {
+		var credentialProvider provider.CredentialProvider
+		if registry.Has(credential.Type) {
+			credentialProvider, err = registry.Build(credential.Type, credential.ProviderConfig())
+		} else if jsManager != nil {
+			credentialProvider = jsManager.Provider(jsvm.Spec{
+				Name:   name,
+				Type:   credential.Type,
+				Config: credential.ProviderConfig(),
+			})
+		} else {
+			err = fmt.Errorf("credential provider %q is not registered", credential.Type)
+		}
+		if err != nil {
+			log.Fatalf("Failed to configure credentials for %s: %v", name, err)
+		}
+		credentials[name] = configuredCredential{
+			name:           name,
+			credentialType: credential.Type,
+			provider:       credentialProvider,
+			policy:         strings.TrimPrefix(credential.Policy, "/"),
+		}
+		log.Printf("Loaded %s credentials for %s", credential.Type, name)
 	}
 
 	if len(credentials) == 0 {
 		log.Printf("Warning: No credentials configured in %s", vaultPath)
+	}
+
+	providerContext, stopProviders := context.WithCancel(context.Background())
+	defer stopProviders()
+	if jsManager != nil {
+		jsManager.StartHotReload(providerContext)
 	}
 
 	// Open database
@@ -647,12 +715,11 @@ func main() {
 
 	grpcServer := grpc.NewServer()
 	authv3.RegisterAuthorizationServer(grpcServer, &authServer{
-		verifier:       verifier,
-		credentials:    credentials,
-		tokenManager:   tokenManager,
-		pbTokenManager: pbTokenManager,
-		strictMode:     strictMode,
-		database:       database,
+		verifier:    verifier,
+		credentials: credentials,
+		policies:    policies,
+		strictMode:  strictMode,
+		database:    database,
 	})
 
 	// Handle graceful shutdown
@@ -662,6 +729,7 @@ func main() {
 	go func() {
 		<-sigCh
 		log.Println("Shutting down...")
+		stopProviders()
 		grpcServer.GracefulStop()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -674,8 +742,34 @@ func main() {
 	}
 }
 
+func providerPaths() []string {
+	configured := strings.TrimSpace(os.Getenv("AGENT_CREDS_PROVIDER_PATH"))
+	if configured == "" {
+		return []string{"providers.d"}
+	}
+	return strings.FieldsFunc(configured, func(r rune) bool {
+		return r == os.PathListSeparator
+	})
+}
+
+func providerPoolSize() int {
+	configured := strings.TrimSpace(os.Getenv("AGENT_CREDS_PROVIDER_POOL"))
+	if configured == "" {
+		return 0
+	}
+	size, err := strconv.Atoi(configured)
+	if err != nil || size < 1 {
+		log.Printf("Warning: invalid AGENT_CREDS_PROVIDER_POOL %q; using the default", configured)
+		return 0
+	}
+	return size
+}
+
 // logAudit writes an audit entry asynchronously so it doesn't block the response path.
 func (s *authServer) logAudit(decision, method, host, path, reason string, tokenID *string) {
+	if s.database == nil {
+		return
+	}
 	entry := &db.AuditEntry{
 		Timestamp: time.Now(),
 		Decision:  decision,
@@ -704,6 +798,3 @@ func extractTokenID(tokenStr string) *string {
 	id := m.Nonce.UUID().String()
 	return &id
 }
-
-// Silence unused import warning
-var _ = tls.Config{}

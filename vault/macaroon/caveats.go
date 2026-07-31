@@ -15,6 +15,7 @@ const (
 	CavAPIPath     macaroon.CaveatType = 1<<32 + 3
 	CavAttestation macaroon.CaveatType = 1<<32 + 4
 	CavSubject     macaroon.CaveatType = 1<<32 + 5
+	CavApplication macaroon.CaveatType = 1<<32 + 6
 )
 
 func init() {
@@ -22,6 +23,7 @@ func init() {
 	macaroon.RegisterCaveatType(&MethodCaveat{})
 	macaroon.RegisterCaveatType(&PathCaveat{})
 	macaroon.RegisterCaveatType(&SubjectCaveat{})
+	macaroon.RegisterCaveatType(&ApplicationConstraint{})
 }
 
 // HostCaveat restricts token to specific API hosts

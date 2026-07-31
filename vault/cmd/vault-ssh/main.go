@@ -151,7 +151,7 @@ func cmdMint(sess ssh.Session, userID []byte, status string, args []string) {
 	}
 
 	if len(args) == 0 {
-		fmt.Fprintln(sess, "Usage: mint <host> [--subject <subject>] [--no-host] [--methods GET,POST] [--paths /v1/*] [--valid-for 1h]")
+		fmt.Fprintln(sess, "Usage: mint <host> [--subject <subject>] [--no-host] [--methods GET,POST] [--paths /v1/*] [--constraint namespace=JSON] [--valid-for 1h]")
 		fmt.Fprintln(sess, "\nConfigured hosts:")
 		for _, host := range configuredHosts {
 			fmt.Fprintf(sess, "  %s\n", host)
@@ -162,7 +162,7 @@ func cmdMint(sess ssh.Session, userID []byte, status string, args []string) {
 	host := args[0]
 
 	// Parse optional flags
-	var methods, paths []string
+	var methods, paths, constraints []string
 	var subject string
 	validFor := 24 * time.Hour
 	requireAttestation := false
@@ -187,6 +187,11 @@ func cmdMint(sess ssh.Session, userID []byte, status string, args []string) {
 		case "--paths":
 			if i+1 < len(args) {
 				paths = strings.Split(args[i+1], ",")
+				i++
+			}
+		case "--constraint":
+			if i+1 < len(args) {
+				constraints = append(constraints, args[i+1])
 				i++
 			}
 		case "--valid-for":
@@ -266,6 +271,28 @@ func cmdMint(sess ssh.Session, userID []byte, status string, args []string) {
 	if len(paths) > 0 {
 		if err := m.Add(&tfmac.PathCaveat{Patterns: paths}); err != nil {
 			fmt.Fprintf(sess, "Error adding path caveat: %v\n", err)
+			return
+		}
+	}
+
+	for _, spec := range constraints {
+		namespace, body, ok := strings.Cut(spec, "=")
+		if !ok {
+			fmt.Fprintf(sess, "Error: constraint %q must use namespace=JSON\n", spec)
+			return
+		}
+		var value map[string]any
+		if err := json.Unmarshal([]byte(body), &value); err != nil {
+			fmt.Fprintf(sess, "Error: invalid constraint JSON: %v\n", err)
+			return
+		}
+		constraint, err := tfmac.NewApplicationConstraint(namespace, value)
+		if err != nil {
+			fmt.Fprintf(sess, "Error: %v\n", err)
+			return
+		}
+		if err := m.Add(constraint); err != nil {
+			fmt.Fprintf(sess, "Error adding application constraint: %v\n", err)
 			return
 		}
 	}

@@ -1,7 +1,6 @@
 package vault
 
 import (
-	"encoding/base64"
 	"fmt"
 	"os"
 	"strings"
@@ -13,16 +12,20 @@ import (
 type Config struct {
 	Secrets       map[string]map[string]string `yaml:"secrets,omitempty"`
 	SigningKey    string                       `yaml:"signing_key"`
-	EncryptionKey string                      `yaml:"encryption_key,omitempty"`
-	Credentials  map[string]CredentialConfig  `yaml:"credentials"`
+	EncryptionKey string                       `yaml:"encryption_key,omitempty"`
+	Credentials   map[string]CredentialConfig  `yaml:"credentials"`
+	Policies      map[string]PolicyConfig      `yaml:"policies,omitempty"`
 }
 
-// CredentialConfig defines how to inject credentials for a domain
+// CredentialConfig defines how to inject credentials for a domain. Built-in
+// providers have typed fields below; JavaScript providers receive any
+// additional inline fields through Options.
 type CredentialConfig struct {
-	Type     string `yaml:"type"` // "bearer", "basic", "sigv4", or "pocketbase"
+	Type     string `yaml:"type"`
 	Token    string `yaml:"token,omitempty"`
 	Username string `yaml:"username,omitempty"`
 	Password string `yaml:"password,omitempty"`
+	Policy   string `yaml:"policy,omitempty"`
 
 	// Environment variable name fields for credential resolution
 	Env     string `yaml:"env,omitempty"`      // env var holding bearer token
@@ -30,22 +33,36 @@ type CredentialConfig struct {
 	EnvPass string `yaml:"env_pass,omitempty"` // env var holding basic auth password
 
 	// SigV4 fields
-	Region         string `yaml:"region,omitempty"`
-	Service        string `yaml:"service,omitempty"`
-	AccessKeyID    string `yaml:"access_key_id,omitempty"`
+	Region          string `yaml:"region,omitempty"`
+	Service         string `yaml:"service,omitempty"`
+	AccessKeyID     string `yaml:"access_key_id,omitempty"`
 	SecretAccessKey string `yaml:"secret_access_key,omitempty"`
 
-	// PocketBase fields
-	URL        string `yaml:"url,omitempty"`
-	Collection string `yaml:"collection,omitempty"`
-	Email      string `yaml:"email,omitempty"`
-
-	// Fly OIDC fields
-	Audience  string `yaml:"audience,omitempty"`
-	FlyConfig string `yaml:"fly_config,omitempty"`
+	// OAuth 2.0 refresh-token fields
+	ClientID     string `yaml:"client_id,omitempty"`
+	ClientSecret string `yaml:"client_secret,omitempty"`
+	RefreshToken string `yaml:"refresh_token,omitempty"`
+	TokenURL     string `yaml:"token_url,omitempty"`
 
 	// Capabilities (optional)
 	Capabilities *CapabilitiesConfig `yaml:"capabilities,omitempty"`
+
+	Options map[string]any `yaml:",inline"`
+}
+
+// PolicyConfig selects a trusted deployment policy implementation and passes
+// it opaque application-owned configuration.
+type PolicyConfig struct {
+	Type    string         `yaml:"type"`
+	Options map[string]any `yaml:",inline"`
+}
+
+func (c PolicyConfig) Config() map[string]any {
+	result := make(map[string]any, len(c.Options))
+	for key, value := range c.Options {
+		result[key] = value
+	}
+	return result
 }
 
 // EndpointCap defines allowed methods and path patterns for an endpoint
@@ -59,39 +76,6 @@ type EndpointCap struct {
 type CapabilitiesConfig struct {
 	Hosts     []string      `yaml:"hosts,omitempty"`
 	Endpoints []EndpointCap `yaml:"endpoints,omitempty"`
-}
-
-// Credential holds a resolved credential ready for injection
-type Credential struct {
-	Type       string // "bearer", "basic", "sigv4", "pocketbase", or "fly_oidc"
-	HeaderName string // "authorization"
-	Value      string // The full header value (for bearer/basic)
-
-	SigV4Config      *SigV4ResolvedConfig
-	PocketBaseConfig *PocketBaseResolvedConfig
-	FlyOIDCConfig    *FlyOIDCResolvedConfig
-}
-
-// SigV4ResolvedConfig holds resolved SigV4 credentials
-type SigV4ResolvedConfig struct {
-	Region         string
-	Service        string
-	AccessKeyID    string
-	SecretAccessKey string
-}
-
-// PocketBaseResolvedConfig holds resolved PocketBase credentials
-type PocketBaseResolvedConfig struct {
-	URL        string
-	Collection string
-	Email      string
-	Password   string
-}
-
-// FlyOIDCResolvedConfig holds resolved Fly OIDC credentials
-type FlyOIDCResolvedConfig struct {
-	Audience  string
-	FlyConfig string
 }
 
 // Load reads and parses a vault.yaml file, resolving $secret references.
@@ -204,6 +188,29 @@ func (c *Config) Validate() (warnings []string, err error) {
 			capWarnings := cc.Capabilities.validate(domain)
 			warnings = append(warnings, capWarnings...)
 		}
+		if cc.Policy != "" {
+			if strings.TrimSpace(cc.Policy) != cc.Policy {
+				return warnings, fmt.Errorf("credentials.%s: upstream policy must not have surrounding whitespace", domain)
+			}
+			name := strings.TrimPrefix(cc.Policy, "/")
+			if name == "" {
+				return warnings, fmt.Errorf("credentials.%s: upstream policy must name a policy", domain)
+			}
+			if _, ok := c.Policies[name]; !ok {
+				return warnings, fmt.Errorf("credentials.%s: upstream policy %q is not configured", domain, cc.Policy)
+			}
+		}
+	}
+	for name, configuredPolicy := range c.Policies {
+		if strings.TrimSpace(name) == "" {
+			return warnings, fmt.Errorf("policy name must not be empty")
+		}
+		if strings.TrimSpace(name) != name || strings.HasPrefix(name, "/") {
+			return warnings, fmt.Errorf("policy name %q must be a relative path without surrounding whitespace", name)
+		}
+		if strings.TrimSpace(configuredPolicy.Type) == "" {
+			return warnings, fmt.Errorf("policies.%s: 'type' is required", name)
+		}
 	}
 	return warnings, nil
 }
@@ -226,6 +233,19 @@ func (cc *CredentialConfig) validate(domain string) (warnings []string, err erro
 		if cc.Password == "" && cc.EnvPass == "" {
 			warnings = append(warnings, fmt.Sprintf("%s: password is empty and no env_pass configured", domain))
 		}
+	case "oauth2":
+		if cc.ClientID == "" {
+			return nil, fmt.Errorf("oauth2 requires 'client_id'")
+		}
+		if cc.ClientSecret == "" {
+			return nil, fmt.Errorf("oauth2 requires 'client_secret'")
+		}
+		if cc.RefreshToken == "" {
+			return nil, fmt.Errorf("oauth2 requires 'refresh_token'")
+		}
+		if cc.TokenURL == "" {
+			return nil, fmt.Errorf("oauth2 requires 'token_url'")
+		}
 	case "sigv4":
 		if cc.Region == "" {
 			return nil, fmt.Errorf("sigv4 requires 'region'")
@@ -239,119 +259,62 @@ func (cc *CredentialConfig) validate(domain string) (warnings []string, err erro
 		if cc.SecretAccessKey == "" {
 			warnings = append(warnings, fmt.Sprintf("%s: secret_access_key is empty", domain))
 		}
-	case "pocketbase":
-		if cc.URL == "" {
-			return nil, fmt.Errorf("pocketbase requires 'url'")
-		}
-		if cc.Collection == "" {
-			return nil, fmt.Errorf("pocketbase requires 'collection'")
-		}
-		if cc.Email == "" {
-			warnings = append(warnings, fmt.Sprintf("%s: email is empty", domain))
-		}
-		if cc.Password == "" {
-			warnings = append(warnings, fmt.Sprintf("%s: password is empty", domain))
-		}
-	case "fly_oidc":
-		if cc.Audience == "" {
-			return nil, fmt.Errorf("fly_oidc requires 'audience'")
-		}
-		if cc.FlyConfig == "" {
-			return nil, fmt.Errorf("fly_oidc requires 'fly_config'")
-		}
 	case "":
 		return nil, fmt.Errorf("'type' is required")
 	default:
-		return nil, fmt.Errorf("unknown credential type: %s", cc.Type)
+		// JavaScript providers validate their own opaque inline options before
+		// the provider runtime is activated.
 	}
 	return warnings, nil
 }
 
-// Resolve resolves all credentials into injection-ready form
-func (c *Config) Resolve() (map[string]*Credential, error) {
-	credentials := make(map[string]*Credential)
-
-	for domain, cc := range c.Credentials {
-		cred, err := cc.resolve()
-		if err != nil {
-			return nil, fmt.Errorf("credentials.%s: %w", domain, err)
-		}
-		if cred != nil {
-			credentials[domain] = cred
-		}
-	}
-
-	return credentials, nil
-}
-
-func (cc *CredentialConfig) resolve() (*Credential, error) {
+// ProviderConfig returns the provider-specific configuration passed to a
+// CredentialProvider factory or JavaScript provider.
+func (cc CredentialConfig) ProviderConfig() map[string]any {
 	switch cc.Type {
 	case "bearer":
-		if cc.Token == "" {
-			return nil, nil
-		}
-		return &Credential{
-			Type:       "bearer",
-			HeaderName: "authorization",
-			Value:      "Bearer " + cc.Token,
-		}, nil
-
+		return map[string]any{"token": cc.Token}
 	case "basic":
-		if cc.Username == "" || cc.Password == "" {
-			return nil, nil
+		return map[string]any{
+			"username": cc.Username,
+			"password": cc.Password,
 		}
-		encoded := basicAuth(cc.Username, cc.Password)
-		return &Credential{
-			Type:       "basic",
-			HeaderName: "authorization",
-			Value:      "Basic " + encoded,
-		}, nil
-
+	case "oauth2":
+		return map[string]any{
+			"client_id":     cc.ClientID,
+			"client_secret": cc.ClientSecret,
+			"refresh_token": cc.RefreshToken,
+			"token_url":     cc.TokenURL,
+		}
 	case "sigv4":
-		if cc.AccessKeyID == "" || cc.SecretAccessKey == "" {
-			return nil, nil
+		return map[string]any{
+			"region":            cc.Region,
+			"service":           cc.Service,
+			"access_key_id":     cc.AccessKeyID,
+			"secret_access_key": cc.SecretAccessKey,
 		}
-		return &Credential{
-			Type:       "sigv4",
-			HeaderName: "authorization",
-			SigV4Config: &SigV4ResolvedConfig{
-				Region:         cc.Region,
-				Service:        cc.Service,
-				AccessKeyID:    cc.AccessKeyID,
-				SecretAccessKey: cc.SecretAccessKey,
-			},
-		}, nil
-
-	case "pocketbase":
-		if cc.Email == "" || cc.Password == "" {
-			return nil, nil
-		}
-		return &Credential{
-			Type:       "pocketbase",
-			HeaderName: "authorization",
-			PocketBaseConfig: &PocketBaseResolvedConfig{
-				URL:        cc.URL,
-				Collection: cc.Collection,
-				Email:      cc.Email,
-				Password:   cc.Password,
-			},
-		}, nil
-
-	case "fly_oidc":
-		if cc.Audience == "" || cc.FlyConfig == "" {
-			return nil, nil
-		}
-		return &Credential{
-			Type:       "fly_oidc",
-			HeaderName: "authorization",
-			FlyOIDCConfig: &FlyOIDCResolvedConfig{
-				Audience:  cc.Audience,
-				FlyConfig: cc.FlyConfig,
-			},
-		}, nil
-
 	default:
-		return nil, fmt.Errorf("unknown credential type: %s", cc.Type)
+		result := make(map[string]any, len(cc.Options)+9)
+		for key, value := range cc.Options {
+			result[key] = value
+		}
+		copyNonEmpty := func(key, value string) {
+			if value != "" {
+				result[key] = value
+			}
+		}
+		copyNonEmpty("token", cc.Token)
+		copyNonEmpty("username", cc.Username)
+		copyNonEmpty("password", cc.Password)
+		copyNonEmpty("region", cc.Region)
+		copyNonEmpty("service", cc.Service)
+		copyNonEmpty("access_key_id", cc.AccessKeyID)
+		copyNonEmpty("secret_access_key", cc.SecretAccessKey)
+		copyNonEmpty("client_id", cc.ClientID)
+		copyNonEmpty("client_secret", cc.ClientSecret)
+		copyNonEmpty("refresh_token", cc.RefreshToken)
+		copyNonEmpty("token_url", cc.TokenURL)
+		return result
 	}
 }
 
@@ -374,8 +337,4 @@ func (cap *CapabilitiesConfig) validate(domain string) []string {
 			domain, cap.Hosts, domain))
 	}
 	return warnings
-}
-
-func basicAuth(username, password string) string {
-	return base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
 }

@@ -78,6 +78,7 @@ func (v VaultConfig) IsRemote() bool {
 
 type UpstreamConfig struct {
 	Credential   string   `toml:"credential,omitempty"`    // vault credential path (e.g., /stripe/live)
+	Policy       string   `toml:"policy,omitempty"`        // vault upstream policy path
 	Mode         string   `toml:"mode,omitempty"`          // "credential" (default) or "identity"
 	Scheme       string   `toml:"scheme,omitempty"`        // "https" (default) or "http"
 	Port         int      `toml:"port,omitempty"`          // defaults to 443 for https, 80 for http
@@ -334,6 +335,12 @@ func ValidateUpstreams(upstreams map[string]UpstreamConfig) error {
 			if len(u.Methods) > 0 || len(u.Paths) > 0 {
 				fmt.Fprintf(os.Stderr, "Warning: upstream %q has methods/paths caveats but no credential; caveats will have no effect\n", host)
 			}
+		}
+		if u.Policy != "" && !strings.HasPrefix(u.Policy, "/") {
+			return fmt.Errorf("upstream %q: policy path %q must start with /", host, u.Policy)
+		}
+		if u.Policy == "/" {
+			return fmt.Errorf("upstream %q: policy path must name a policy", host)
 		}
 	}
 	return nil

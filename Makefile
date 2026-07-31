@@ -1,6 +1,6 @@
 .PHONY: up down deploy deploy-vault build push build-local build-nix build-nix-base build-nix-env test clean-certs binaries
 
-REGISTRY ?= docker.system3.md
+SANDBOX_IMAGE ?= agent-creds-sandbox:latest
 
 # Docker Compose
 up:
@@ -17,10 +17,10 @@ deploy-vault:
 
 # Build and push base sandbox image
 build:
-	docker build -t $(REGISTRY)/sandbox -f claude-dev/Dockerfile .
+	docker build -t $(SANDBOX_IMAGE) -f claude-dev/Dockerfile .
 
 push: build
-	docker push $(REGISTRY)/sandbox
+	docker push $(SANDBOX_IMAGE)
 
 # Build local customization layer (gitignored)
 build-local:

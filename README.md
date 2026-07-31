@@ -43,11 +43,12 @@ reach a prompt, tool log, dependency, or compromised subprocess.
 ## How it works
 
 ```text
-  PER-AGENT SANDBOX
+  PER AGENT
 
+  bwrap / gVisor / runc
 +----------------------+
-| bwrap, gVisor, runc  |
 | Codex, Claude, Pi    |
+| CLIs, SDKs, git      |
 | TOKEN=acm_...        |
 +----------+-----------+
            |

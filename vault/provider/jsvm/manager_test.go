@@ -2,6 +2,7 @@ package jsvm
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -253,6 +254,77 @@ registerCredentialProvider({
 	if got := result.Headers["authorization"]; got != "session-token" {
 		t.Fatalf("authorization = %q, want session-token", got)
 	}
+}
+
+func TestExecRunCanReplaceInheritedEnvironment(t *testing.T) {
+	t.Setenv("AGENT_CREDS_EXEC_PARENT", "must-not-leak")
+	directory := t.TempDir()
+	writeScript(t, directory, "exec.provider.js", fmt.Sprintf(`
+registerCredentialProvider({
+  name: "exec",
+  credentialType: "exec-test",
+  resolve: function () {
+    var output = $exec.run(%q, ["-test.run=TestExecRunHelperProcess", "--"], {
+      inheritEnv: false,
+      env: {
+        AGENT_CREDS_EXEC_HELPER: "1",
+        AGENT_CREDS_EXEC_EXPLICIT: "available"
+      }
+    });
+    return { headers: { "x-exec-output": output } };
+  }
+});
+`, os.Args[0]))
+
+	manager, err := NewManager([]string{directory}, 1, []Spec{{
+		Name: "configured",
+		Type: "exec-test",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	configured := manager.Provider(Spec{Name: "configured", Type: "exec-test"})
+	got := resolveForTest(t, configured, provider.Request{}).Headers["x-exec-output"]
+	if got != "explicit=available;parent=" {
+		t.Fatalf("isolated child environment = %q", got)
+	}
+}
+
+func TestExecRunInheritsEnvironmentByDefault(t *testing.T) {
+	t.Setenv("AGENT_CREDS_EXEC_HELPER", "1")
+	t.Setenv("AGENT_CREDS_EXEC_PARENT", "inherited")
+	directory := t.TempDir()
+	writeScript(t, directory, "exec.provider.js", fmt.Sprintf(`
+registerCredentialProvider({
+  name: "exec",
+  credentialType: "exec-test",
+  resolve: function () {
+    var output = $exec.run(%q, ["-test.run=TestExecRunHelperProcess", "--"]);
+    return { headers: { "x-exec-output": output } };
+  }
+});
+`, os.Args[0]))
+
+	manager, err := NewManager([]string{directory}, 1, []Spec{{
+		Name: "configured",
+		Type: "exec-test",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	configured := manager.Provider(Spec{Name: "configured", Type: "exec-test"})
+	got := resolveForTest(t, configured, provider.Request{}).Headers["x-exec-output"]
+	if got != "explicit=;parent=inherited" {
+		t.Fatalf("default child environment = %q", got)
+	}
+}
+
+func TestExecRunHelperProcess(t *testing.T) {
+	if os.Getenv("AGENT_CREDS_EXEC_HELPER") != "1" {
+		return
+	}
+	fmt.Printf("explicit=%s;parent=%s", os.Getenv("AGENT_CREDS_EXEC_EXPLICIT"), os.Getenv("AGENT_CREDS_EXEC_PARENT"))
+	os.Exit(0)
 }
 
 func TestUpstreamPolicyReceivesVerifiedContextAndEveryConstraint(t *testing.T) {

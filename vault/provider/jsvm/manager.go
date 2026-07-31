@@ -36,6 +36,8 @@ const (
 	initializationTimeout    = 2 * time.Second
 	providerExecutionTimeout = 30 * time.Second
 	maxHTTPResponseBytes     = 4 << 20
+	maxExecOutputBytes       = 4 << 20
+	maxExecStderrBytes       = 64 << 10
 )
 
 // Spec identifies a configured JavaScript-backed credential. Specs are used to
@@ -909,10 +911,13 @@ func exportResult(vm *goja.Runtime, providerName string, value goja.Value) (prov
 }
 
 func (r *scriptRuntime) execRun(call goja.FunctionCall) goja.Value {
-	if len(call.Arguments) < 1 {
-		panic(r.vm.NewTypeError("$exec.run expects a command and optional argument array"))
+	if len(call.Arguments) < 1 || len(call.Arguments) > 3 {
+		panic(r.vm.NewTypeError("$exec.run expects a command, optional argument array, and optional options object"))
 	}
 	command := call.Arguments[0].String()
+	if strings.TrimSpace(command) == "" {
+		panic(r.vm.NewTypeError("$exec.run command must not be empty"))
+	}
 	var args []string
 	if len(call.Arguments) > 1 && !isNullish(call.Arguments[1]) {
 		exported := call.Arguments[1].Export()
@@ -931,24 +936,132 @@ func (r *scriptRuntime) execRun(call goja.FunctionCall) goja.Value {
 			panic(r.vm.NewTypeError("$exec.run arguments must be an array"))
 		}
 	}
+	inheritEnv, environment := r.execOptions(call)
 
 	ctx := r.callContext
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	cmd := exec.CommandContext(ctx, command, args...)
-	output, err := cmd.Output()
+	if !inheritEnv || len(environment) > 0 {
+		cmd.Env = mergedEnvironment(inheritEnv, environment)
+	}
+	stdout := &cappedBuffer{limit: maxExecOutputBytes}
+	stderr := &cappedBuffer{limit: maxExecStderrBytes}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	err := cmd.Run()
+	if stdout.exceeded {
+		panic(r.vm.NewGoError(fmt.Errorf("$exec.run output exceeded %d bytes", maxExecOutputBytes)))
+	}
 	if err != nil {
-		stderr := ""
-		if exitError, ok := err.(*exec.ExitError); ok {
-			stderr = strings.TrimSpace(string(exitError.Stderr))
+		stderrText := strings.TrimSpace(stderr.String())
+		if stderr.exceeded {
+			stderrText += " (truncated)"
 		}
-		if stderr != "" {
-			err = fmt.Errorf("%w: %s", err, stderr)
+		if stderrText != "" {
+			err = fmt.Errorf("%w: %s", err, stderrText)
 		}
 		panic(r.vm.NewGoError(err))
 	}
-	return r.vm.ToValue(strings.TrimSpace(string(output)))
+	return r.vm.ToValue(strings.TrimSpace(stdout.String()))
+}
+
+func (r *scriptRuntime) execOptions(call goja.FunctionCall) (bool, map[string]string) {
+	inheritEnv := true
+	environment := make(map[string]string)
+	if len(call.Arguments) < 3 || isNullish(call.Arguments[2]) {
+		return inheritEnv, environment
+	}
+
+	exported, ok := call.Arguments[2].Export().(map[string]any)
+	if !ok {
+		panic(r.vm.NewTypeError("$exec.run options must be an object"))
+	}
+	for key := range exported {
+		if key != "inheritEnv" && key != "env" {
+			panic(r.vm.NewTypeError("$exec.run unknown option %q", key))
+		}
+	}
+	if value, exists := exported["inheritEnv"]; exists {
+		configured, ok := value.(bool)
+		if !ok {
+			panic(r.vm.NewTypeError("$exec.run inheritEnv must be a boolean"))
+		}
+		inheritEnv = configured
+	}
+	if value, exists := exported["env"]; exists {
+		values, ok := value.(map[string]any)
+		if !ok {
+			panic(r.vm.NewTypeError("$exec.run env must be an object"))
+		}
+		for key, rawValue := range values {
+			text, ok := rawValue.(string)
+			if !ok {
+				panic(r.vm.NewTypeError("$exec.run environment values must be strings"))
+			}
+			if key == "" || strings.ContainsAny(key, "=\x00") {
+				panic(r.vm.NewTypeError("$exec.run environment name %q is invalid", key))
+			}
+			if strings.ContainsRune(text, '\x00') {
+				panic(r.vm.NewTypeError("$exec.run environment value for %q contains a null byte", key))
+			}
+			environment[key] = text
+		}
+	}
+	return inheritEnv, environment
+}
+
+func mergedEnvironment(inherit bool, overrides map[string]string) []string {
+	values := make(map[string]string, len(overrides))
+	if inherit {
+		for _, entry := range os.Environ() {
+			name, value, ok := strings.Cut(entry, "=")
+			if ok {
+				values[name] = value
+			}
+		}
+	}
+	for name, value := range overrides {
+		values[name] = value
+	}
+
+	names := make([]string, 0, len(values))
+	for name := range values {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	result := make([]string, 0, len(names))
+	for _, name := range names {
+		result = append(result, name+"="+values[name])
+	}
+	return result
+}
+
+type cappedBuffer struct {
+	buffer   bytes.Buffer
+	limit    int
+	exceeded bool
+}
+
+func (b *cappedBuffer) Write(value []byte) (int, error) {
+	written := len(value)
+	remaining := b.limit - b.buffer.Len()
+	if remaining <= 0 {
+		b.exceeded = true
+		return written, nil
+	}
+	if len(value) > remaining {
+		_, _ = b.buffer.Write(value[:remaining])
+		b.exceeded = true
+		return written, nil
+	}
+	_, _ = b.buffer.Write(value)
+	return written, nil
+}
+
+func (b *cappedBuffer) String() string {
+	return b.buffer.String()
 }
 
 func (r *scriptRuntime) httpRequest(call goja.FunctionCall) goja.Value {

@@ -45,6 +45,10 @@ local/
 # Local deployment extensions
 vault/providers.d/
 
+# Per-deployment SSH server identity
+vault/vault_host_key
+vault/vault_host_key.pub
+
 # Tokens
 .base-token
 

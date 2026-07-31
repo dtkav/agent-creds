@@ -25,10 +25,12 @@ COPY --from=builder /app/mintfs .
 COPY --from=builder /app/vault-admin .
 COPY --from=builder /app/vault-ssh .
 COPY --from=builder /app/providers.d ./providers.d
-COPY vault_host_key .
 
 # Create data directory for SQLite database
 RUN mkdir -p /data
+
+# wish generates an Ed25519 keypair here on first start. /data is persistent.
+ENV SSH_HOST_KEY=/data/vault_host_key
 
 # gRPC port for ext_authz
 EXPOSE 9001

@@ -383,6 +383,12 @@ boundary.
 - `AGENT_CREDS_PROVIDER_PATH`: Extension script files/directories (OS path-list syntax)
 - `AGENT_CREDS_PROVIDER_POOL`: JavaScript runtime pool size (defaults to available CPUs, capped at 8)
 - `VAULT_CONFIG`: Path to the decrypted `vault.yaml`
+- `SSH_HOST_KEY`: Path to the Vault SSH server's private host key
+
+The container generates a unique Ed25519 SSH host keypair at
+`/data/vault_host_key` on first start and retains it in the `vault-data`
+volume. Non-container runs generate `vault_host_key` in their working
+directory unless `SSH_HOST_KEY` is set. Never commit a deployment host key.
 
 ## Development Commands
 

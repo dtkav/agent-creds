@@ -213,6 +213,14 @@ func routerFilter() map[string]interface{} {
 	}
 }
 
+func (g *Generator) httpFilters() []map[string]interface{} {
+	return []map[string]interface{}{g.extAuthzFilter(), routerFilter()}
+}
+
+func (g *Generator) connectHTTPFilters() []map[string]interface{} {
+	return []map[string]interface{}{g.extAuthzFilter(), routerFilter()}
+}
+
 // accessLogConfig returns the access log config used by all HTTP connection managers.
 func accessLogConfig() []map[string]interface{} {
 	return []map[string]interface{}{
@@ -299,13 +307,10 @@ func (g *Generator) tlsFilterChain(host, statPrefix string) map[string]interface
 		"filters": []map[string]interface{}{{
 			"name": "envoy.filters.network.http_connection_manager",
 			"typed_config": map[string]interface{}{
-				"@type":       "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
-				"stat_prefix": statPrefix,
-				"access_log":  accessLogConfig(),
-				"http_filters": []map[string]interface{}{
-					g.extAuthzFilter(),
-					routerFilter(),
-				},
+				"@type":        "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
+				"stat_prefix":  statPrefix,
+				"access_log":   accessLogConfig(),
+				"http_filters": g.httpFilters(),
 				"route_config": map[string]interface{}{
 					"name": "local_route",
 					"virtual_hosts": []map[string]interface{}{{
@@ -339,13 +344,10 @@ func (g *Generator) httpFilterChain(hosts []string) map[string]interface{} {
 		"filters": []map[string]interface{}{{
 			"name": "envoy.filters.network.http_connection_manager",
 			"typed_config": map[string]interface{}{
-				"@type":       "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
-				"stat_prefix": "ingress_http_plaintext",
-				"access_log":  accessLogConfig(),
-				"http_filters": []map[string]interface{}{
-					g.extAuthzFilter(),
-					routerFilter(),
-				},
+				"@type":        "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
+				"stat_prefix":  "ingress_http_plaintext",
+				"access_log":   accessLogConfig(),
+				"http_filters": g.httpFilters(),
 				"route_config": map[string]interface{}{
 					"name":          "plaintext_route",
 					"virtual_hosts": g.httpVirtualHosts(hosts),
@@ -358,6 +360,12 @@ func (g *Generator) httpFilterChain(hosts []string) map[string]interface{} {
 // connectFilterChain accepts HTTPS CONNECT tunnels and plaintext forward-proxy
 // requests on the bwrap runtime's single Envoy port.
 func (g *Generator) connectFilterChain(httpHosts []string) map[string]interface{} {
+	connectFilterConfig := map[string]interface{}{
+		"envoy.filters.http.ext_authz": map[string]interface{}{
+			"@type":    "type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute",
+			"disabled": true,
+		},
+	}
 	connectRoute := map[string]interface{}{
 		"match": map[string]interface{}{
 			"connect_matcher": map[string]interface{}{},
@@ -369,12 +377,7 @@ func (g *Generator) connectFilterChain(httpHosts []string) map[string]interface{
 				"connect_config": map[string]interface{}{},
 			}},
 		},
-		"typed_per_filter_config": map[string]interface{}{
-			"envoy.filters.http.ext_authz": map[string]interface{}{
-				"@type":    "type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute",
-				"disabled": true,
-			},
-		},
+		"typed_per_filter_config": connectFilterConfig,
 	}
 	virtualHosts := g.httpVirtualHosts(httpHosts)
 	virtualHosts = append(virtualHosts, map[string]interface{}{
@@ -398,10 +401,7 @@ func (g *Generator) connectFilterChain(httpHosts []string) map[string]interface{
 				"upgrade_configs": []map[string]interface{}{{
 					"upgrade_type": "CONNECT",
 				}},
-				"http_filters": []map[string]interface{}{
-					g.extAuthzFilter(),
-					routerFilter(),
-				},
+				"http_filters": g.connectHTTPFilters(),
 				"route_config": map[string]interface{}{
 					"name":          "connect_route",
 					"virtual_hosts": virtualHosts,

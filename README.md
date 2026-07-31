@@ -10,7 +10,7 @@ the request, replace that token with the real credential, and forward it.
 Your existing CLIs and SDKs keep working. The secret never enters the agent's
 environment, terminal output, tool results, or model context.
 
-[Quickstart](#quickstart) · [Guide](#guide) ·
+[Quickstart](#quickstart) · [Examples](#examples-and-guides) · [Guide](#guide) ·
 [JavaScript extensions](#javascript-extensions) ·
 [Security model](#security-model)
 
@@ -42,29 +42,22 @@ reach a prompt, tool log, dependency, or compromised subprocess.
 
 ## How it works
 
-```text
- one per agent                                           one per deployment
+```mermaid
+flowchart LR
+  subgraph agent[Per agent]
+    sandbox["bwrap / gVisor / runc<br/>Codex · Claude · Pi<br/>CLIs · SDKs"]
+    envoy["Envoy<br/>per sandbox"]
+    sandbox -->|"configured hosts only<br/>acm_ capability"| envoy
+  end
 
-┌──────────────────────────┐
-│ bwrap / gVisor / runc    │
-│                          │
-│  Claude · Codex · Pi     │
-│  curl · git · SDKs       │
-│                          │
-│ SERVICE_API_TOKEN=acm_... │
-└────────────┬─────────────┘
-             │ only configured hosts
-             ▼
-      ┌─────────────┐       authorize + resolve       ┌──────────────────┐
-      │    Envoy    │ ───────────────────────────────▶ │      Vault       │
-      │ per sandbox │ ◀── approved request headers ── │ shared singleton │
-      └──────┬──────┘                                  │                  │
-             │                                         │ encrypted config │
-             │ Authorization: Bearer real-secret      │ JS providers     │
-             ▼                                         │ JS policies      │
-      ┌─────────────┐                                  └──────────────────┘
-      │ api.example │
-      └─────────────┘
+  subgraph deployment[Per deployment]
+    vault["Vault · shared singleton<br/>encrypted config<br/>JS providers and policies"]
+  end
+
+  api["Configured API"]
+  envoy -->|"authorize + resolve"| vault
+  vault -->|"approved headers"| envoy
+  envoy -->|"real upstream credential"| api
 ```
 
 For a credentialed request:
@@ -202,6 +195,15 @@ curl: (6) Could not resolve host: example.com
 
 Inside the sandbox, `SERVICE_API_TOKEN` starts with `acm_`. Your API receives
 the real token only after Vault approves the request.
+
+## Examples and guides
+
+- [Protect a Slack bot token](docs/guides/slack.md) with the built-in bearer
+  provider and verify it with `auth.test`.
+- [Protect a Stripe API key](docs/guides/stripe.md) with HTTP Basic
+  authentication and a path-scoped test-mode credential.
+- [Load trusted JavaScript extensions](examples/README.md), including a
+  command-backed session provider and a subject/scope policy.
 
 ## Guide
 
@@ -403,7 +405,10 @@ Files ending in `*.provider.js` or `*.policy.js` are loaded from
 `vault/providers.d` by default. Docker Compose mounts that directory
 read-only, and this repository ignores it so local deployment logic is not
 accidentally committed. `AGENT_CREDS_PROVIDER_PATH` can select other files or
-directories.
+directories. The bind mount is a development convenience; do not give an
+untrusted agent write access to this checkout while Vault is loading from it.
+
+Standalone, syntax-checked examples live in [`examples/`](examples/README.md).
 
 ### Example: exchange a long-lived secret for a session
 
@@ -495,7 +500,7 @@ The runtime also exposes:
 | API | Purpose |
 | --- | --- |
 | `$http.request(options)` | Context-bound HTTP request; no redirects and a 4 MiB response limit |
-| `$exec.run(command, args)` | Execute a program directly without a local shell |
+| `$exec.run(command, args, options)` | Execute a program directly without a local shell; supports an explicit child environment |
 | `$jwt.expiresAt(token)` | Read an unverified JWT `exp` for cache timing only |
 | `$log.debug/info/warn(message)` | Write provider diagnostics to Vault logs |
 
@@ -503,6 +508,22 @@ The runtime also exposes:
 can reuse the same headers. Cached results must include `expiresAt`.
 Registrations can be layered with `priority`, request matchers, header
 merging, and `stop`.
+
+`$exec.run` inherits Vault's environment for backward compatibility. Trusted
+providers that pass secrets to a helper should replace it explicitly:
+
+```js
+$exec.run("/usr/local/bin/session-helper", ["issue"], {
+  inheritEnv: false,
+  env: {
+    HOME: "/tmp",
+    SERVICE_ACCESS_TOKEN: config.access_token,
+  },
+});
+```
+
+Commands share the provider's 30-second request deadline. Standard output is
+limited to 4 MiB and error output to 64 KiB.
 
 ### Example: enforce application policy
 
@@ -613,6 +634,8 @@ private key and generated instance directory as host credentials.
 agents/                 bundled Claude, Codex, and Pi profiles
 cmd/actl/               Vault and instance control CLI
 cmd/adev/               sandbox orchestrator
+docs/guides/            end-to-end service guides
+examples/               trusted JavaScript extension examples
 plugins/                composable development-tool profiles
 vault/                  credential service, providers, policies, and token code
 vault/providers.d/      local trusted JavaScript extensions (ignored)

@@ -7,7 +7,6 @@ WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN mkdir -p providers.d
 
 # Build with CGO enabled for sqlite3
 RUN CGO_ENABLED=1 go build -o vault .
@@ -24,10 +23,10 @@ COPY --from=builder /app/mint .
 COPY --from=builder /app/mintfs .
 COPY --from=builder /app/vault-admin .
 COPY --from=builder /app/vault-ssh .
-COPY --from=builder /app/providers.d ./providers.d
 
-# Create data directory for SQLite database
-RUN mkdir -p /data
+# The public image contains no deployment extensions. Derived images may copy
+# reviewed providers here; Compose can also mount an administrator-owned path.
+RUN mkdir -p /data /app/providers.d
 
 # wish generates an Ed25519 keypair here on first start. /data is persistent.
 ENV SSH_HOST_KEY=/data/vault_host_key

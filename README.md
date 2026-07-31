@@ -1,245 +1,344 @@
 # agent-creds
 
-Agent sandbox with integrated credential injection proxy. Allows unmodified code to hit e.g. `https://api.stripe.com` and have API credentials injected transparently via an Envoy proxy with TLS termination.
+**Give autonomous coding agents real API access without giving them real API keys.**
+
+`agent-creds` runs Claude Code, Codex, Pi, or another command inside a
+deny-by-default network sandbox. The agent calls ordinary HTTPS APIs with a
+short-lived capability token. A per-agent Envoy and a shared Vault authorize
+the request, replace that token with the real credential, and forward it.
+
+Your existing CLIs and SDKs keep working. The secret never enters the agent's
+environment, terminal output, tool results, or model context.
+
+[Quickstart](#quickstart) · [Guide](#guide) ·
+[JavaScript extensions](#javascript-extensions) ·
+[Security model](#security-model)
 
 ![agent-creds sandbox](agent-creds.png)
 
+## Why agent-creds
 
-## Threat Model
+Coding agents are most useful when they can operate real systems: inspect
+production data, update source control, send messages, or call an internal
+API. Putting the corresponding API keys in an agent's environment creates an
+uncomfortable failure mode: anything the process can read can eventually
+reach a prompt, tool log, dependency, or compromised subprocess.
 
-This project addresses two security concerns when running AI agents with API access:
+`agent-creds` separates access from possession:
 
-### Primary: Credential Leakage to LLM Providers
+- **Credentials stay outside the sandbox.** The agent receives a macaroon
+  capability such as `acm_...`, never the upstream secret.
+- **Egress is allowlisted.** A sandbox can reach only the hosts declared for
+  that project, and only through its Envoy.
+- **Access can be narrower than the credential.** Host, method, path, time,
+  subject, and application-specific caveats constrain each token.
+- **Applications remain unmodified.** Environment variables, HTTP clients,
+  CLIs, and SDKs send their usual authentication headers.
+- **Deployment logic stays private.** Trusted JavaScript extensions can
+  exchange credentials, mint sessions, and enforce application policy without
+  adding company-specific code to the public binary.
+- **Many agents share one credential plane.** Vault is a singleton; each
+  sandbox gets its own Envoy and network boundary.
 
-When an AI agent makes API calls, the credentials are visible to the LLM provider in the conversation context. Even if the agent runs locally, tool outputs containing `Authorization: Bearer sk_live_...` headers get sent back to the model. This proxy keeps real credentials out of the agent's context entirely — the agent only sees an opaque macaroon token, while real API keys are injected server-side.
+## How it works
 
-### Secondary: Limiting Agent Blast Radius
+```text
+ one per agent                                           one per deployment
 
-A misbehaving or compromised agent with full API access can do significant damage. Macaroon tokens with caveats provide fine-grained restrictions:
-
-- **Host restrictions**: Token only works for specific APIs (e.g., `api.stripe.com` but not `api.openai.com`)
-- **Method restrictions**: Limit to read-only operations (`GET` only)
-- **Path restrictions**: Scope access to specific resources (`/v1/customers/*` but not `/v1/transfers/*`)
-- **Time restrictions**: Tokens expire automatically (default: 24 hours)
-
-This turns "full API access" into precisely scoped capabilities that match the agent's intended task.
-
-## Architecture
-
+┌──────────────────────────┐
+│ bwrap / gVisor / runc    │
+│                          │
+│  Claude · Codex · Pi     │
+│  curl · git · SDKs       │
+│                          │
+│ SERVICE_API_TOKEN=acm_... │
+└────────────┬─────────────┘
+             │ only configured hosts
+             ▼
+      ┌─────────────┐       authorize + resolve       ┌──────────────────┐
+      │    Envoy    │ ───────────────────────────────▶ │      Vault       │
+      │ per sandbox │ ◀── approved request headers ── │ shared singleton │
+      └──────┬──────┘                                  │                  │
+             │                                         │ encrypted config │
+             │ Authorization: Bearer real-secret      │ JS providers     │
+             ▼                                         │ JS policies      │
+      ┌─────────────┐                                  └──────────────────┘
+      │ api.example │
+      └─────────────┘
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    credential plane                         │
-│                                                             │
-│  ┌─────────────┐      ┌─────────────┐      ┌─────────────┐ │
-│  │   sandbox   │      │    envoy    │      │    vault    │ │
-│  │  (your app) │─────▶│  (TLS term) │─────▶│  (tokens)   │ │
-│  └─────────────┘      └─────────────┘      └─────────────┘ │
-│   iptables NAT:           │                                 │
-│   all TCP → envoy         │                                 │
-│                           ▼                                 │
-└───────────────────────────┼─────────────────────────────────┘
-                            │ HTTPS
-                            ▼
-                    api.stripe.com (real)
-```
 
-- **sandbox**: Container or `bwrap` process running your code with no direct network path
-- **envoy**: Per-sandbox egress proxy that terminates TLS and asks Vault to authorize requests
-- **vault**: Singleton credential service shared by sandboxes; validates macaroons, runs trusted upstream policy, and injects credentials
+For a credentialed request:
 
-## Quick Start
+1. `adev` creates the sandbox, its network namespace, and a scoped macaroon.
+2. The sandbox can resolve and connect only to configured upstreams.
+3. Envoy terminates the sandbox's TLS connection and asks Vault to authorize
+   the request.
+4. Vault verifies the macaroon signature and every applicable caveat and
+   policy.
+5. A built-in or JavaScript credential provider returns the real upstream
+   headers.
+6. Envoy forwards the request. The agent sees the response, but never the
+   credential used to obtain it.
+
+The proxy handles the credential boundary; it is not a general secrets manager
+inside the sandbox.
+
+## Quickstart
+
+This walkthrough launches Codex in a `bwrap` sandbox and gives one project
+narrow access to an API. Substitute your API's hostname, path, and bearer
+token. At the end, the configured request succeeds, an unconfigured request
+fails, and the raw token has never entered the sandbox.
 
 ### Prerequisites
 
-- Docker and Docker Compose
-- Go 1.24+ (for building tools)
-- `sops` (for the encrypted Vault configuration)
-- **bubblewrap** for the lightweight host-process runtime, or Docker plus
-  [gVisor runsc](https://gvisor.dev/docs/user_guide/install/) for container runtimes
+The `bwrap` runtime currently targets Linux and requires:
 
-### Setup
+- Go 1.24 or later
+- Docker with the Compose plugin
+- [SOPS](https://github.com/getsops/sops)
+- `bwrap`, `slirp4netns`, `unshare`, and `setpriv`
+- [zmx](https://github.com/neurosnap/zmx) and a systemd user session
+- The agent CLI you intend to run, such as `codex`, on the host `PATH`
 
-```bash
-# Create project config (or copy agent-creds.example.toml)
-cat > agent-creds.toml << 'EOF'
-[sandbox]
-name = "myproject"
-# Bundled agents: "claude", "codex", or "pi"
-agent = "claude"
+The container runtimes are also available: use `runtime = "gvisor"` with
+[gVisor](https://gvisor.dev/docs/user_guide/install/) or
+`runtime = "runc"` with Docker's default runtime.
 
-[upstream."api.anthropic.com"]
-[upstream."claude.ai"]
-[upstream."platform.claude.com"]
+### 1. Build the host tools
 
-[[browser_target]]
-url = "https://claude.ai/oauth/authorize*"
-
-[[browser_target]]
-url = "http://localhost:*"
-EOF
-
-# Build the host tools and initialize the encrypted singleton Vault config
-make binaries
-bin/actl vault init
-
-# Launch sandbox
-bin/adev console
+```console
+$ git clone https://github.com/dtkav/agent-creds.git
+$ cd agent-creds
+$ make binaries
+$ export PATH="$PWD/bin:$PATH"
 ```
 
-### adev
+The executables remain tied to this checkout: `adev` uses the files beside
+its `bin/` directory to build sandboxes and start the credential plane.
 
-`adev` is the main development tool. It launches sandboxed environments where your code runs with transparent API proxying.
+### 2. Initialize Vault
 
-```bash
-adev              # Show running instances (interactive TUI)
-adev console      # Start or attach to sandbox for current directory
-adev console foo  # Start or attach to sandbox named "foo"
-adev stop         # Stop sandbox for current directory
-adev stop foo     # Stop sandbox named "foo"
+```console
+$ actl vault init
+Age key stored in keychain ...
+Vault config: ~/.config/agent-creds/vault.yaml
 ```
 
-**What adev does:**
+Initialization creates independent macaroon signing and encryption keys,
+stores the age identity in your system keychain, and writes a SOPS-encrypted
+Vault configuration. Running it again is safe: an existing configuration is
+left in place.
 
-- Makes your current project writable inside the selected sandbox runtime
-- **Blocks all network traffic by default** — the sandbox has no internet access except through the proxy
-- Routes only the domains listed in `agent-creds.toml` through envoy
-- **Hot-reloads** when you edit `agent-creds.toml` (add/remove upstreams without restart)
-- Starts the singleton Vault service and a per-instance Envoy if needed
-- Attaches to existing instances instead of creating duplicates
+Add the API token you want the agent to use:
 
-Multiple named sandboxes can run concurrently.
+```console
+$ actl vault edit
+```
 
-### Agent Profiles
+Add a secret group below the generated `vault` group:
 
-Set `[sandbox].agent` to use a bundled agent profile. Profiles add the agent's
-packages, network allowlist entries, and browser login targets to the merged
-sandbox config.
+```yaml
+# Add below `secrets.vault`; leave the generated keys unchanged.
+  service:
+    API_TOKEN: replace-with-your-api-token
+```
+
+Then replace the initial `credentials: {}` with:
+
+```yaml
+credentials:
+  service/dev:
+    type: bearer
+    token:
+      $secret: service#API_TOKEN
+    env: SERVICE_API_TOKEN
+```
+
+> [!IMPORTANT]
+> Put raw credentials only below `secrets`. SOPS encrypts that subtree.
+> Project configuration and credential definitions should contain
+> `$secret` references, never copied API keys.
+
+### 3. Configure a project
+
+From the project the agent will work on, create `agent-creds.toml`:
 
 ```toml
 [sandbox]
-agent = "claude"  # or "codex" / "pi"
-```
-
-The Pi profile includes OpenRouter network access. To inject an OpenRouter API
-key through the vault, configure the upstream with a bearer credential whose
-environment variable is `OPENROUTER_API_KEY`:
-
-```toml
-[upstream."openrouter.ai"]
-credential = "/openrouter"
-```
-
-### actl
-
-`actl` is a control utility for monitoring and managing sandbox instances.
-
-```bash
-actl              # Interactive TUI showing all instances
-actl status       # Show status for current project (containers, vault connectivity)
-```
-
-The TUI shows all running adev instances with their status (running/partial/stopped).
-
-### Network Isolation
-
-Inside the sandbox, only configured domains are reachable:
-
-```bash
-# Works - domain is in agent-creds.toml
-curl https://api.stripe.com/v1/customers \
-  -H "Authorization: Bearer $STRIPE_TOKEN"
-
-# Blocked - domain not configured
-curl https://example.com  # connection refused
-```
-
-### Credential Injection
-
-Envoy replaces macaroons for the real API key before forwarding to the upstream.
-
-```bash
-# 1. Mint a token (on host, before launching sandbox)
-export STRIPE_TOKEN=$(bin/mint --hosts api.stripe.com --valid-for 1h)
-
-# 2. Launch sandbox with token as env var
-STRIPE_TOKEN=$STRIPE_TOKEN adev console
-
-# 3. Inside sandbox, use the token normally
-curl https://api.stripe.com/v1/customers \
-  -H "Authorization: Bearer $STRIPE_TOKEN"
-```
-
-The sandbox never sees `sk_live_...` — only the macaroon token. The vault service validates the token and injects the real Stripe API key before the request reaches Stripe.
-
-### Minting Tokens
-
-Tokens can include caveats that restrict what the token can do:
-
-```bash
-# Full access to configured APIs
-bin/mint
-
-# Read-only access to Stripe customers endpoint for 1 hour
-bin/mint --hosts api.stripe.com --methods GET --paths "/v1/customers/*" --valid-for 1h
-```
-
-#### Token Options
-
-| Flag | Description | Example |
-|------|-------------|---------|
-| `--hosts` | Allowed API hosts | `api.stripe.com,api.openai.com` |
-| `--methods` | Allowed HTTP methods | `GET,POST` |
-| `--paths` | Allowed path patterns (`*` = segment, `**` = multiple) | `/v1/customers/*` |
-| `--constraint` | Application-owned attenuation, repeatable `namespace=JSON` | `records={"services":["ledger"]}` |
-| `--valid-for` | Token expiration | `1h`, `24h`, `7d` |
-| `--not-before` | Validity start time (RFC3339) | `2024-01-01T00:00:00Z` |
-| `--show-caveats` | Print caveats to stderr | |
-
-Tokens without restrictions (no `--hosts`, `--methods`, `--paths`, or
-`--constraint`) have full access to all configured APIs. Application
-constraints are restrictive macaroon caveats: holders can append them offline,
-so an upstream policy must evaluate every constraint conjunctively.
-
-### Passthrough Mode
-
-Not all requests need credential injection. The vault checks the `Authorization` header:
-
-- **Macaroon tokens** (prefix `acm_`): Validated and swapped for real credentials
-- **Other tokens / no auth**: Passed through unchanged to the upstream
-
-Passthrough allows the proxy to handle APIs that don't require credentials, or that use different auth schemes. To require macaroons for all requests, set `STRICT_MODE=true` on the vault service.
-
-### Error Responses
-
-When token validation fails, the vault returns specific HTTP errors:
-
-| Status | Cause | Example |
-|--------|-------|---------|
-| **401 Unauthorized** | Invalid/expired macaroon, bad signature | `Unauthorized: token expired` |
-| **403 Forbidden** | Valid token but caveat violation | `Unauthorized: host not allowed` |
-| **403 Forbidden** | No credentials configured for host | `No credentials configured for this host` |
-
-The response body includes a message explaining the failure. Check vault logs for detailed diagnostics.
-
-## Configuration
-
-### agent-creds.toml (per-project)
-
-Controls the sandbox configuration, and which domains are routed through the proxy:
-
-```toml
-[sandbox]
-name = "myproject"
-# runtime = "bwrap"  # or "gvisor" / "runc"
-# memory = "8g"     # memory limit (e.g., "8g", "512m")
-# cpus = "4"        # CPU limit (e.g., "4", "1.5")
+name = "api-demo"
+runtime = "bwrap"
+agent = "codex"
 
 [upstream."api.example.com"]
-credential = "/example/prod"
-policy = "/example/write"
+credential = "/service/dev"
+methods = ["GET"]
+paths = ["/v1/me"]
+```
 
-# Authenticate a request without injecting a credential. Vault overwrites
-# x-agent-creds-* identity headers with facts from the verified macaroon.
+The project file contains policy, not secrets, so it can be reviewed and
+committed with the rest of the project.
+
+### 4. Start the agent
+
+```console
+$ adev console
+```
+
+On first start, `adev` builds and launches the shared Vault, a per-project
+Envoy, and the sandbox. Vault also creates a unique SSH host key in its
+persistent Docker volume if one is missing.
+
+Ask the agent to run:
+
+```console
+$ curl -sS https://api.example.com/v1/me \
+    -H "Authorization: Bearer $SERVICE_API_TOKEN"
+<response from your API>
+
+$ curl -sS https://example.com
+curl: (6) Could not resolve host: example.com
+```
+
+Inside the sandbox, `SERVICE_API_TOKEN` starts with `acm_`. Your API receives
+the real token only after Vault approves the request.
+
+## Guide
+
+### Run an agent
+
+Bundled profiles configure the agent command, its development tools, and the
+network endpoints needed for login and API traffic:
+
+```toml
+[sandbox]
+runtime = "bwrap"
+agent = "claude"  # "codex" or "pi" also work
+```
+
+The profiles deliberately disable the agent's own approval prompts. The outer
+sandbox and credential plane are the security boundary.
+
+Common commands:
+
+```console
+$ adev                 # List all instances
+$ adev console         # Start or attach to this project's agent
+$ adev console review  # Use a named instance
+$ adev start           # Start a bwrap instance in the background
+$ adev stop            # Stop this project's instance
+$ adev setup           # Configure credential access interactively
+```
+
+A `bwrap` agent runs in a zmx-hosted session, so it can detach and resume
+without losing the process. Multiple agents can run concurrently; they share
+Vault but not Envoy, tokens, generated configuration, or network namespaces.
+
+### Declare network and credential access
+
+Every reachable upstream must appear in `agent-creds.toml`:
+
+```toml
+[sandbox]
+name = "service-review"
+runtime = "bwrap"
+agent = "codex"
+
+[upstream."api.example.com"]
+credential = "/service/read"
+methods = ["GET"]
+paths = ["/v1/customers/**", "/v1/subscriptions/**"]
+
+[upstream."api.github.com"]
+# No credential: existing caller authentication passes through unchanged.
+methods = ["GET"]
+paths = ["/repos/example/**"]
+```
+
+The main upstream fields are:
+
+| Field | Meaning |
+| --- | --- |
+| `credential` | Vault credential path, such as `/service/read` |
+| `policy` | Trusted Vault policy path; selecting one requires a valid macaroon |
+| `methods` | Allowed HTTP methods; empty means all |
+| `paths` | Allowed path patterns; `*` matches one segment and `**` matches many |
+| `mode` | `credential` (default) or `identity` |
+| `forward_token` | Accept an application-supplied macaroon instead of minting an environment token |
+| `scheme`, `port` | Upstream transport; defaults to HTTPS on 443 |
+| `address`, `network` | Fixed origin and Envoy-only Docker network for private services |
+
+Changes to upstreams are watched. Envoy configuration and credential tokens
+are refreshed without rebuilding the entire environment when possible.
+
+See [`agent-creds.example.toml`](agent-creds.example.toml) for browser, CDP,
+identity-route, and plugin examples.
+
+### Configure credentials
+
+Vault configuration lives at
+`~/.config/agent-creds/vault.yaml` and is edited with:
+
+```console
+$ actl vault edit
+$ actl vault show --credentials
+$ actl vault show --capabilities /service/read
+$ actl vault credentials add /github/automation
+```
+
+The public Vault supports four credential types:
+
+| Type | Configuration | Injected authentication |
+| --- | --- | --- |
+| `bearer` | `token` | `Authorization: Bearer ...` |
+| `basic` | `username`, `password` | HTTP Basic authentication |
+| `oauth2` | client ID/secret, refresh token, token URL | Refreshed bearer access token |
+| `sigv4` | region, service, access key ID/secret | AWS Signature Version 4 headers |
+
+A complete built-in credential can also describe its intended capabilities:
+
+```yaml
+credentials:
+  service/read:
+    type: bearer
+    token:
+      $secret: service#API_TOKEN
+    env: SERVICE_API_TOKEN
+    capabilities:
+      hosts: [api.example.com]
+      endpoints:
+        - methods: [GET]
+          paths: [/v1/customers/**, /v1/subscriptions/**]
+          description: Read billing customers and subscriptions
+```
+
+Capabilities make access discoverable to `adev setup`; the project route and
+macaroon caveats provide request-time enforcement.
+
+### Scope access
+
+For credentialed routes, `adev` derives host, method, and path caveats from
+the project configuration. The agent receives only the resulting capability,
+not a copy of the root key or upstream credential.
+
+Macaroons can also carry:
+
+- validity windows;
+- an opaque application subject;
+- third-party attestation requirements; and
+- repeatable `namespace=JSON` application constraints.
+
+Application constraints are attenuating: a holder can append more constraints
+offline but cannot remove existing ones. A policy must therefore understand
+the namespace, reject unknown namespaces, and evaluate every constraint
+conjunctively.
+
+### Authenticate an internal service
+
+An identity route verifies a subject-scoped macaroon without selecting or
+injecting an upstream credential:
+
+```toml
 [upstream."records.internal"]
 mode = "identity"
 policy = "/records/read"
@@ -251,269 +350,286 @@ methods = ["POST"]
 paths = ["/graphql"]
 ```
 
-`credential` selects a Vault credential. `policy` selects a trusted Vault
-policy and makes the route require a valid macaroon even when global strict
-mode is disabled. Identity routes verify a subject-scoped macaroon, apply the
-route policy, and forward only Vault-owned `x-agent-creds-*` identity headers;
-they do not inject a credential.
+Vault strips caller-supplied `x-agent-creds-*` headers and writes verified
+identity facts itself. The service may use those facts for convenience, but
+Vault and its selected policy remain the authorization boundary.
 
-### vault.yaml (vault service)
+### Browser and CDP access
 
-`actl vault init` creates the encrypted configuration. Credential map keys are
-paths selected by project upstreams, rather than necessarily being host names.
-Secret references resolve against the encrypted `secrets` map before provider
-or policy configuration is loaded.
+Host browser forwarding is separately allowlisted:
 
-```yaml
-secrets:
-  local:
-    SIGNING_KEY: base64-encoded-32-byte-key
-    API_TOKEN: secret-api-token
+```toml
+[[browser_target]]
+url = "https://github.com/login/oauth*"
 
-signing_key:
-  $secret: local#SIGNING_KEY
-
-credentials:
-  example/prod:
-    type: bearer
-    token:
-      $secret: local#API_TOKEN
-    policy: example/write
-
-policies:
-  example/write:
-    type: example_acl
-    allowed_service: ledger
+[[browser_target]]
+url = "http://localhost:*"
 ```
 
-Public credential types are `bearer`, `basic`, `oauth2` refresh tokens, and
-AWS `sigv4`. Other types are supplied by trusted JavaScript extensions.
+CDP forwarding can expose only selected browser targets to Playwright,
+Puppeteer, or another client:
 
-### JavaScript credential providers
+```toml
+[sandbox]
+use_host_browser_cdp = true
 
-Deployment-specific credential types can live outside the public Go binary as
-trusted `*.provider.js` files. By default the vault loads `providers.d` relative
-to its working directory; set `AGENT_CREDS_PROVIDER_PATH` to an
-OS-path-list-separated set of files or directories.
+[[cdp_target]]
+type = "page"
+url = "*localhost:3000*"
+```
+
+An empty target list blocks all browser or CDP targets. Matching is
+conjunctive when a target specifies multiple fields.
+
+### Observe the credential plane
+
+```console
+$ actl                 # TUI for all instances
+$ actl status          # Current project and Vault connectivity
+$ actl vault log       # Authorization and denial audit entries
+$ docker compose logs -f vault
+```
+
+Authorization failures return `401` for invalid or expired authentication
+and `403` for a valid token that violates caveats or policy.
+
+## JavaScript extensions
+
+Built-in providers cover common protocols. Deployment-specific exchanges and
+authorization rules belong in trusted JavaScript, loaded by Vault rather than
+compiled into the public binary.
+
+Files ending in `*.provider.js` or `*.policy.js` are loaded from
+`vault/providers.d` by default. Docker Compose mounts that directory
+read-only, and this repository ignores it so local deployment logic is not
+accidentally committed. `AGENT_CREDS_PROVIDER_PATH` can select other files or
+directories.
+
+### Example: exchange a long-lived secret for a session
+
+Create `vault/providers.d/acme-session.provider.js`:
 
 ```js
 registerCredentialProvider({
-  name: "example-session",
-  credentialType: "example_session",
-  priority: 100,
+  name: "acme-session",
+  credentialType: "acme_session",
   cache: "credential",
+
   match: {
-    hosts: ["api.example.com"],
+    hosts: ["api.acme.example"],
     methods: ["GET", "POST"],
     paths: ["/v1/**"],
   },
+
   validate(config) {
-    if (!config.account) throw new Error("account is required");
+    if (!config.token_url) throw new Error("token_url is required");
+    if (!config.client_id) throw new Error("client_id is required");
+    if (!config.client_secret) throw new Error("client_secret is required");
   },
-  resolve(request, config) {
-    const token = $exec.run("example-login", ["--account", config.account]);
+
+  resolve(_request, config) {
+    const response = $http.request({
+      method: "POST",
+      url: config.token_url,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        client_id: config.client_id,
+        client_secret: config.client_secret,
+      }),
+    });
+
+    if (response.status !== 200) {
+      throw new Error("session exchange returned " + response.status);
+    }
+
+    const session = JSON.parse(response.body);
     return {
-      headers: { authorization: "Bearer " + token },
-      expiresAt: $jwt.expiresAt(token),
+      headers: {
+        authorization: "Bearer " + session.access_token,
+      },
+      expiresAt: $jwt.expiresAt(session.access_token),
       stop: true,
     };
   },
 });
 ```
 
-The configured credential type is the first selector. Matching registrations
-then run in ascending `priority`, source-filename, and registration order.
-Headers are merged in that order, so a later handler overwrites an earlier
-value; `stop: true` ends the chain. Empty match lists match every request for
-that credential type. Results are request-dependent by default. A registration
-may set `cache: "credential"` only when its headers are safe to reuse for every
-request that matches it; cached results also require `expiresAt`. The matched
-handler set is part of the cache key.
+Select that credential type in `vault.yaml`:
 
-Provider scripts are hot-reloaded. The vault builds and validates a complete
-new runtime pool before swapping it into service; a syntax or validation error
-leaves the last known-good set active. Scripts are trusted deployment code.
-`$exec.run(command, args)` executes a program directly without a local shell.
-`$http.request(options)` performs a context-bound HTTP request without following
-redirects and caps the response body at 4 MiB. `$jwt.expiresAt(token)` reads an
-unverified JWT expiry for cache timing only.
-`AGENT_CREDS_PROVIDER_POOL` optionally controls the runtime pool size.
+```yaml
+secrets:
+  acme:
+    CLIENT_ID: deployment-client
+    CLIENT_SECRET: deployment-secret
 
-### JavaScript upstream policies
+credentials:
+  acme/prod:
+    type: acme_session
+    token_url: https://auth.acme.example/v1/session
+    client_id:
+      $secret: acme#CLIENT_ID
+    client_secret:
+      $secret: acme#CLIENT_SECRET
+    env: ACME_API_TOKEN
+```
 
-Trusted `*.policy.js` files use the same atomic, hot-reloadable runtime. A
-policy receives only request facts produced after macaroon verification. The
-policy owns the meaning of application namespaces and must reject unknown
-namespaces and evaluate every constraint it receives.
+Then select `/acme/prod` from a project upstream. The agent receives a
+macaroon in `ACME_API_TOKEN`; Vault performs the exchange and caches only the
+short-lived session until its JWT expiry.
+
+Provider functions receive request facts and credential configuration:
+
+```js
+resolve({
+  credential,
+  credentialType,
+  host,
+  method,
+  path,
+  headers,
+}, config)
+```
+
+The runtime also exposes:
+
+| API | Purpose |
+| --- | --- |
+| `$http.request(options)` | Context-bound HTTP request; no redirects and a 4 MiB response limit |
+| `$exec.run(command, args)` | Execute a program directly without a local shell |
+| `$jwt.expiresAt(token)` | Read an unverified JWT `exp` for cache timing only |
+| `$log.debug/info/warn(message)` | Write provider diagnostics to Vault logs |
+
+`cache: "credential"` is opt-in and is safe only when every matching request
+can reuse the same headers. Cached results must include `expiresAt`.
+Registrations can be layered with `priority`, request matchers, header
+merging, and `stop`.
+
+### Example: enforce application policy
+
+A policy receives only request facts produced after macaroon verification:
 
 ```js
 registerUpstreamPolicy({
-  name: "example-acl",
-  policyType: "example_acl",
+  name: "records-scope",
+  policyType: "records_scope",
+
   validate(config) {
-    if (!config.allowed_service) throw new Error("allowed_service is required");
+    if (!config.service) throw new Error("service is required");
   },
+
   authorize(request, config) {
-    if (!request.subject) return { allow: false, reason: "subject required" };
-    for (const caveat of request.constraints) {
-      if (caveat.namespace !== "records") {
+    if (!request.subject) {
+      return { allow: false, reason: "subject required" };
+    }
+
+    for (const constraint of request.constraints) {
+      if (constraint.namespace !== "records") {
         return { allow: false, reason: "unknown constraint namespace" };
       }
-      if (!caveat.body.services.includes(config.allowed_service)) {
+      if (!constraint.body.services.includes(config.service)) {
         return { allow: false, reason: "service excluded" };
       }
     }
+
     return true;
   },
 });
 ```
 
-Route policies are selected with `policy` in `agent-creds.toml`; credentials
-may also bind a policy in `vault.yaml`. When both are present, both must allow.
-A credential request carrying application constraints fails closed if no
-policy is selected. An identity service may inspect the original macaroon for
-convenience, but Vault and the upstream policy remain the authorization
-boundary.
+Configure its implementation in Vault and select the path from a route:
 
-### Environment Variables
-
-- `MACAROON_SIGNING_KEY`: Base64-encoded 32+ byte key for signing/verifying tokens
-- `TOKEN_PREFIX`: Macaroon token prefix (default: `acm_`)
-- `STRICT_MODE`: Set to `true` to reject non-macaroon requests (disables passthrough)
-- `AGENT_CREDS_PROVIDER_PATH`: Extension script files/directories (OS path-list syntax)
-- `AGENT_CREDS_PROVIDER_POOL`: JavaScript runtime pool size (defaults to available CPUs, capped at 8)
-- `VAULT_CONFIG`: Path to the decrypted `vault.yaml`
-- `SSH_HOST_KEY`: Path to the Vault SSH server's private host key
-
-The container generates a unique Ed25519 SSH host keypair at
-`/data/vault_host_key` on first start and retains it in the `vault-data`
-volume. Non-container runs generate `vault_host_key` in their working
-directory unless `SSH_HOST_KEY` is set. Never commit a deployment host key.
-
-## Development Commands
-
-```bash
-# Primary workflow
-adev              # Interactive TUI showing running sandboxes
-adev console      # Start or attach to sandbox
-
-# Vault service
-make up           # Start vault with docker-compose
-make down         # Stop vault
-
-# Building
-make build        # Build sandbox Docker image
-make binaries     # Build all CLI tools to bin/
-
-# Maintenance
-make deploy       # Deploy vault service to Fly.io
-make clean-certs  # Remove generated certs (forces regeneration)
+```yaml
+policies:
+  records/read:
+    type: records_scope
+    service: ledger
 ```
 
-## Files
-
-```
-.
-├── agent-creds.toml      # Project config (per-project)
-├── docker-compose.yml    # Vault service config
-├── Makefile              # Build/deploy commands
-├── envoy-entrypoint.sh   # Runtime cert generation for envoy
-├── cmd/
-│   ├── adev/             # Development orchestrator
-│   ├── actl/             # Control utility for managing instances
-│   ├── aenv/             # Environment variable helper
-│   └── cdp-proxy/        # Chrome DevTools Protocol proxy
-├── generated/            # Generated files (gitignored)
-│   ├── certs/            # CA certificate (domain certs generated at runtime)
-│   ├── envoy.json        # Envoy config
-│   └── domains.json      # Domain config for runtime cert generation
-├── vault/
-│   ├── main.go           # gRPC vault service
-│   ├── macaroon/         # Macaroon token library
-│   ├── cmd/mint/         # Token minting CLI
-│   └── Dockerfile
-└── bin/                  # Built binaries (run make binaries)
-```
-
-## How It Works
-
-1. **CA Generation**: `adev` creates a CA cert once in `generated/certs/`
-2. **Runtime Certs**: `envoy-entrypoint.sh` generates domain certs at startup using the CA
-3. **Traffic Interception**: iptables NAT rules redirect all outbound TCP to envoy
-4. **TLS Termination**: Envoy terminates TLS using SNI to select the right certificate, so `https://api.stripe.com` works with unmodified code
-5. **Token Verification**: Vault verifies the macaroon token signature and checks caveats (host, method, path, validity)
-6. **Upstream Policy**: Trusted deployment policy evaluates the verified subject and every application constraint
-7. **Credential Injection**: On successful authorization, Vault resolves and injects the configured credential
-
-## Advanced Features
-
-### Browser Forwarding
-
-Code inside the sandbox can open URLs in your host's default browser:
-
-```bash
-xdg-open https://accounts.google.com/oauth/authorize?...
-```
-
-This enables OAuth flows where:
-1. Sandbox code calls `xdg-open` with auth URL → browser opens on host
-2. User authenticates in host browser
-3. OAuth callback to `localhost:PORT` routes back into the sandbox
-
-The callback routing works automatically—adev detects localhost URLs with ports and proxies incoming connections from the host back to the sandbox.
-
-Configure in `agent-creds.toml`:
 ```toml
-[sandbox]
-use_host_browser = true  # default
-
-# URL allow-list (required - empty = all blocked)
-[[browser_target]]
-url = "*accounts.google.com/o/oauth*"
-
-[[browser_target]]
-url = "http://localhost:*"
+[upstream."records.internal"]
+mode = "identity"
+policy = "/records/read"
 ```
 
-Only URLs matching a `[[browser_target]]` pattern will be opened. All others are blocked.
+If a route and its credential both select policies, both must allow. A
+credential request carrying application constraints fails closed when no
+policy is selected.
 
-### Chrome DevTools Protocol (CDP)
+Extension reloads are atomic: Vault builds and validates a complete new runtime
+pool before activating it. Syntax, registration, or validation errors leave
+the last known-good generation serving traffic.
 
-Control your host's Chrome browser from inside the sandbox. Playwright, Puppeteer, and other automation tools connect to `localhost:9222` which forwards to Chrome on your host.
+> [!WARNING]
+> JavaScript extensions are trusted deployment code. They run beside Vault,
+> can receive resolved secret configuration, and may use the network or execute
+> installed programs. Do not mount unreviewed scripts.
 
-```python
-# Inside sandbox - controls host Chrome
-from playwright.sync_api import sync_playwright
-with sync_playwright() as p:
-    browser = p.chromium.connect_over_cdp("http://localhost:9222")
-    page = browser.new_page()
-    page.goto("https://example.com")
+## Security model
+
+`agent-creds` assumes the host, Vault, Envoy, and reviewed JavaScript
+extensions are trusted. The agent, its commands, project dependencies, and
+network responses are untrusted.
+
+The design provides:
+
+- no real upstream credentials in the sandbox;
+- deny-by-default egress with per-project host allowlists;
+- per-request macaroon verification and attenuation;
+- optional trusted policies over verified identity and application claims;
+- encrypted Vault configuration at rest with the age identity in the system
+  keychain;
+- a unique, persistent Vault SSH host key generated on first start; and
+- audit records for authorization decisions and denials.
+
+A configured upstream without a credential or policy is a passthrough route:
+non-macaroon authentication is forwarded unchanged. This is useful for agent
+OAuth and public APIs, but it does not protect a caller-supplied secret. Set
+`STRICT_MODE=true` to require macaroons globally. Selecting a credential,
+policy, or identity mode already requires the relevant verified token even
+when strict mode is off.
+
+The sandbox trusts a generated CA so Envoy can terminate configured HTTPS
+connections. That CA is scoped to the sandbox infrastructure; protect its
+private key and generated instance directory as host credentials.
+
+## Reference
+
+### Environment variables
+
+| Variable | Purpose |
+| --- | --- |
+| `VAULT_CONFIG` | Decrypted `vault.yaml` path inside Vault |
+| `MACAROON_SIGNING_KEY` | Legacy/configless signing-key fallback |
+| `MACAROON_ENCRYPTION_KEY` | Legacy/configless third-party caveat key |
+| `TOKEN_PREFIX` | Macaroon prefix; defaults to `acm_` |
+| `STRICT_MODE` | Reject non-macaroon requests when `true` |
+| `AGENT_CREDS_PROVIDER_PATH` | Extension files/directories, using the OS path-list separator |
+| `AGENT_CREDS_PROVIDER_POOL` | JavaScript runtime pool size; CPU count capped at 8 by default |
+| `SSH_HOST_KEY` | Vault SSH private host-key path; the image defaults to `/data/vault_host_key` |
+
+### Repository layout
+
+```text
+agents/                 bundled Claude, Codex, and Pi profiles
+cmd/actl/               Vault and instance control CLI
+cmd/adev/               sandbox orchestrator
+plugins/                composable development-tool profiles
+vault/                  credential service, providers, policies, and token code
+vault/providers.d/      local trusted JavaScript extensions (ignored)
+agent-creds.example.toml
+docker-compose.yml
 ```
 
-Start Chrome on your host with remote debugging enabled:
-```bash
-google-chrome --remote-debugging-port=9222
+### Development
+
+```console
+$ make binaries
+$ (cd cmd/actl && go test ./...)
+$ (cd cmd/adev && go test ./...)
+$ (cd vault && go test ./...)
+$ docker compose build vault
 ```
 
-Configure in `agent-creds.toml`:
-```toml
-[sandbox]
-use_host_browser_cdp = true  # default
+## License
 
-# Target allow-list (required - empty = all blocked)
-[[cdp_target]]
-type = "page"
-title = "*My App*"
-
-[[cdp_target]]
-url = "*github.com*"
-```
-
-Only browser tabs matching a `[[cdp_target]]` pattern will be accessible. This prevents agents from accessing sensitive tabs (email, banking, etc.).
-
-**CDP target fields** (all optional, empty = match any):
-- `type`: Target type (`page`, `background_page`, `service_worker`, etc.)
-- `title`: Glob pattern matching page title
-- `url`: Glob pattern matching page URL
-
-When multiple fields are specified, all must match.
+MIT

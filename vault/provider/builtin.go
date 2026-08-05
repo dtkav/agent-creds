@@ -19,6 +19,7 @@ func RegisterBuiltins(registry *Registry) error {
 		factory Factory
 	}{
 		{"bearer", newBearerProvider},
+		{"header", newHeaderProvider},
 		{"basic", newBasicProvider},
 		{"oauth2", newOAuth2Factory(oauthTokens)},
 		{"sigv4", newSigV4Provider},
@@ -48,9 +49,46 @@ func newBearerProvider(config map[string]any) (CredentialProvider, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &staticProvider{headers: map[string]string{
-		"authorization": "Bearer " + token,
-	}}, nil
+	return newStaticHeaderProvider("authorization", "Bearer "+token)
+}
+
+func newHeaderProvider(config map[string]any) (CredentialProvider, error) {
+	header, err := requiredString(config, "header")
+	if err != nil {
+		return nil, err
+	}
+	value, err := requiredString(config, "value")
+	if err != nil {
+		return nil, err
+	}
+	return newStaticHeaderProvider(header, value)
+}
+
+func newStaticHeaderProvider(header, value string) (CredentialProvider, error) {
+	header = strings.ToLower(strings.TrimSpace(header))
+	if !validHeaderName(header) {
+		return nil, fmt.Errorf("header must be a valid HTTP header name")
+	}
+	if unsafeCredentialHeader(header) {
+		return nil, fmt.Errorf("header %q may not be set by a credential provider", header)
+	}
+
+	headers := map[string]string{header: value}
+	if err := ValidateHeaders(headers); err != nil {
+		return nil, err
+	}
+	return &staticProvider{headers: headers}, nil
+}
+
+func unsafeCredentialHeader(header string) bool {
+	switch header {
+	case "connection", "content-length", "host", "keep-alive",
+		"proxy-authorization", "proxy-connection", "te", "trailer",
+		"transfer-encoding", "upgrade", "x-target-host":
+		return true
+	default:
+		return false
+	}
 }
 
 func newBasicProvider(config map[string]any) (CredentialProvider, error) {

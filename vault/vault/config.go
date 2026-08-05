@@ -23,12 +23,14 @@ type Config struct {
 type CredentialConfig struct {
 	Type     string `yaml:"type"`
 	Token    string `yaml:"token,omitempty"`
+	Header   string `yaml:"header,omitempty"`
+	Value    string `yaml:"value,omitempty"`
 	Username string `yaml:"username,omitempty"`
 	Password string `yaml:"password,omitempty"`
 	Policy   string `yaml:"policy,omitempty"`
 
 	// Environment variable name fields for credential resolution
-	Env     string `yaml:"env,omitempty"`      // env var holding bearer token
+	Env     string `yaml:"env,omitempty"`      // env var holding a token-shaped capability
 	EnvUser string `yaml:"env_user,omitempty"` // env var holding basic auth username
 	EnvPass string `yaml:"env_pass,omitempty"` // env var holding basic auth password
 
@@ -226,6 +228,13 @@ func (cc *CredentialConfig) validate(domain string) (warnings []string, err erro
 		if cc.Token == "" && cc.Env == "" {
 			warnings = append(warnings, fmt.Sprintf("%s: token is empty and no env var configured", domain))
 		}
+	case "header":
+		if strings.TrimSpace(cc.Header) == "" {
+			return nil, fmt.Errorf("header requires 'header'")
+		}
+		if cc.Value == "" {
+			return nil, fmt.Errorf("header requires 'value'")
+		}
 	case "basic":
 		if cc.Username == "" && cc.EnvUser == "" {
 			warnings = append(warnings, fmt.Sprintf("%s: username is empty and no env_user configured", domain))
@@ -274,6 +283,11 @@ func (cc CredentialConfig) ProviderConfig() map[string]any {
 	switch cc.Type {
 	case "bearer":
 		return map[string]any{"token": cc.Token}
+	case "header":
+		return map[string]any{
+			"header": cc.Header,
+			"value":  cc.Value,
+		}
 	case "basic":
 		return map[string]any{
 			"username": cc.Username,
@@ -294,7 +308,7 @@ func (cc CredentialConfig) ProviderConfig() map[string]any {
 			"secret_access_key": cc.SecretAccessKey,
 		}
 	default:
-		result := make(map[string]any, len(cc.Options)+9)
+		result := make(map[string]any, len(cc.Options)+13)
 		for key, value := range cc.Options {
 			result[key] = value
 		}
@@ -304,6 +318,8 @@ func (cc CredentialConfig) ProviderConfig() map[string]any {
 			}
 		}
 		copyNonEmpty("token", cc.Token)
+		copyNonEmpty("header", cc.Header)
+		copyNonEmpty("value", cc.Value)
 		copyNonEmpty("username", cc.Username)
 		copyNonEmpty("password", cc.Password)
 		copyNonEmpty("region", cc.Region)

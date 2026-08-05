@@ -74,3 +74,83 @@ func TestBasicProviderAllowsExplicitEmptyPassword(t *testing.T) {
 		t.Fatalf("authorization = %q, want %q", got, want)
 	}
 }
+
+func TestHeaderProvider(t *testing.T) {
+	tests := []struct {
+		name   string
+		config map[string]any
+		header string
+		value  string
+	}{
+		{
+			name: "authorization value",
+			config: map[string]any{
+				"header": "Authorization",
+				"value":  "FlyV1 fm2_example",
+			},
+			header: "authorization",
+			value:  "FlyV1 fm2_example",
+		},
+		{
+			name: "raw header value",
+			config: map[string]any{
+				"header": "X-API-Key",
+				"value":  "secret",
+			},
+			header: "x-api-key",
+			value:  "secret",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			built, err := newHeaderProvider(test.config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := built.Resolve(context.Background(), Request{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := result.Headers[test.header]; got != test.value {
+				t.Fatalf("%s = %q, want %q", test.header, got, test.value)
+			}
+		})
+	}
+}
+
+func TestHeaderProviderRejectsInvalidConfiguration(t *testing.T) {
+	tests := []struct {
+		name   string
+		config map[string]any
+	}{
+		{name: "missing header", config: map[string]any{"value": "secret"}},
+		{name: "missing value", config: map[string]any{"header": "Authorization"}},
+		{name: "invalid header", config: map[string]any{"header": "bad header", "value": "secret"}},
+		{name: "routing header", config: map[string]any{"header": "Host", "value": "secret"}},
+		{name: "verifier header", config: map[string]any{"header": "X-Agent-Creds-Subject", "value": "secret"}},
+		{name: "multiline value", config: map[string]any{"header": "Authorization", "value": "one\ntwo"}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := newHeaderProvider(test.config); err == nil {
+				t.Fatal("newHeaderProvider() accepted invalid configuration")
+			}
+		})
+	}
+}
+
+func TestBearerProviderUsesStaticHeaderPreset(t *testing.T) {
+	built, err := newBearerProvider(map[string]any{"token": "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := built.Resolve(context.Background(), Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := result.Headers["authorization"]; got != "Bearer secret" {
+		t.Fatalf("authorization = %q, want %q", got, "Bearer secret")
+	}
+}

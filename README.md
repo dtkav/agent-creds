@@ -294,14 +294,27 @@ $ actl vault show --capabilities /service/read
 $ actl vault credentials add /github/automation
 ```
 
-The public Vault supports four credential types:
+The public Vault supports five credential types:
 
 | Type | Configuration | Injected authentication |
 | --- | --- | --- |
 | `bearer` | `token` | `Authorization: Bearer ...` |
+| `header` | header name and secret-backed `value` | Static authentication header |
 | `basic` | `username`, `password` | HTTP Basic authentication |
 | `oauth2` | client ID/secret, refresh token, token URL | Refreshed bearer access token |
 | `sigv4` | region, service, access key ID/secret | AWS Signature Version 4 headers |
+
+Use `header` for static credentials that need an exact header value:
+
+```yaml
+credentials:
+  fly/observability:
+    type: header
+    header: Authorization
+    value:
+      $secret: fly#OBSERVABILITY_AUTHORIZATION
+    env: FLY_OBSERVABILITY_TOKEN
+```
 
 A complete built-in credential can also describe its intended capabilities:
 

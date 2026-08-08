@@ -21,6 +21,76 @@ func nixDir() string {
 	return filepath.Join(configDir, "agent-creds", "nix")
 }
 
+// NixStoreMount maps one canonical /nix/store path to the host location from
+// which a confined runtime should bind it. Local Docker builds copy closures
+// into agent-creds' private store; native host builds may already live at the
+// canonical path.
+type NixStoreMount struct {
+	Source string
+	Target string
+}
+
+func sandboxEnvClosureFile(envPath string) string {
+	return filepath.Join(
+		nixDir(), "var", "nix", "closures", filepath.Base(envPath)+".paths",
+	)
+}
+
+func sandboxEnvHostPath(envPath string) string {
+	if fileExists(envPath) {
+		return envPath
+	}
+	return filepath.Join(nixDir(), "store", filepath.Base(envPath))
+}
+
+func sandboxEnvAvailable(envPath string) bool {
+	return fileExists(sandboxEnvHostPath(envPath)) &&
+		fileExists(sandboxEnvClosureFile(envPath))
+}
+
+// sandboxEnvClosureMounts resolves Nix's recorded closure into explicit bind
+// mounts. Targets remain canonical so store references embedded in binaries
+// and scripts continue to resolve inside bwrap.
+func sandboxEnvClosureMounts(envPath string) ([]NixStoreMount, error) {
+	data, err := os.ReadFile(sandboxEnvClosureFile(envPath))
+	if err != nil {
+		return nil, fmt.Errorf("reading sandbox env closure: %w", err)
+	}
+
+	seen := make(map[string]bool)
+	var mounts []NixStoreMount
+	for _, line := range strings.Split(string(data), "\n") {
+		target := filepath.Clean(strings.TrimSpace(line))
+		if target == "." || target == "" {
+			continue
+		}
+		if filepath.Dir(target) != "/nix/store" {
+			return nil, fmt.Errorf("invalid Nix closure path %q", line)
+		}
+		if seen[target] {
+			continue
+		}
+		seen[target] = true
+
+		source := filepath.Join(nixDir(), "store", filepath.Base(target))
+		if !fileExists(source) {
+			if fileExists(target) {
+				source = target
+			} else {
+				return nil, fmt.Errorf("Nix closure path is unavailable: %s", target)
+			}
+		}
+		mounts = append(mounts, NixStoreMount{Source: source, Target: target})
+	}
+	if len(mounts) == 0 {
+		return nil, fmt.Errorf("sandbox env closure is empty: %s", envPath)
+	}
+	sort.Slice(mounts, func(i, j int) bool {
+		return mounts[i].Target < mounts[j].Target
+	})
+	return mounts, nil
+}
+
 // baseImageHash returns a hash of inputs that affect the base Docker image.
 // This changes rarely — only when flake.nix structure or claude-dev/ scripts change.
 func baseImageHash(scriptDir string) string {
@@ -115,7 +185,7 @@ func needsEnvRebuild(cfg ProjectConfig, scriptDir string) bool {
 		return true
 	}
 	envPath := strings.TrimSpace(string(data))
-	return !fileExists(envPath)
+	return !sandboxEnvAvailable(envPath)
 }
 
 // saveBaseHash saves the base image hash after successful build.
@@ -223,6 +293,9 @@ func ensureSandboxEnv(cfg ProjectConfig, scriptDir string, spinner *Spinner) (st
 
 	if !strings.HasPrefix(envPath, "/nix/store/") {
 		return "", fmt.Errorf("unexpected env path: %s", envPath)
+	}
+	if !sandboxEnvAvailable(envPath) {
+		return "", fmt.Errorf("sandbox env closure was not exported: %s", envPath)
 	}
 
 	if err := saveEnvHash(cfg, scriptDir, envPath); err != nil {

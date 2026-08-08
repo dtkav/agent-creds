@@ -225,7 +225,9 @@
         };
 
         # --- sandbox-env: all packages merged into one store path ---
-        # Mounted from host at /nix, passed via SANDBOX_ENV env var.
+        # Exposed at canonical /nix/store paths and passed via SANDBOX_ENV.
+        # bwrap mounts only this environment's closure; container runtimes
+        # mount agent-creds' private store at /nix.
         # Fast rebuild when only plugins change — Nix caches unchanged store paths.
         sandboxEnv = pkgs.buildEnv {
           name = "sandbox-env";

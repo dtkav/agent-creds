@@ -351,6 +351,22 @@ func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig, att
 		os.Exit(1)
 	}()
 
+	spinner.Status("building sandbox environment")
+	sandboxEnv, err := ensureSandboxEnv(cfg, scriptDir, spinner)
+	if err != nil {
+		spinner.Stop()
+		fmt.Fprintf(os.Stderr, "Error preparing sandbox environment: %v\n", err)
+		cleanup()
+		os.Exit(1)
+	}
+	nixMounts, err := sandboxEnvClosureMounts(sandboxEnv)
+	if err != nil {
+		spinner.Stop()
+		fmt.Fprintf(os.Stderr, "Error preparing sandbox environment: %v\n", err)
+		cleanup()
+		os.Exit(1)
+	}
+
 	// Generate configs (CA, envoy.json, domains.json, merged config) —
 	// identical Generate() path to the container runtimes.
 	spinner.Status("generating configs...")
@@ -531,7 +547,10 @@ func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig, att
 		agentPathDirs = append(agentPathDirs, profilePathDirs...)
 	}
 
-	bwrapArgs, err := buildBwrapArgs(workDir, scriptDir, slug, cfg, agentBinds, agentPathDirs)
+	bwrapArgs, err := buildBwrapArgs(
+		workDir, scriptDir, slug, cfg, sandboxEnv, nixMounts,
+		agentBinds, agentPathDirs,
+	)
 	if err != nil {
 		spinner.Stop()
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -673,7 +692,20 @@ func bwrapResolvMountArgs(source string) []string {
 // buildBwrapArgs assembles the bwrap argument list (pre shell-quoting).
 // Filesystem policy: project rw at its real path, toolchain ro, instance
 // gen dir ro, instance-scoped home, tmpfs elsewhere.
-func buildBwrapArgs(workDir, scriptDir, slug string, cfg ProjectConfig, agentBinds, agentPathDirs []string) ([]string, error) {
+func buildBwrapArgs(
+	workDir, scriptDir, slug string,
+	cfg ProjectConfig,
+	sandboxEnv string,
+	nixMounts []NixStoreMount,
+	agentBinds, agentPathDirs []string,
+) ([]string, error) {
+	if sandboxEnv == "" {
+		return nil, fmt.Errorf("sandbox environment is required for bwrap")
+	}
+	if len(nixMounts) == 0 {
+		return nil, fmt.Errorf("sandbox environment closure is empty: %s", sandboxEnv)
+	}
+
 	usr, err := user.Current()
 	if err != nil {
 		return nil, fmt.Errorf("resolving current user: %w", err)
@@ -702,10 +734,12 @@ func buildBwrapArgs(workDir, scriptDir, slug string, cfg ProjectConfig, agentBin
 		}
 	}
 	args = append(args, "--ro-bind", "/etc", "/etc")
-	for _, opt := range []string{"/nix", "/opt"} {
-		if fileExists(opt) {
-			args = append(args, "--ro-bind", opt, opt)
-		}
+	args = append(args, "--dir", "/nix", "--dir", "/nix/store")
+	for _, mount := range nixMounts {
+		args = append(args, "--ro-bind", mount.Source, mount.Target)
+	}
+	if fileExists("/opt") {
+		args = append(args, "--ro-bind", "/opt", "/opt")
 	}
 	args = append(args,
 		"--tmpfs", "/tmp",
@@ -760,7 +794,9 @@ func buildBwrapArgs(workDir, scriptDir, slug string, cfg ProjectConfig, agentBin
 
 	// Environment: cleared, then rebuilt. --clearenv also scrubs the
 	// nested-claude vars (CLAUDECODE, CLAUDE_CODE_*, CLAUDE_PID, ...).
-	pathEntries := append(append([]string{}, agentPathDirs...),
+	pathEntries := append([]string{}, agentPathDirs...)
+	pathEntries = append(pathEntries, filepath.Join(sandboxEnv, "bin"))
+	pathEntries = append(pathEntries,
 		"/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin")
 	proxyURL := fmt.Sprintf("http://10.0.2.2:%d", envoyPort)
 	caBundle := "/run/adev-instance/bwrap-ca-bundle.crt"
@@ -787,6 +823,11 @@ func buildBwrapArgs(workDir, scriptDir, slug string, cfg ProjectConfig, agentBin
 		{"NIX_SSL_CERT_FILE", caBundle},
 		{"NODE_EXTRA_CA_CERTS", caBundle},
 	}
+	env = append(env,
+		[2]string{"SANDBOX_ENV", sandboxEnv},
+		[2]string{"TERMINFO_DIRS", filepath.Join(sandboxEnv, "share", "terminfo") + ":/usr/share/terminfo"},
+		[2]string{"XDG_DATA_DIRS", filepath.Join(sandboxEnv, "share") + ":/usr/share:/share"},
+	)
 	if cfg.Sandbox.Agent == "claude" || cfg.Sandbox.Agent == "" {
 		env = append(env,
 			[2]string{"CLAUDE_CONFIG_DIR", filepath.Join(homeDir, ".claude")},

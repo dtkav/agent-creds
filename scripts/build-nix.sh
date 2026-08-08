@@ -122,6 +122,16 @@ build_env() {
             fi
         done
 
+        # Persist the exact closure for runtimes such as bwrap that mount
+        # individual store paths instead of exposing the whole Nix store.
+        closure_dir=/host-var/nix/closures
+        closure_file="$closure_dir/$(basename "$env_path").paths"
+        closure_tmp="$closure_file.tmp.$$"
+        mkdir -p "$closure_dir"
+        nix-store -qR "$env_path" | sort -u > "$closure_tmp"
+        chmod 0644 "$closure_tmp"
+        mv "$closure_tmp" "$closure_file"
+
         # Create a profile symlink
         mkdir -p /host-var/nix/profiles
         ln -sfn "$env_path" /host-var/nix/profiles/sandbox-env

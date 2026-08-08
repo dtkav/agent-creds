@@ -302,8 +302,11 @@ func ensureSandboxEnv(cfg ProjectConfig, scriptDir string, spinner *Spinner) (st
 	if !strings.HasPrefix(envPath, "/nix/store/") {
 		return "", fmt.Errorf("unexpected env path: %s", envPath)
 	}
-	if !sandboxEnvAvailable(envPath) {
-		return "", fmt.Errorf("sandbox env closure was not exported: %s", envPath)
+	if !fileExists(sandboxEnvHostPath(envPath)) {
+		return "", fmt.Errorf("sandbox env was not exported: %s", envPath)
+	}
+	if _, err := sandboxEnvClosureMounts(envPath); err != nil {
+		return "", fmt.Errorf("sandbox env closure was not exported: %w", err)
 	}
 
 	if err := saveEnvHash(cfg, scriptDir, envPath); err != nil {

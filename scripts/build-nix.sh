@@ -122,15 +122,25 @@ build_env() {
         for p in $(nix-store -qR "$env_path"); do
             base=$(basename "$p")
             dest="/host-store/$base"
-            if [ ! -e "$dest" ]; then
-                # A failed/interrupted earlier export can leave a dangling
-                # symlink. It is not a usable cache hit and blocks cp -a.
-                if [ -L "$dest" ]; then
-                    rm -f "$dest"
-                fi
-                cp -a "$p" "$dest"
+            # A top-level symlink is never a usable bind source for the
+            # private store, even when its target happens to exist in the
+            # Docker build store right now.
+            if [ -L "$dest" ]; then
+                rm -f "$dest"
             fi
-            test -e "$dest" || {
+            if [ ! -e "$dest" ]; then
+                # Store outputs may themselves be absolute symlinks into
+                # /nix/store. Preserve symlinks inside the output, but
+                # materialize the top-level output: the private host store is
+                # mounted path-by-path and cannot use a source whose canonical
+                # target exists only in the Docker build volume.
+                source="$p"
+                if [ -L "$source" ]; then
+                    source=$(readlink -f "$source")
+                fi
+                cp -a "$source" "$dest"
+            fi
+            test -e "$dest" && test ! -L "$dest" || {
                 echo "failed to export Nix closure path: $p" >&2
                 exit 1
             }

@@ -38,6 +38,8 @@ build_base() {
       -v "$PROJECT_DIR":/src:ro \
       "$NIX_IMAGE" \
       sh -c '
+        set -eu
+
         # Enable flakes
         mkdir -p ~/.config/nix
         echo "experimental-features = nix-command flakes" > ~/.config/nix/nix.conf
@@ -96,6 +98,8 @@ build_env() {
       -v "$PROJECT_DIR":/src:ro \
       "$NIX_IMAGE" \
       sh -c '
+        set -eu
+
         # Enable flakes
         mkdir -p ~/.config/nix
         echo "experimental-features = nix-command flakes" > ~/.config/nix/nix.conf
@@ -117,9 +121,19 @@ build_env() {
         # nix-store -qR lists all store paths in the closure.
         for p in $(nix-store -qR "$env_path"); do
             base=$(basename "$p")
-            if [ ! -e "/host-store/$base" ]; then
-                cp -a "$p" "/host-store/$base"
+            dest="/host-store/$base"
+            if [ ! -e "$dest" ]; then
+                # A failed/interrupted earlier export can leave a dangling
+                # symlink. It is not a usable cache hit and blocks cp -a.
+                if [ -L "$dest" ]; then
+                    rm -f "$dest"
+                fi
+                cp -a "$p" "$dest"
             fi
+            test -e "$dest" || {
+                echo "failed to export Nix closure path: $p" >&2
+                exit 1
+            }
         done
 
         # Persist the exact closure for runtimes such as bwrap that mount

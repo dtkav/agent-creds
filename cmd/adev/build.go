@@ -44,8 +44,16 @@ func sandboxEnvHostPath(envPath string) string {
 }
 
 func sandboxEnvAvailable(envPath string) bool {
-	return fileExists(sandboxEnvHostPath(envPath)) &&
-		fileExists(sandboxEnvClosureFile(envPath))
+	if !fileExists(sandboxEnvHostPath(envPath)) ||
+		!fileExists(sandboxEnvClosureFile(envPath)) {
+		return false
+	}
+	// The private store is not registered with the host Nix daemon, so one
+	// path can disappear without invalidating the environment root or its
+	// persisted manifest. Treat the cache as usable only when the complete
+	// recorded closure can still be mounted.
+	_, err := sandboxEnvClosureMounts(envPath)
+	return err == nil
 }
 
 // sandboxEnvClosureMounts resolves Nix's recorded closure into explicit bind

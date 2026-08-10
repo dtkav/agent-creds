@@ -1085,6 +1085,14 @@ func buildBwrapArgs(
 		)...)
 	}
 
+	// The project is writable, but its policy is part of the trusted host
+	// control plane. Apply this overlay after every plugin mount so none of
+	// them can make agent-creds.toml writable again.
+	projectConfig := filepath.Join(workDir, "agent-creds.toml")
+	if fileExists(projectConfig) {
+		args = append(args, bwrapFileMountArgs(projectConfig, projectConfig)...)
+	}
+
 	// Environment: cleared, then rebuilt. --clearenv also scrubs the
 	// nested-claude vars (CLAUDECODE, CLAUDE_CODE_*, CLAUDE_PID, ...).
 	pathEntries := append([]string{}, agentPathDirs...)

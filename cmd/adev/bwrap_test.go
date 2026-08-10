@@ -264,6 +264,63 @@ func TestBwrapArgsEnterSandboxEnvWithoutMountingWholeNixStore(t *testing.T) {
 	}
 }
 
+func TestBwrapArgsProtectProjectConfigAfterWritableMounts(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(root, "work")
+	scriptDir := filepath.Join(root, "agent-creds")
+	overlayDir := filepath.Join(root, "overlay")
+	for _, dir := range []string{workDir, overlayDir} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	projectConfig := filepath.Join(workDir, "agent-creds.toml")
+	if err := os.WriteFile(projectConfig, []byte("[sandbox]\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	envPath := "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-sandbox-env"
+	mount := NixStoreMount{
+		Source: filepath.Join(root, "store", filepath.Base(envPath)),
+		Target: envPath,
+	}
+	if err := os.MkdirAll(mount.Source, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	args, err := buildBwrapArgs(
+		workDir, scriptDir, "test",
+		ProjectConfig{Mounts: []MountConfig{{
+			Source: overlayDir,
+			Target: workDir,
+		}}},
+		envPath, []NixStoreMount{mount}, 0, "", nil, nil,
+	)
+	if err != nil {
+		t.Fatalf("buildBwrapArgs: %v", err)
+	}
+
+	pluginBind := indexArgSequence(args, "--bind", overlayDir, workDir)
+	policyBind := indexArgSequence(args, "--ro-bind", projectConfig, projectConfig)
+	if pluginBind < 0 {
+		t.Fatalf("bwrap args missing writable plugin mount: %q", args)
+	}
+	if policyBind < 0 {
+		t.Fatalf("bwrap args missing read-only project policy overlay: %q", args)
+	}
+	if policyBind <= pluginBind {
+		t.Fatalf("project policy overlay at %d precedes writable plugin mount at %d", policyBind, pluginBind)
+	}
+}
+
+func indexArgSequence(args []string, sequence ...string) int {
+	for i := 0; i+len(sequence) <= len(args); i++ {
+		if slices.Equal(args[i:i+len(sequence)], sequence) {
+			return i
+		}
+	}
+	return -1
+}
+
 func TestBwrapArgsRequireSandboxEnvClosure(t *testing.T) {
 	root := t.TempDir()
 	workDir := filepath.Join(root, "work")

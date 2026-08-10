@@ -809,6 +809,26 @@ type TokenEntry struct {
 	Host     string // upstream host
 }
 
+func upstreamTokenEnv(upstream UpstreamConfig, info *CredentialInfo) string {
+	if env := strings.TrimSpace(upstream.Env); env != "" {
+		return env
+	}
+	if info != nil && len(info.EnvVars) > 0 {
+		return info.EnvVars[0]
+	}
+	return ""
+}
+
+func expectedMintedTokens(cfg ProjectConfig) int {
+	count := 0
+	for _, upstream := range cfg.Upstream {
+		if upstream.MintsToken() {
+			count++
+		}
+	}
+	return count
+}
+
 // mintTokens mints tokens for all credentialed upstreams.
 // Returns token entries keyed by env var name, plus cached authz tokens keyed by host.
 func mintTokens(cfg ProjectConfig, instanceGenDir string, spinner *Spinner) ([]TokenEntry, map[string]string) {
@@ -832,10 +852,7 @@ func mintTokens(cfg ProjectConfig, instanceGenDir string, spinner *Spinner) ([]T
 		}
 
 		// Determine primary env var name
-		envVar := ""
-		if len(info.EnvVars) > 0 {
-			envVar = info.EnvVars[0]
-		}
+		envVar := upstreamTokenEnv(upstream, info)
 		if envVar == "" {
 			fmt.Fprintf(os.Stderr, "Warning: no env var for %s, skipping\n", host)
 			continue
@@ -923,10 +940,7 @@ func startDischargeRefresh(ctx context.Context, cfg ProjectConfig, scriptDir, in
 					fmt.Fprintf(os.Stderr, "Warning: discharge refresh info %s failed: %v (old tokens valid for ~15 more minutes)\n", host, err)
 					continue
 				}
-				envVar := ""
-				if len(info.EnvVars) > 0 {
-					envVar = info.EnvVars[0]
-				}
+				envVar := upstreamTokenEnv(upstream, info)
 				if envVar == "" {
 					continue
 				}
@@ -994,7 +1008,7 @@ func copyUpstreamMap(m map[string]UpstreamConfig) map[string]UpstreamConfig {
 
 // upstreamChanged returns true if the transport, credential, or caveats differ.
 func upstreamChanged(old, new UpstreamConfig) bool {
-	if old.Mode != new.Mode || old.Scheme != new.Scheme || old.Port != new.Port || old.Address != new.Address || old.Network != new.Network || old.ForwardToken != new.ForwardToken {
+	if old.Mode != new.Mode || old.Scheme != new.Scheme || old.Port != new.Port || old.Address != new.Address || old.Network != new.Network || old.ForwardToken != new.ForwardToken || old.Env != new.Env {
 		return true
 	}
 	if old.Credential != new.Credential || old.Policy != new.Policy {
@@ -1049,10 +1063,7 @@ func remintTokens(newCfg ProjectConfig, scriptDir, instanceGenDir string, oldUps
 		if err != nil {
 			continue
 		}
-		envVar := ""
-		if len(info.EnvVars) > 0 {
-			envVar = info.EnvVars[0]
-		}
+		envVar := upstreamTokenEnv(upstream, info)
 		if envVar == "" {
 			continue
 		}

@@ -78,6 +78,7 @@ func (v VaultConfig) IsRemote() bool {
 
 type UpstreamConfig struct {
 	Credential   string   `toml:"credential,omitempty"`    // vault credential path (e.g., /stripe/live)
+	Env          string   `toml:"env,omitempty"`           // client-facing env var override for the minted capability
 	Policy       string   `toml:"policy,omitempty"`        // vault upstream policy path
 	Mode         string   `toml:"mode,omitempty"`          // "credential" (default) or "identity"
 	Scheme       string   `toml:"scheme,omitempty"`        // "https" (default) or "http"

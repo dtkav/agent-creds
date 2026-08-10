@@ -80,7 +80,9 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 	// Check for authorization header
 	authHeader := headers["authorization"]
 
-	// Detect macaroon token: Bearer acm_xxx, SigV4 Credential=acm_xxx/..., or Basic auth password=acm_xxx
+	// Detect macaroon token: Bearer/token acm_xxx, SigV4
+	// Credential=acm_xxx/..., or Basic auth password=acm_xxx. GitHub CLI
+	// uses the lowercase `token` authorization scheme for GH_TOKEN.
 	tokenPrefix := s.verifier.GetTokenPrefix()
 	isBearerMacaroon := macaroon.IsMacaroonAuth(authHeader, tokenPrefix)
 	sigv4Macaroon := sigv4.ExtractAccessKey(authHeader)
@@ -95,8 +97,10 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 	} else if isBasicMacaroon {
 		rawToken = basicMacaroon
 	} else if isBearerMacaroon {
-		// Extract the main token from "Bearer acm_xxx,acm_yyy" format
-		if tokenStr := strings.TrimPrefix(authHeader, "Bearer "); tokenStr != "" {
+		// Extract the main token from Bearer/token auth for audit identity.
+		tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+		tokenStr = strings.TrimPrefix(tokenStr, "token ")
+		if tokenStr != "" {
 			if idx := strings.Index(tokenStr, ","); idx > 0 {
 				rawToken = strings.TrimSpace(tokenStr[:idx])
 			} else {

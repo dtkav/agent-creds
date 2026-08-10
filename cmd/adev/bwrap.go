@@ -417,6 +417,14 @@ func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig, att
 
 	// Mint tokens for credentialed upstreams and shape them into env vars.
 	tokenEntries, _ := mintTokens(cfg, instanceGenDir, spinner)
+	if want := expectedMintedTokens(cfg); len(tokenEntries) != want {
+		spinner.Stop()
+		fmt.Fprintf(os.Stderr,
+			"Error minting sandbox credentials: minted %d of %d configured tokens\n",
+			len(tokenEntries), want)
+		cleanup()
+		os.Exit(1)
+	}
 	infos := make(map[string]*CredentialInfo)
 	for _, e := range tokenEntries {
 		if info, err := vaultSSHInfo(cfg.Vault, cfg.Upstream[e.Host].Credential); err == nil {

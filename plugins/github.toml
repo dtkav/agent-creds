@@ -4,6 +4,15 @@
 name = "github"
 description = "GitHub and GitHub API access"
 
+# Git receives a host-scoped agent-creds capability through a conventional
+# credential-helper executable. The helper never contains the upstream PAT.
+nix = '''
+[
+  (pkgs.writeShellScriptBin "git-credential-agent-creds-github"
+    (builtins.readFile ../plugins/git-credential-agent-creds-github.sh))
+]
+'''
+
 [packages]
 git = true
 gh = true

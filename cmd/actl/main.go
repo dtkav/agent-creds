@@ -52,6 +52,9 @@ func main() {
 	case "ssh":
 		runSSH(cfg, os.Args[2:])
 	case "vault", "secrets":
+		if runVaultLifecycle(os.Args[2:]) {
+			return
+		}
 		runSecrets(os.Args[2:])
 	case "help", "-h", "--help":
 		usage()

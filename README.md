@@ -135,6 +135,19 @@ Add the API token you want the agent to use:
 $ actl vault edit
 ```
 
+Start and manage the local credential plane through `actl`; it decrypts the
+configuration into Compose's environment-backed secret and waits for Vault to
+be healthy:
+
+```console
+$ actl vault start
+$ actl vault restart       # rebuild/recreate after code changes
+$ actl vault stop
+```
+
+Do not invoke `docker compose up vault` directly: without the decrypted secret
+supplied by `actl`, Vault cannot load its signing keys or credentials.
+
 Add a secret group below the generated `vault` group:
 
 ```yaml

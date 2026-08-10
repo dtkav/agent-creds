@@ -36,6 +36,7 @@ import (
 type configuredCredential struct {
 	name           string
 	credentialType string
+	extractor      provider.CredentialExtractor
 	provider       provider.CredentialProvider
 	policy         string
 }
@@ -77,37 +78,42 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 		Timestamp: time.Now(),
 	}
 
-	// Check for authorization header
+	// Envoy chooses the credential from trusted route metadata. That binding
+	// is available to an optional credential-specific extractor before the
+	// capability is verified; the extractor itself receives no secret config.
+	credentialKey := host
+	if configured := strings.TrimPrefix(contextExtensions["credential"], "/"); configured != "" {
+		credentialKey = configured
+	}
+	cred, hasConfiguredCredential := s.credentials[credentialKey]
+
+	// Let the selected credential adapter understand client-specific framing.
+	// Built-in schemes remain the fallback for built-in providers and identity
+	// routes. Go verifies every returned token before injection is possible.
 	authHeader := headers["authorization"]
-
-	// Detect macaroon token: Bearer/token acm_xxx, SigV4
-	// Credential=acm_xxx/..., or Basic auth password=acm_xxx. GitHub CLI
-	// uses the lowercase `token` authorization scheme for GH_TOKEN.
 	tokenPrefix := s.verifier.GetTokenPrefix()
-	isBearerMacaroon := macaroon.IsMacaroonAuth(authHeader, tokenPrefix)
-	sigv4Macaroon := sigv4.ExtractAccessKey(authHeader)
-	isSigV4Macaroon := strings.HasPrefix(sigv4Macaroon, tokenPrefix)
-	basicMacaroon := extractBasicAuthMacaroon(authHeader, tokenPrefix)
-	isBasicMacaroon := basicMacaroon != ""
-
-	// Determine the raw macaroon token string for token ID extraction
-	var rawToken string
-	if isSigV4Macaroon {
-		rawToken = sigv4Macaroon
-	} else if isBasicMacaroon {
-		rawToken = basicMacaroon
-	} else if isBearerMacaroon {
-		// Extract the main token from Bearer/token auth for audit identity.
-		tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
-		tokenStr = strings.TrimPrefix(tokenStr, "token ")
-		if tokenStr != "" {
-			if idx := strings.Index(tokenStr, ","); idx > 0 {
-				rawToken = strings.TrimSpace(tokenStr[:idx])
-			} else {
-				rawToken = strings.TrimSpace(tokenStr)
-			}
+	var requestToken string
+	if routeMode != "identity" && hasConfiguredCredential && cred.extractor != nil {
+		var extractionErr error
+		requestToken, extractionErr = cred.extractor.Extract(ctx, provider.ExtractionRequest{
+			Credential:     credentialKey,
+			CredentialType: cred.credentialType,
+			Host:           host,
+			Method:         httpReq.GetMethod(),
+			Path:           httpReq.GetPath(),
+			Headers:        headers,
+		})
+		if extractionErr != nil {
+			reason := fmt.Sprintf("credential extraction failed: %v", extractionErr)
+			log.Printf("%s for %s", reason, host)
+			s.logAudit("deny", access.Method, host, access.Path, reason, nil)
+			return credentialExtractionErrorResponse(), nil
 		}
 	}
+	if requestToken == "" {
+		requestToken, _ = extractBuiltinCapabilityToken(authHeader, tokenPrefix)
+	}
+	hasRequestToken := requestToken != ""
 
 	// Identity routes and routes with an explicit policy are authentication
 	// boundaries even when global strict mode is disabled. Never allow the
@@ -115,7 +121,7 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 	requiresMacaroon := s.strictMode || routeMode == "identity" || routePolicy != ""
 
 	// Passthrough: unrecognized token format (unless this route requires auth)
-	if !isBearerMacaroon && !isSigV4Macaroon && !isBasicMacaroon {
+	if !hasRequestToken {
 		if requiresMacaroon {
 			log.Printf("Rejected non-macaroon request to protected route %s %s", host, access.Path)
 			s.logAudit("deny", access.Method, host, access.Path, "macaroon token required", nil)
@@ -135,21 +141,15 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 		}, nil
 	}
 
-	// Normalize auth header for macaroon verification
-	// For SigV4: extract the macaroon from Credential field and wrap as Bearer
-	// For Basic: extract the macaroon from password field and wrap as Bearer
-	verifyAuth := authHeader
-	if isSigV4Macaroon {
-		verifyAuth = "Bearer " + sigv4Macaroon
-	} else if isBasicMacaroon {
-		verifyAuth = "Bearer " + basicMacaroon
-	}
-
 	// Extract token ID for audit logging
+	rawToken := requestToken
+	if idx := strings.IndexByte(rawToken, ','); idx >= 0 {
+		rawToken = strings.TrimSpace(rawToken[:idx])
+	}
 	tokenID := extractTokenID(rawToken)
 
 	// Macaroon token: validate and inject credentials
-	result := s.verifier.VerifyRequest(verifyAuth, access)
+	result := s.verifier.VerifyRequest("Bearer "+requestToken, access)
 	if !result.Valid {
 		log.Printf("Auth failed: %s", result.Error)
 		s.logAudit("deny", access.Method, host, access.Path, result.Error, tokenID)
@@ -267,14 +267,7 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 		}, nil
 	}
 
-	// Envoy binds a route to a configured vault credential path. Fall back to
-	// the host key for legacy configs that predate named credential paths.
-	credentialKey := host
-	if configured := strings.TrimPrefix(contextExtensions["credential"], "/"); configured != "" {
-		credentialKey = configured
-	}
-	cred, ok := s.credentials[credentialKey]
-	if !ok {
+	if !hasConfiguredCredential {
 		log.Printf("Auth failed: no credentials configured for %s", host)
 		s.logAudit("deny", access.Method, host, access.Path, "no credentials configured for host", tokenID)
 		return &authv3.CheckResponse{
@@ -472,6 +465,22 @@ func credentialHeaderOptions(headers map[string]string) []*corev3.HeaderValueOpt
 	return options
 }
 
+// extractBuiltinCapabilityToken handles the authentication formats belonging
+// to built-in providers. Service-specific schemes belong in JavaScript
+// credential extractors instead of the verifier or this fallback.
+func extractBuiltinCapabilityToken(header, prefix string) (string, bool) {
+	if macaroon.IsMacaroonAuth(header, prefix) {
+		return strings.TrimSpace(strings.TrimPrefix(header, "Bearer ")), true
+	}
+	if token := sigv4.ExtractAccessKey(header); strings.HasPrefix(token, prefix) {
+		return token, true
+	}
+	if token := extractBasicAuthMacaroon(header, prefix); token != "" {
+		return token, true
+	}
+	return "", false
+}
+
 // extractBasicAuthMacaroon extracts a macaroon token from a Basic auth header's password field.
 // Returns the macaroon token if found, or empty string if not a Basic auth macaroon.
 func extractBasicAuthMacaroon(header, prefix string) string {
@@ -491,6 +500,18 @@ func extractBasicAuthMacaroon(header, prefix string) string {
 		return password
 	}
 	return ""
+}
+
+func credentialExtractionErrorResponse() *authv3.CheckResponse {
+	return &authv3.CheckResponse{
+		Status: &status.Status{Code: int32(codes.Internal)},
+		HttpResponse: &authv3.CheckResponse_DeniedResponse{
+			DeniedResponse: &authv3.DeniedHttpResponse{
+				Status: &typev3.HttpStatus{Code: typev3.StatusCode_InternalServerError},
+				Body:   "Failed to extract credentials",
+			},
+		},
+	}
 }
 
 func main() {
@@ -591,14 +612,17 @@ func main() {
 	credentials := make(map[string]configuredCredential)
 	for name, credential := range vaultCfg.Credentials {
 		var credentialProvider provider.CredentialProvider
+		var credentialExtractor provider.CredentialExtractor
 		if registry.Has(credential.Type) {
 			credentialProvider, err = registry.Build(credential.Type, credential.ProviderConfig())
 		} else if jsManager != nil {
-			credentialProvider = jsManager.Provider(jsvm.Spec{
+			spec := jsvm.Spec{
 				Name:   name,
 				Type:   credential.Type,
 				Config: credential.ProviderConfig(),
-			})
+			}
+			credentialProvider = jsManager.Provider(spec)
+			credentialExtractor = jsManager.Extractor(spec)
 		} else {
 			err = fmt.Errorf("credential provider %q is not registered", credential.Type)
 		}
@@ -608,6 +632,7 @@ func main() {
 		credentials[name] = configuredCredential{
 			name:           name,
 			credentialType: credential.Type,
+			extractor:      credentialExtractor,
 			provider:       credentialProvider,
 			policy:         strings.TrimPrefix(credential.Policy, "/"),
 		}
@@ -749,7 +774,7 @@ func main() {
 func providerPaths() []string {
 	configured := strings.TrimSpace(os.Getenv("AGENT_CREDS_PROVIDER_PATH"))
 	if configured == "" {
-		return []string{"providers.d"}
+		return []string{"providers", "providers.d"}
 	}
 	return strings.FieldsFunc(configured, func(r rune) bool {
 		return r == os.PathListSeparator

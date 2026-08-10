@@ -2,6 +2,7 @@ package jsvm
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -107,10 +108,18 @@ func TestReloadIsAtomicAndKeepsLastKnownGoodSet(t *testing.T) {
 		t.Fatal(err)
 	}
 	configured := manager.Provider(Spec{Name: "configured", Type: "reload-test"})
+	extractor := manager.Extractor(Spec{Name: "configured", Type: "reload-test"})
 	request := provider.Request{Host: "api.example.com", Method: "GET", Path: "/"}
+	extractionRequest := provider.ExtractionRequest{
+		Host: "api.example.com", Method: "GET", Path: "/",
+		Headers: map[string]string{"x-capability": "capability"},
+	}
 
 	if got := resolveForTest(t, configured, request).Headers["x-version"]; got != "one" {
 		t.Fatalf("initial version = %q, want one", got)
+	}
+	if got := extractForTest(t, extractor, extractionRequest); got != "capability-one" {
+		t.Fatalf("initial extractor version = %q, want capability-one", got)
 	}
 
 	if err := os.WriteFile(scriptPath, []byte(versionScript("two")), 0o600); err != nil {
@@ -120,6 +129,9 @@ func TestReloadIsAtomicAndKeepsLastKnownGoodSet(t *testing.T) {
 	if got := resolveForTest(t, configured, request).Headers["x-version"]; got != "two" {
 		t.Fatalf("reloaded version = %q, want two", got)
 	}
+	if got := extractForTest(t, extractor, extractionRequest); got != "capability-two" {
+		t.Fatalf("reloaded extractor version = %q, want capability-two", got)
+	}
 
 	if err := os.WriteFile(scriptPath, []byte("this is not valid JavaScript {"), 0o600); err != nil {
 		t.Fatal(err)
@@ -127,6 +139,104 @@ func TestReloadIsAtomicAndKeepsLastKnownGoodSet(t *testing.T) {
 	manager.reloadIfChanged()
 	if got := resolveForTest(t, configured, request).Headers["x-version"]; got != "two" {
 		t.Fatalf("invalid reload replaced last known-good version: %q", got)
+	}
+	if got := extractForTest(t, extractor, extractionRequest); got != "capability-two" {
+		t.Fatalf("invalid reload replaced last known-good extractor: %q", got)
+	}
+}
+
+func TestExtractorRunsInRestrictedVMWithoutCredentialConfig(t *testing.T) {
+	directory := t.TempDir()
+	writeScript(t, directory, "zones.provider.js", `
+registerCredentialExtractor({
+  name: "zones-extractor",
+  credentialType: "zones-test",
+  extract: function (request) {
+    return [
+      String(arguments.length),
+      typeof arguments[1],
+      typeof request.value,
+      typeof $http,
+      typeof $exec,
+      typeof $jwt
+    ].join(":");
+  }
+});
+registerCredentialProvider({
+  name: "zones-provider",
+  credentialType: "zones-test",
+  resolve: function (_request, config) {
+    return {headers: {authorization: config.value}};
+  }
+});
+`)
+	manager, err := NewManager([]string{directory}, 1, []Spec{{
+		Name:   "configured",
+		Type:   "zones-test",
+		Config: map[string]any{"value": "resolved-secret"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	extracted := extractForTest(t, manager.Extractor(Spec{
+		Name:   "configured",
+		Type:   "zones-test",
+		Config: map[string]any{"value": "must-not-enter-extractor"},
+	}), provider.ExtractionRequest{})
+	if extracted != "1:undefined:undefined:undefined:undefined:undefined" {
+		t.Fatalf("extractor boundary = %q", extracted)
+	}
+
+	resolved := resolveForTest(t, manager.Provider(Spec{
+		Name:   "configured",
+		Type:   "zones-test",
+		Config: map[string]any{"value": "resolved-secret"},
+	}), provider.Request{})
+	if got := resolved.Headers["authorization"]; got != "resolved-secret" {
+		t.Fatalf("provider did not receive resolved config: %q", got)
+	}
+}
+
+func TestStandardGitHubAdapterExtractsClientFramingAndInjectsHeader(t *testing.T) {
+	providerDirectory := filepath.Join("..", "..", "providers")
+	spec := Spec{
+		Name: "github/no-instructions/relay",
+		Type: "github",
+		Config: map[string]any{
+			"header": "Authorization",
+			"value":  "Bearer upstream-token",
+		},
+	}
+	manager, err := NewManager([]string{providerDirectory}, 1, []Spec{spec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	extractor := manager.Extractor(spec)
+
+	if got := extractForTest(t, extractor, provider.ExtractionRequest{
+		Host: "api.github.com",
+		Headers: map[string]string{
+			"authorization": "token acm_api-capability",
+		},
+	}); got != "acm_api-capability" {
+		t.Fatalf("GitHub API token extraction = %q", got)
+	}
+	basic := "Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:acm_git-capability"))
+	if got := extractForTest(t, extractor, provider.ExtractionRequest{
+		Host: "github.com",
+		Headers: map[string]string{
+			"authorization": basic,
+		},
+	}); got != "acm_git-capability" {
+		t.Fatalf("Git Basic token extraction = %q", got)
+	}
+
+	result := resolveForTest(t, manager.Provider(spec), provider.Request{
+		Host: "github.com", Method: "POST", Path: "/No-Instructions/Relay.git/git-receive-pack",
+	})
+	if got := result.Headers["authorization"]; got != "Bearer upstream-token" {
+		t.Fatalf("GitHub header injection = %q", got)
 	}
 }
 
@@ -516,6 +626,15 @@ func resolveForTest(t *testing.T, configured provider.CredentialProvider, reques
 	return result
 }
 
+func extractForTest(t *testing.T, extractor provider.CredentialExtractor, request provider.ExtractionRequest) string {
+	t.Helper()
+	token, err := extractor.Extract(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return token
+}
+
 func writeScript(t *testing.T, directory, name, source string) string {
 	t.Helper()
 	scriptPath := filepath.Join(directory, name)
@@ -527,6 +646,13 @@ func writeScript(t *testing.T, directory, name, source string) string {
 
 func versionScript(version string) string {
 	return `
+registerCredentialExtractor({
+  name: "reload-extractor",
+  credentialType: "reload-test",
+  extract: function (request) {
+    return request.headers["x-capability"] + "-` + version + `";
+  }
+});
 registerCredentialProvider({
   name: "reload",
   credentialType: "reload-test",

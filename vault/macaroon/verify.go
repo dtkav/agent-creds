@@ -169,8 +169,7 @@ func (r *VerifyResult) IdentityHeaders() map[string]string {
 }
 
 // extractTokens extracts the main token and any discharge tokens from an Authorization header
-// Supports: "Bearer acm_main,...", GitHub CLI's "token acm_main,...",
-// or just "acm_main,...".
+// Supports: "Bearer acm_main,acm_discharge1,acm_discharge2" or just "acm_main,acm_discharge"
 // Returns: main token, slice of discharge tokens, error
 func extractTokens(header string) (string, []string, error) {
 	if header == "" {
@@ -178,11 +177,9 @@ func extractTokens(header string) (string, []string, error) {
 	}
 
 	var tokenStr string
-	// Handle conventional HTTP auth schemes used by supported clients.
+	// Handle "Bearer <tokens>" format
 	if strings.HasPrefix(header, "Bearer ") {
 		tokenStr = strings.TrimPrefix(header, "Bearer ")
-	} else if strings.HasPrefix(header, "token ") {
-		tokenStr = strings.TrimPrefix(header, "token ")
 	} else if strings.HasPrefix(header, TokenPrefix) {
 		tokenStr = header
 	} else {
@@ -215,15 +212,14 @@ func extractTokens(header string) (string, []string, error) {
 }
 
 // extractToken extracts a single token from an Authorization header (legacy, for simple cases)
-// Supports: "Bearer acm_xxx", "token acm_xxx", or just "acm_xxx".
+// Supports: "Bearer acm_xxx" or just "acm_xxx"
 func extractToken(header string) (string, error) {
 	main, _, err := extractTokens(header)
 	return main, err
 }
 
 // IsMacaroonAuth checks if an Authorization header contains a macaroon token
-// Returns true if the header is "Bearer <prefix>...", GitHub CLI's
-// "token <prefix>...", or just "<prefix>...".
+// Returns true if the header is "Bearer <prefix>..." or just "<prefix>..."
 func IsMacaroonAuth(header, prefix string) bool {
 	if header == "" {
 		return false
@@ -236,8 +232,6 @@ func IsMacaroonAuth(header, prefix string) bool {
 	var tokenStr string
 	if strings.HasPrefix(header, "Bearer ") {
 		tokenStr = strings.TrimPrefix(header, "Bearer ")
-	} else if strings.HasPrefix(header, "token ") {
-		tokenStr = strings.TrimPrefix(header, "token ")
 	} else {
 		tokenStr = header
 	}

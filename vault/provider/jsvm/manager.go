@@ -71,10 +71,11 @@ type Manager struct {
 }
 
 type runtimeSet struct {
-	fingerprint string
-	generation  uint64
-	pool        chan *scriptRuntime
-	plans       []registrationPlan
+	fingerprint   string
+	generation    uint64
+	pool          chan *scriptRuntime
+	extractorPool chan *extractorRuntime
+	plans         []registrationPlan
 }
 
 type scriptRuntime struct {
@@ -222,6 +223,19 @@ func (m *Manager) Provider(spec Spec) provider.CredentialProvider {
 	}
 }
 
+// Extractor returns a capability extractor bound to one configured
+// credential. It executes in a separate, restricted JavaScript runtime and
+// never receives spec.Config.
+func (m *Manager) Extractor(spec Spec) provider.CredentialExtractor {
+	return &jsCredentialExtractor{
+		manager: m,
+		spec: Spec{
+			Name: spec.Name,
+			Type: spec.Type,
+		},
+	}
+}
+
 // Policy returns an Authorizer bound to one configured upstream policy.
 func (m *Manager) Policy(spec PolicySpec) policy.Authorizer {
 	return &jsUpstreamPolicy{
@@ -236,6 +250,7 @@ func (m *Manager) Policy(spec PolicySpec) policy.Authorizer {
 
 func (m *Manager) buildSet(files []scriptFile, fingerprint string, generation uint64) (*runtimeSet, error) {
 	pool := make(chan *scriptRuntime, m.poolSize)
+	extractorPool := make(chan *extractorRuntime, m.poolSize)
 	var plans []registrationPlan
 	for i := 0; i < m.poolSize; i++ {
 		scriptVM, err := newScriptRuntime(files)
@@ -253,12 +268,39 @@ func (m *Manager) buildSet(files []scriptFile, fingerprint string, generation ui
 		}
 		pool <- scriptVM
 	}
+	for i := 0; i < m.poolSize; i++ {
+		extractorVM, err := newExtractorRuntime(files)
+		if err != nil {
+			return nil, err
+		}
+		extractorPool <- extractorVM
+	}
 	return &runtimeSet{
-		fingerprint: fingerprint,
-		generation:  generation,
-		pool:        pool,
-		plans:       plans,
+		fingerprint:   fingerprint,
+		generation:    generation,
+		pool:          pool,
+		extractorPool: extractorPool,
+		plans:         plans,
 	}, nil
+}
+
+func (m *Manager) extract(ctx context.Context, request provider.ExtractionRequest) (string, error) {
+	set := m.current.Load()
+	if set == nil {
+		return "", fmt.Errorf("JavaScript extractor runtime is not loaded")
+	}
+
+	var extractorVM *extractorRuntime
+	select {
+	case extractorVM = <-set.extractorPool:
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+	defer func() {
+		extractorVM.callContext = nil
+		set.extractorPool <- extractorVM
+	}()
+	return extractorVM.extractRequest(ctx, request)
 }
 
 func (m *Manager) resolve(ctx context.Context, request provider.Request, config map[string]any) (provider.Result, uint64, error) {
@@ -319,6 +361,17 @@ type jsCredentialProvider struct {
 	mu              sync.Mutex
 	cached          map[string]provider.Result
 	cacheGeneration uint64
+}
+
+type jsCredentialExtractor struct {
+	manager *Manager
+	spec    Spec
+}
+
+func (e *jsCredentialExtractor) Extract(ctx context.Context, request provider.ExtractionRequest) (string, error) {
+	request.Credential = e.spec.Name
+	request.CredentialType = e.spec.Type
+	return e.manager.extract(ctx, request)
 }
 
 func (p *jsCredentialProvider) Resolve(ctx context.Context, request provider.Request) (provider.Result, error) {
@@ -422,6 +475,11 @@ func (r *scriptRuntime) installGlobals() error {
 	if err := r.vm.Set("registerUpstreamPolicy", r.registerPolicy); err != nil {
 		return err
 	}
+	// The same plugin file may define both halves of a credential adapter. The
+	// extractor registration is evaluated in its own restricted VM below.
+	if err := r.vm.Set("registerCredentialExtractor", ignoredRegistration); err != nil {
+		return err
+	}
 	if err := r.vm.Set("$exec", map[string]any{"run": r.execRun}); err != nil {
 		return err
 	}
@@ -439,6 +497,10 @@ func (r *scriptRuntime) installGlobals() error {
 		return err
 	}
 	return nil
+}
+
+func ignoredRegistration(goja.FunctionCall) goja.Value {
+	return goja.Undefined()
 }
 
 func (r *scriptRuntime) register(call goja.FunctionCall) goja.Value {
@@ -827,17 +889,27 @@ func (s *runtimeSet) cacheKey(request provider.Request) (string, bool) {
 }
 
 func matchesRegistration(credentialType string, matcher matchSpec, request provider.Request) bool {
-	if !matchesCredentialType(credentialType, request.CredentialType) {
+	return matchesRequest(
+		credentialType,
+		matcher,
+		request.CredentialType,
+		request.Host,
+		request.Method,
+		request.Path,
+	)
+}
+
+func matchesRequest(credentialType string, matcher matchSpec, requestCredentialType, host, method, requestPath string) bool {
+	if !matchesCredentialType(credentialType, requestCredentialType) {
 		return false
 	}
-	if !matchAny(matcher.hosts, strings.ToLower(request.Host), false) {
+	if !matchAny(matcher.hosts, strings.ToLower(host), false) {
 		return false
 	}
-	if !matchAny(matcher.methods, strings.ToUpper(request.Method), true) {
+	if !matchAny(matcher.methods, strings.ToUpper(method), true) {
 		return false
 	}
 	if len(matcher.paths) > 0 {
-		requestPath := request.Path
 		if index := strings.IndexByte(requestPath, '?'); index >= 0 {
 			requestPath = requestPath[:index]
 		}

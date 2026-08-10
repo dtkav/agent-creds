@@ -316,6 +316,25 @@ credentials:
     env: FLY_OBSERVABILITY_TOKEN
 ```
 
+The standard GitHub adapter handles the client framing used by both `gh`
+(`Authorization: token ...`) and Git's HTTP Basic credential helper, then
+injects the configured upstream authorization header:
+
+```yaml
+credentials:
+  github/no-instructions/relay:
+    type: github
+    header: Authorization
+    value:
+      $secret: github#NO_INSTRUCTIONS_RELAY_AUTHORIZATION
+    env: GIT_GITHUB_TOKEN
+    capabilities:
+      hosts: [github.com, api.github.com]
+```
+
+The entire upstream header value remains in the credential Vault. The sandbox
+receives only the minted `acm_...` capability through `GIT_GITHUB_TOKEN`.
+
 A complete built-in credential can also describe its intended capabilities:
 
 ```yaml
@@ -425,12 +444,33 @@ Built-in providers cover common protocols. Deployment-specific exchanges and
 authorization rules belong in trusted JavaScript, loaded by Vault rather than
 compiled into the public binary.
 
-Files ending in `*.provider.js` or `*.policy.js` are loaded from
-`vault/providers.d` by default. Docker Compose mounts that directory
-read-only, and this repository ignores it so local deployment logic is not
-accidentally committed. `AGENT_CREDS_PROVIDER_PATH` can select other files or
-directories. The bind mount is a development convenience; do not give an
-untrusted agent write access to this checkout while Vault is loading from it.
+Files ending in `*.provider.js` or `*.policy.js` are loaded from the tracked
+`vault/providers` and deployment-owned `vault/providers.d` directories by
+default. Standard reviewed adapters live in the former. Docker Compose mounts
+the latter read-only, and this repository ignores it so local deployment logic
+is not accidentally committed. `AGENT_CREDS_PROVIDER_PATH` can select other
+files or directories. The bind mount is a development convenience; do not give
+an untrusted agent write access to this checkout while Vault is loading from
+it.
+
+A credential plugin may register two hooks in one file, but Vault evaluates
+them in separate VMs and at different points in the request:
+
+1. `registerCredentialExtractor` runs before verification. It receives only
+   request facts and headers, and may return an agent-creds capability string
+   or `null`. Its VM has no credential config, secrets, network, process
+   execution, or JWT helper. It exposes only `$base64.decode` and `$log`.
+2. Go verifies the returned macaroon and enforces its caveats and selected
+   upstream policy.
+3. `registerCredentialProvider` runs only after verification. It receives the
+   resolved credential configuration and returns the upstream headers to
+   inject.
+
+For example, the standard
+[`github.provider.js`](vault/providers/github.provider.js) plugin defines both
+GitHub's incoming client framing and its outgoing header injection. Service
+protocol details stay in the plugin; the Go verifier understands only
+agent-creds capabilities.
 
 Standalone, syntax-checked examples live in [`examples/`](examples/README.md).
 
@@ -519,7 +559,25 @@ resolve({
 }, config)
 ```
 
+Extractor functions receive request facts but never credential configuration:
+
+```js
+registerCredentialExtractor({
+  name: "service-client-auth",
+  credentialType: "service",
+  match: { hosts: ["api.service.example"] },
+  extract(request) {
+    const match = /^ServiceToken\s+(.+)$/.exec(
+      request.headers.authorization || "",
+    );
+    return match ? match[1] : null;
+  },
+});
+```
+
 The runtime also exposes:
+
+Provider-zone APIs:
 
 | API | Purpose |
 | --- | --- |
@@ -601,13 +659,14 @@ credential request carrying application constraints fails closed when no
 policy is selected.
 
 Extension reloads are atomic: Vault builds and validates a complete new runtime
-pool before activating it. Syntax, registration, or validation errors leave
-the last known-good generation serving traffic.
+pool for both execution zones before activating it. Syntax, registration, or
+validation errors leave the last known-good generation serving traffic.
 
 > [!WARNING]
-> JavaScript extensions are trusted deployment code. They run beside Vault,
-> can receive resolved secret configuration, and may use the network or execute
-> installed programs. Do not mount unreviewed scripts.
+> JavaScript extensions are trusted deployment code. Provider-zone callbacks
+> run beside Vault, can receive resolved secret configuration, and may use the
+> network or execute installed programs. Extractor-zone callbacks are isolated
+> from those capabilities, but unreviewed scripts must still not be mounted.
 
 ## Security model
 

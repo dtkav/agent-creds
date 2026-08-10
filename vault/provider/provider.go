@@ -33,6 +33,25 @@ type CredentialProvider interface {
 	Resolve(context.Context, Request) (Result, error)
 }
 
+// ExtractionRequest is the non-secret request context made available before
+// capability verification. It intentionally has no provider configuration.
+type ExtractionRequest struct {
+	Credential     string
+	CredentialType string
+	Host           string
+	Method         string
+	Path           string
+	Headers        map[string]string
+}
+
+// CredentialExtractor reads an unmodified client request and returns the
+// agent-creds capability token it carries. Extractors run before token
+// verification and therefore receive request facts only, never credential
+// configuration or resolved secrets.
+type CredentialExtractor interface {
+	Extract(context.Context, ExtractionRequest) (string, error)
+}
+
 // Factory constructs a provider from its provider-specific configuration.
 type Factory func(config map[string]any) (CredentialProvider, error)
 

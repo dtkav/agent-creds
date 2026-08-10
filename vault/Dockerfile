@@ -23,9 +23,10 @@ COPY --from=builder /app/mint .
 COPY --from=builder /app/mintfs .
 COPY --from=builder /app/vault-admin .
 COPY --from=builder /app/vault-ssh .
+COPY providers ./providers
 
-# The public image contains no deployment extensions. Derived images may copy
-# reviewed providers here; Compose can also mount an administrator-owned path.
+# Standard reviewed adapters ship in /app/providers. Compose can additionally
+# mount administrator-owned deployment extensions in /app/providers.d.
 RUN mkdir -p /data /app/providers.d
 
 # wish generates an Ed25519 keypair here on first start. /data is persistent.

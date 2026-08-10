@@ -122,8 +122,7 @@ func startCmd(args []string) {
 		// SSH mode
 		hostList := parseHosts(*hosts)
 		if len(hostList) == 0 {
-			// Default hosts
-			hostList = []string{"api.stripe.com", "api.openai.com", "api.anthropic.com"}
+			log.Fatal("--hosts is required for SSH mode")
 		}
 		startSSHMode(mountPoint, *sshHost, hostList)
 	} else if *username != "" && *serverURL != "" {

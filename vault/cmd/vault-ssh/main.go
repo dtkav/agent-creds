@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -70,15 +71,6 @@ var (
 	keyStore    *tfmac.KeyStore
 	vaultConfig *vaultcfg.Config
 )
-
-// configuredHosts lists hosts that can be minted (loaded from domains_gen.go if available)
-// For now, we'll allow any host - in production this should be restricted
-var configuredHosts = []string{
-	"api.stripe.com",
-	"api.openai.com",
-	"api.anthropic.com",
-	"api.github.com",
-}
 
 // ============================================================================
 // Direct Commands (non-TUI)
@@ -152,10 +144,14 @@ func cmdMint(sess ssh.Session, userID []byte, status string, args []string) {
 
 	if len(args) == 0 {
 		fmt.Fprintln(sess, "Usage: mint <host> [--subject <subject>] [--no-host] [--methods GET,POST] [--paths /v1/*] [--constraint namespace=JSON] [--valid-for 1h]")
-		fmt.Fprintln(sess, "\nConfigured hosts:")
-		for _, host := range configuredHosts {
-			fmt.Fprintf(sess, "  %s\n", host)
+		hosts := configuredCredentialHosts(vaultConfig)
+		if len(hosts) > 0 {
+			fmt.Fprintln(sess, "\nHosts declared by credential capabilities:")
+			for _, host := range hosts {
+				fmt.Fprintf(sess, "  %s\n", host)
+			}
 		}
+		fmt.Fprintln(sess, "\nJavaScript providers match hosts at request time; pass the host explicitly when it is not listed above.")
 		return
 	}
 
@@ -625,11 +621,11 @@ func initialModel(userID []byte, fingerprint, status string) model {
 
 	// Set up the host list for minting
 	var hostItems []list.Item
-	for _, host := range configuredHosts {
+	for _, host := range configuredCredentialHosts(vaultConfig) {
 		hostItems = append(hostItems, hostItem{host: host})
 	}
 	hostList := list.New(hostItems, delegate, 0, 0)
-	hostList.Title = "Select Host"
+	hostList.Title = "Select Capability Host"
 	hostList.SetShowHelp(false)
 	hostList.SetShowStatusBar(false)
 
@@ -648,6 +644,30 @@ func (m model) Init() tea.Cmd {
 		return m.loadPendingUsers
 	}
 	return nil
+}
+
+func configuredCredentialHosts(config *vaultcfg.Config) []string {
+	if config == nil {
+		return nil
+	}
+	hostSet := make(map[string]struct{})
+	for _, credential := range config.Credentials {
+		if credential.Capabilities == nil {
+			continue
+		}
+		for _, configuredHost := range credential.Capabilities.Hosts {
+			host := strings.TrimSpace(configuredHost)
+			if host != "" {
+				hostSet[host] = struct{}{}
+			}
+		}
+	}
+	hosts := make([]string, 0, len(hostSet))
+	for host := range hostSet {
+		hosts = append(hosts, host)
+	}
+	sort.Strings(hosts)
+	return hosts
 }
 
 type pendingUsersMsg []list.Item
@@ -706,6 +726,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "m":
 			// Mint token (approved users)
 			if m.status != UserStatusPending && m.currentView == viewMain {
+				if len(m.hostList.Items()) == 0 {
+					m.message = subtleStyle.Render("No capability hosts are declared. Use the direct mint <host> command; JavaScript providers match requests at runtime.")
+					return m, nil
+				}
 				m.currentView = viewMintSelect
 				return m, nil
 			}

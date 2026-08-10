@@ -440,18 +440,18 @@ and `403` for a valid token that violates caveats or policy.
 
 ## JavaScript extensions
 
-Built-in providers cover common protocols. Deployment-specific exchanges and
-authorization rules belong in trusted JavaScript, loaded by Vault rather than
-compiled into the public binary.
+The product ships generic credential protocols and a JavaScript runtime.
+Service-specific exchanges and authorization rules belong in trusted
+deployment JavaScript, loaded by Vault rather than compiled into the public
+binary.
 
-Files ending in `*.provider.js` or `*.policy.js` are loaded from the tracked
-`vault/providers` and deployment-owned `vault/providers.d` directories by
-default. Standard reviewed adapters live in the former. Docker Compose mounts
-the latter read-only, and this repository ignores it so local deployment logic
-is not accidentally committed. `AGENT_CREDS_PROVIDER_PATH` can select other
-files or directories. The bind mount is a development convenience; do not give
-an untrusted agent write access to this checkout while Vault is loading from
-it.
+Files ending in `*.provider.js` or `*.policy.js` are loaded from
+`vault/providers` and `vault/providers.d` by default. This repository keeps
+service-specific adapters in the ignored `vault/providers.d` deployment
+overlay, where the private harness can track them independently from the
+product. `AGENT_CREDS_PROVIDER_PATH` can select other files or directories.
+Docker Compose mounts the deployment directory read-only. Do not give an
+untrusted agent write access to any path from which Vault loads extensions.
 
 A credential plugin may register two hooks in one file, but Vault evaluates
 them in separate VMs and at different points in the request:
@@ -466,11 +466,9 @@ them in separate VMs and at different points in the request:
    resolved credential configuration and returns the upstream headers to
    inject.
 
-For example, the standard
-[`github.provider.js`](vault/providers/github.provider.js) plugin defines both
-GitHub's incoming client framing and its outgoing header injection. Service
-protocol details stay in the plugin; the Go verifier understands only
-agent-creds capabilities.
+A deployment adapter can define both a service's incoming client framing and
+its outgoing credential injection. Those protocol details stay in the plugin;
+the Go verifier understands only agent-creds capabilities.
 
 Standalone, syntax-checked examples live in [`examples/`](examples/README.md).
 

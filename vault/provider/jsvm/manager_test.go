@@ -2,7 +2,6 @@ package jsvm
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -198,45 +197,35 @@ registerCredentialProvider({
 	}
 }
 
-func TestStandardGitHubAdapterExtractsClientFramingAndInjectsHeader(t *testing.T) {
-	providerDirectory := filepath.Join("..", "..", "providers")
+func TestProviderRuntimeEncodesBase64(t *testing.T) {
+	providerDirectory := t.TempDir()
+	writeScript(t, providerDirectory, "base64.provider.js", `
+registerCredentialProvider({
+  name: "base64-test",
+  credentialType: "base64-test",
+  match: { hosts: ["api.example.com"] },
+  resolve: function (_request, config) {
+    return { headers: { authorization: "Basic " + $base64.encode(config.value) } };
+  }
+});
+`)
 	spec := Spec{
-		Name: "github/no-instructions/relay",
-		Type: "github",
+		Name: "configured",
+		Type: "base64-test",
 		Config: map[string]any{
-			"header": "Authorization",
-			"value":  "Bearer upstream-token",
+			"value": "user:password",
 		},
 	}
 	manager, err := NewManager([]string{providerDirectory}, 1, []Spec{spec})
 	if err != nil {
 		t.Fatal(err)
 	}
-	extractor := manager.Extractor(spec)
-
-	if got := extractForTest(t, extractor, provider.ExtractionRequest{
-		Host: "api.github.com",
-		Headers: map[string]string{
-			"authorization": "token acm_api-capability",
-		},
-	}); got != "acm_api-capability" {
-		t.Fatalf("GitHub API token extraction = %q", got)
-	}
-	basic := "Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:acm_git-capability"))
-	if got := extractForTest(t, extractor, provider.ExtractionRequest{
-		Host: "github.com",
-		Headers: map[string]string{
-			"authorization": basic,
-		},
-	}); got != "acm_git-capability" {
-		t.Fatalf("Git Basic token extraction = %q", got)
-	}
-
 	result := resolveForTest(t, manager.Provider(spec), provider.Request{
-		Host: "github.com", Method: "POST", Path: "/No-Instructions/Relay.git/git-receive-pack",
+		Host: "api.example.com", Method: "GET", Path: "/v1/resource",
 	})
-	if got := result.Headers["authorization"]; got != "Bearer upstream-token" {
-		t.Fatalf("GitHub header injection = %q", got)
+	wantAuthorization := "Basic dXNlcjpwYXNzd29yZA=="
+	if got := result.Headers["authorization"]; got != wantAuthorization {
+		t.Fatalf("base64 injection = %q, want %q", got, wantAuthorization)
 	}
 }
 

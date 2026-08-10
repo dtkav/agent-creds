@@ -489,6 +489,13 @@ func (r *scriptRuntime) installGlobals() error {
 	if err := r.vm.Set("$jwt", map[string]any{"expiresAt": r.jwtExpiresAt}); err != nil {
 		return err
 	}
+	if err := r.vm.Set("$base64", map[string]any{
+		"encode": func(value string) string {
+			return base64.StdEncoding.EncodeToString([]byte(value))
+		},
+	}); err != nil {
+		return err
+	}
 	if err := r.vm.Set("$log", map[string]any{
 		"debug": func(message string) { log.Printf("provider: %s", message) },
 		"info":  func(message string) { log.Printf("provider: %s", message) },

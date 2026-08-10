@@ -402,6 +402,11 @@ url = "*localhost:3000*"
 An empty target list blocks all browser or CDP targets. Matching is
 conjunctive when a target specifies multiple fields.
 
+The same configuration works with `bwrap`. Browser opens and OAuth callbacks
+cross a loopback-only slirp bridge; CDP is filtered on the host before a
+localhost endpoint is presented inside the sandbox. Raw Chrome debugging ports
+and the slirp control socket are never mounted into the agent.
+
 ### Observe the credential plane
 
 ```console

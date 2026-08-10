@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -9,6 +10,9 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 )
 
@@ -28,11 +32,13 @@ func AllocateTCPCDPPort(slug string, cdpPort int) int {
 	return 51000 + int(h.Sum32()%1000)
 }
 
-// startBrowserForwardTCP listens on a TCP port for browser forward requests.
-// In gVisor mode, binds to gateway IP so sandbox can reach it directly.
-// sandboxContainerName is used for OAuth callback proxying on the host side.
-// tcp-bridge inside the container handles the container side (0.0.0.0 -> localhost).
-func startBrowserForwardTCP(sandboxContainerName string, bindIP string, port int, targets []BrowserTargetConfig) (*ForwardState, error) {
+// BrowserCallbackForwarder publishes a localhost callback port from the host
+// into a sandbox. The browser request is opened only after this succeeds.
+type BrowserCallbackForwarder func(port string) error
+
+// startBrowserForwardTCP listens on a TCP port for allowlisted browser-open
+// requests. callbackForwarder provides the runtime-specific OAuth return path.
+func startBrowserForwardTCP(bindIP string, port int, targets []BrowserTargetConfig, callbackForwarder BrowserCallbackForwarder) (*ForwardState, error) {
 	addr := fmt.Sprintf("%s:%d", bindIP, port)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -59,32 +65,18 @@ func startBrowserForwardTCP(sandboxContainerName string, bindIP string, port int
 			return
 		}
 
-		// Extract localhost callback ports and set up host-side proxy.
-		// tcp-bridge inside the container sets up the container-side proxy.
-		if parsed, err := url.Parse(rawURL); err == nil {
-			// Check main URL
-			if port := parsed.Port(); port != "" {
-				host := parsed.Hostname()
-				if host == "localhost" || host == "127.0.0.1" {
-					fmt.Fprintf(os.Stderr, "[browser-fwd] main URL has localhost:%s\n", port)
-					go proxyLocalPort(sandboxContainerName, port)
-					time.Sleep(100 * time.Millisecond)
-				}
+		for _, callbackPort := range browserCallbackPorts(rawURL) {
+			if callbackForwarder == nil {
+				continue
 			}
-			// Check redirect_uri parameter (OAuth flows)
-			if redirectURI := parsed.Query().Get("redirect_uri"); redirectURI != "" {
-				fmt.Fprintf(os.Stderr, "[browser-fwd] found redirect_uri: %s\n", redirectURI)
-				if redirectParsed, err := url.Parse(redirectURI); err == nil {
-					if port := redirectParsed.Port(); port != "" {
-						host := redirectParsed.Hostname()
-						fmt.Fprintf(os.Stderr, "[browser-fwd] redirect_uri host=%s port=%s\n", host, port)
-						if host == "localhost" || host == "127.0.0.1" {
-							go proxyLocalPort(sandboxContainerName, port)
-							time.Sleep(100 * time.Millisecond)
-						}
-					}
-				}
+			if err := callbackForwarder(callbackPort); err != nil {
+				fmt.Fprintf(os.Stderr, "[browser-fwd] callback localhost:%s: %v\n", callbackPort, err)
+				http.Error(w, "callback forwarding unavailable", http.StatusBadGateway)
+				return
 			}
+			// The sandbox-side bridge is started from the same request. Give its
+			// listener a moment to bind before the host browser can redirect.
+			time.Sleep(100 * time.Millisecond)
 		}
 
 		cmd := exec.Command("xdg-open", rawURL)
@@ -100,6 +92,116 @@ func startBrowserForwardTCP(sandboxContainerName string, bindIP string, port int
 	}))
 
 	return &ForwardState{Listener: listener}, nil
+}
+
+// browserCallbackPorts extracts unique localhost ports from both the browser
+// URL itself and an OAuth redirect_uri query parameter.
+func browserCallbackPorts(rawURL string) []string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var ports []string
+	add := func(u *url.URL) {
+		port := u.Port()
+		if port == "" || (u.Hostname() != "localhost" && u.Hostname() != "127.0.0.1") || seen[port] {
+			return
+		}
+		if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+			return
+		}
+		seen[port] = true
+		ports = append(ports, port)
+	}
+	add(parsed)
+	if redirectURI := parsed.Query().Get("redirect_uri"); redirectURI != "" {
+		if redirect, err := url.Parse(redirectURI); err == nil {
+			add(redirect)
+		}
+	}
+	return ports
+}
+
+// slirpHostForwarder adds loopback-only host forwards through slirp4netns's
+// QMP-like API. A port is installed at most once for the life of an instance.
+type slirpHostForwarder struct {
+	socketPath string
+	mu         sync.Mutex
+	ports      map[int]bool
+}
+
+func newSlirpHostForwarder(socketPath string) *slirpHostForwarder {
+	return &slirpHostForwarder{socketPath: socketPath, ports: make(map[int]bool)}
+}
+
+func (f *slirpHostForwarder) Forward(port string) error {
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("invalid callback port %q", port)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.ports[n] {
+		return nil
+	}
+	request := map[string]any{
+		"execute": "add_hostfwd",
+		"arguments": map[string]any{
+			"proto":      "tcp",
+			"host_addr":  "127.0.0.1",
+			"host_port":  n,
+			"guest_addr": "10.0.2.100",
+			"guest_port": n,
+		},
+	}
+	if err := callSlirpAPI(f.socketPath, request); err != nil {
+		return err
+	}
+	f.ports[n] = true
+	return nil
+}
+
+func callSlirpAPI(socketPath string, request any) error {
+	conn, err := net.DialTimeout("unix", socketPath, 2*time.Second)
+	if err != nil {
+		return fmt.Errorf("connecting to slirp API: %w", err)
+	}
+	defer conn.Close()
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return err
+	}
+	if len(payload) >= 4096 {
+		return fmt.Errorf("slirp API request is too large")
+	}
+	if _, err := conn.Write(payload); err != nil {
+		return fmt.Errorf("writing slirp API request: %w", err)
+	}
+	if unixConn, ok := conn.(*net.UnixConn); ok {
+		if err := unixConn.CloseWrite(); err != nil {
+			return fmt.Errorf("finishing slirp API request: %w", err)
+		}
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	response, err := io.ReadAll(io.LimitReader(conn, 4096))
+	if err != nil {
+		return fmt.Errorf("reading slirp API response: %w", err)
+	}
+	var result struct {
+		Return json.RawMessage `json:"return"`
+		Error  json.RawMessage `json:"error"`
+	}
+	if err := json.Unmarshal(response, &result); err != nil {
+		return fmt.Errorf("decoding slirp API response: %w", err)
+	}
+	if len(result.Error) > 0 && string(result.Error) != "null" {
+		return fmt.Errorf("slirp API rejected host forward: %s", strings.TrimSpace(string(result.Error)))
+	}
+	if len(result.Return) == 0 {
+		return fmt.Errorf("slirp API returned no result")
+	}
+	return nil
 }
 
 // startCDPForwardTCP listens on TCP and forwards to a local CDP port.

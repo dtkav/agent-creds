@@ -197,6 +197,8 @@ func main() {
 		runGenerateNix(args)
 	case "setup":
 		runSetup(args)
+	case "_bwrap-browser-forward":
+		runBwrapBrowserForward(args)
 	case "help", "-h", "--help":
 		printUsage()
 	default:

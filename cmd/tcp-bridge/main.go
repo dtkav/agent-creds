@@ -3,8 +3,8 @@
 // forwarding to work in gVisor mode where Unix socket bind mounts don't work.
 //
 // For browser forwarding, it also inspects the URL for redirect_uri parameters
-// and sets up callback proxies (0.0.0.0:port -> 127.0.0.1:port) so OAuth
-// callbacks from the host browser can reach the sandbox's localhost listener.
+// and sets up callback proxies (the configured guest address -> localhost) so
+// OAuth callbacks from the host browser can reach the sandbox listener.
 package main
 
 import (
@@ -22,16 +22,24 @@ import (
 	"time"
 )
 
-const browserSockPath = "/tmp/browser-forward.sock"
+const defaultBrowserSockPath = "/tmp/browser-forward.sock"
 
 func main() {
 	// Log to file so we can debug (container stderr isn't visible)
-	logFile, err := os.OpenFile("/tmp/tcp-bridge.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	logPath := os.Getenv("TCP_BRIDGE_LOG")
+	if logPath == "" {
+		logPath = "/tmp/tcp-bridge.log"
+	}
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err == nil {
 		log.SetOutput(logFile)
 	}
 
 	browserPort := os.Getenv("TCP_BROWSER_PORT")
+	browserSockPath := os.Getenv("BROWSER_SOCKET_PATH")
+	if browserSockPath == "" {
+		browserSockPath = defaultBrowserSockPath
+	}
 	cdpPortMap := os.Getenv("CDP_PORT_MAP")
 
 	if browserPort == "" && cdpPortMap == "" {
@@ -39,8 +47,12 @@ func main() {
 		return
 	}
 
-	// Get gateway IP from default route
-	gatewayIP := getGatewayIP()
+	// Containers discover the gateway from their default route. bwrap has no
+	// default route by design, so its launcher supplies the confined host peer.
+	gatewayIP := os.Getenv("TCP_BRIDGE_HOST")
+	if gatewayIP == "" {
+		gatewayIP = getGatewayIP()
+	}
 	if gatewayIP == "" {
 		log.Fatal("tcp-bridge: could not determine gateway IP")
 	}
@@ -307,11 +319,12 @@ func isPortListening(port string) bool {
 	return false
 }
 
-// startCallbackProxy listens on 0.0.0.0:<port> and forwards to localhost:<port>.
+// startCallbackProxy listens on the configured guest address and forwards to
+// localhost:<port>. Container runtimes default to 0.0.0.0; bwrap uses tap0.
 // Tries both IPv4 (127.0.0.1) and IPv6 (::1) since some apps bind to one or the other.
 // Closes automatically when the upstream listener goes away.
 func startCallbackProxy(port string) {
-	listenAddr := "0.0.0.0:" + port
+	listenAddr := callbackListenAddr(port)
 
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
@@ -371,6 +384,14 @@ func startCallbackProxy(port string) {
 			<-done
 		}(conn)
 	}
+}
+
+func callbackListenAddr(port string) string {
+	host := os.Getenv("CALLBACK_LISTEN_HOST")
+	if host == "" {
+		host = "0.0.0.0"
+	}
+	return net.JoinHostPort(host, port)
 }
 
 // closeWrite shuts down the write side of a connection, signaling EOF to the reader.

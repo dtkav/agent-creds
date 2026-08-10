@@ -27,6 +27,34 @@ func TestBwrapEnvoyPortDeterministicRange(t *testing.T) {
 	}
 }
 
+func TestBwrapCDPProxyPortDeterministicRange(t *testing.T) {
+	for _, slug := range []string{"relay-diffs", "default", "a"} {
+		p1 := BwrapCDPProxyPort(slug)
+		p2 := BwrapCDPProxyPort(slug)
+		if p1 != p2 {
+			t.Errorf("CDP port for %q not deterministic: %d != %d", slug, p1, p2)
+		}
+		if p1 < 29000 || p1 >= 38000 {
+			t.Errorf("CDP port for %q out of range: %d", slug, p1)
+		}
+	}
+}
+
+func TestBwrapHostSocketsAreShortAndSeparated(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+	slug := strings.Repeat("long-instance-name-", 20)
+	apiSocket := bwrapSlirpAPISocket(slug)
+	browserSocket := bwrapBrowserSocket(slug)
+	for _, path := range []string{apiSocket, browserSocket} {
+		if len(path) >= 108 {
+			t.Fatalf("Unix socket path is %d bytes: %s", len(path), path)
+		}
+	}
+	if filepath.Dir(apiSocket) == filepath.Dir(browserSocket) {
+		t.Fatalf("control and bridge sockets share a mounted directory: %s", filepath.Dir(apiSocket))
+	}
+}
+
 func TestBwrapAgentArgv(t *testing.T) {
 	cases := []struct {
 		agent      string
@@ -118,10 +146,10 @@ func TestBwrapGeneratedScriptsParse(t *testing.T) {
 	launch := filepath.Join(dir, "bwrap-launch.sh")
 	args := []string{"--die-with-parent", "--setenv", "X", "a b 'c'", "--chdir", "/tmp"}
 	argv := []string{"claude", "--permission-mode", "bypassPermissions"}
-	if err := writeBwrapSetupScript(setup, "/opt/agent-creds", dir, 21281, args, argv); err != nil {
+	if err := writeBwrapSetupScript(setup, "/opt/agent-creds", dir, 21281, 31281, 50281, "/host-only/browser.sock", args, argv); err != nil {
 		t.Fatalf("writeBwrapSetupScript: %v", err)
 	}
-	if err := writeBwrapLaunchScript(launch, dir, setup); err != nil {
+	if err := writeBwrapLaunchScript(launch, dir, setup, "/host-only/slirp-api.sock"); err != nil {
 		t.Fatalf("writeBwrapLaunchScript: %v", err)
 	}
 	for _, script := range []string{setup, launch} {
@@ -132,7 +160,28 @@ func TestBwrapGeneratedScriptsParse(t *testing.T) {
 		}
 	}
 	data, _ := os.ReadFile(setup)
-	for _, want := range []string{"PORT=21281", "tcp dport $PORT", "setpriv --ambient-caps=-all", "'a b '\\''c'\\'''"} {
+	launchData, _ := os.ReadFile(launch)
+	data = append(data, launchData...)
+	for _, want := range []string{
+		"PORT=21281",
+		"CDP_PROXY_PORT=31281",
+		"BROWSER_FORWARD_PORT=50281",
+		"BROWSER_FORWARD_SOCKET='/host-only/browser.sock'",
+		"tcp dport $PORT",
+		"ct state established,related accept",
+		`tcp dport "$CDP_PROXY_PORT"`,
+		`tcp dport "$BROWSER_FORWARD_PORT"`,
+		"CDP_LISTEN_ADDR=127.0.0.1:9222",
+		"CDP_TRUST_FILTERED_UPSTREAM=1",
+		"TCP_BROWSER_PORT=\"$BROWSER_FORWARD_PORT\"",
+		"TCP_BRIDGE_HOST=10.0.2.2",
+		"CALLBACK_LISTEN_HOST=10.0.2.100",
+		"BROWSER_SOCKET_PATH=\"$BROWSER_FORWARD_SOCKET\"",
+		"SLIRP_API='/host-only/slirp-api.sock'",
+		"--api-socket=\"$SLIRP_API\"",
+		"setpriv --ambient-caps=-all",
+		"'a b '\\''c'\\'''",
+	} {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("setup script missing %q", want)
 		}
@@ -195,7 +244,7 @@ func TestBwrapArgsEnterSandboxEnvWithoutMountingWholeNixStore(t *testing.T) {
 
 	args, err := buildBwrapArgs(
 		workDir, scriptDir, "test", ProjectConfig{}, envPath,
-		[]NixStoreMount{mount}, nil, nil,
+		[]NixStoreMount{mount}, 0, "", nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("buildBwrapArgs: %v", err)
@@ -224,7 +273,7 @@ func TestBwrapArgsRequireSandboxEnvClosure(t *testing.T) {
 
 	_, err := buildBwrapArgs(
 		workDir, filepath.Join(root, "agent-creds"), "test",
-		ProjectConfig{}, "", nil, nil, nil,
+		ProjectConfig{}, "", nil, 0, "", nil, nil,
 	)
 	if err == nil || !strings.Contains(err.Error(), "sandbox environment is required") {
 		t.Fatalf("buildBwrapArgs error = %v, want missing sandbox environment", err)
@@ -232,7 +281,7 @@ func TestBwrapArgsRequireSandboxEnvClosure(t *testing.T) {
 
 	_, err = buildBwrapArgs(
 		workDir, filepath.Join(root, "agent-creds"), "test",
-		ProjectConfig{}, "/nix/store/test-sandbox-env", nil, nil, nil,
+		ProjectConfig{}, "/nix/store/test-sandbox-env", nil, 0, "", nil, nil,
 	)
 	if err == nil || !strings.Contains(err.Error(), "closure is empty") {
 		t.Fatalf("buildBwrapArgs error = %v, want empty closure", err)

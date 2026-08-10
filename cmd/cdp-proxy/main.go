@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -60,17 +61,19 @@ type CDPTarget struct {
 // upstream represents a single Chrome CDP upstream identified by its socket path.
 type upstream struct {
 	chromePort int    // the Chrome CDP port this upstream corresponds to
-	sockPath   string // Unix socket path, e.g. /tmp/cdp-9222.sock
+	network    string // unix for containers, tcp for the bwrap host proxy
+	address    string // socket path or host:port
 }
 
 var (
-	config     Config
-	upstreams  []upstream                  // all upstream sockets
-	portFilter map[int][]CDPTargetConfig   // chromePort → filter patterns for that port
-	allowedIDs = make(map[string]string)   // targetID → sockPath (which upstream owns it)
-	allowedMu  sync.RWMutex
-	listenPort = 9222
-	upgrader   = websocket.Upgrader{
+	config                Config
+	upstreams             []upstream                  // all upstream sockets
+	portFilter            map[int][]CDPTargetConfig   // chromePort → filter patterns for that port
+	allowedIDs            = make(map[string]upstream) // targetID → owning upstream
+	allowedMu             sync.RWMutex
+	listenPort            = 9222
+	trustFilteredUpstream bool
+	upgrader              = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool { return true },
 	}
 )
@@ -78,20 +81,32 @@ var (
 func main() {
 	loadConfig()
 	loadUpstreams()
+	trustFilteredUpstream = os.Getenv("CDP_TRUST_FILTERED_UPSTREAM") == "1"
 
 	http.HandleFunc("/json/list", handleJSONList)
 	http.HandleFunc("/json/", handleJSONPassthrough)
 	http.HandleFunc("/devtools/", handleDevTools)
 	http.HandleFunc("/", handlePassthrough)
 
-	addr := fmt.Sprintf("127.0.0.1:%d", listenPort)
+	addr := os.Getenv("CDP_LISTEN_ADDR")
+	if addr == "" {
+		addr = fmt.Sprintf("127.0.0.1:%d", listenPort)
+	}
+	if _, port, err := net.SplitHostPort(addr); err == nil {
+		if parsed, err := strconv.Atoi(port); err == nil {
+			listenPort = parsed
+		}
+	}
 	if err := http.ListenAndServe(addr, nil); err != nil {
 		os.Exit(1)
 	}
 }
 
 func loadConfig() {
-	path := "/etc/aenv/agent-creds.toml"
+	path := os.Getenv("CDP_CONFIG_PATH")
+	if path == "" {
+		path = "/etc/aenv/agent-creds.toml"
+	}
 	if _, err := toml.DecodeFile(path, &config); err != nil {
 		config.CDPTargets = nil
 	}
@@ -108,6 +123,31 @@ func loadConfig() {
 }
 
 func loadUpstreams() {
+	tcpPortMap := os.Getenv("CDP_TCP_PORT_MAP")
+	if tcpPortMap != "" {
+		host := os.Getenv("CDP_TCP_HOST")
+		if host == "" {
+			host = "127.0.0.1"
+		}
+		for _, entry := range strings.Split(tcpPortMap, ",") {
+			parts := strings.SplitN(entry, ":", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			var chromePort, tcpPort int
+			if _, err := fmt.Sscanf(parts[0], "%d", &chromePort); err != nil {
+				continue
+			}
+			if _, err := fmt.Sscanf(parts[1], "%d", &tcpPort); err != nil {
+				continue
+			}
+			upstreams = append(upstreams, upstream{
+				chromePort: chromePort,
+				network:    "tcp",
+				address:    net.JoinHostPort(host, strconv.Itoa(tcpPort)),
+			})
+		}
+	}
 	cdpPortMap := os.Getenv("CDP_PORT_MAP")
 	if cdpPortMap == "" {
 		return
@@ -122,7 +162,11 @@ func loadUpstreams() {
 			continue
 		}
 		sockPath := fmt.Sprintf("/tmp/cdp-%d.sock", chromePort)
-		upstreams = append(upstreams, upstream{chromePort: chromePort, sockPath: sockPath})
+		upstreams = append(upstreams, upstream{
+			chromePort: chromePort,
+			network:    "unix",
+			address:    sockPath,
+		})
 	}
 }
 
@@ -139,6 +183,9 @@ func matchGlob(pattern, value string) bool {
 }
 
 func isTargetAllowed(target CDPTarget, filters []CDPTargetConfig) bool {
+	if trustFilteredUpstream {
+		return true
+	}
 	if len(filters) == 0 {
 		return false
 	}
@@ -160,10 +207,11 @@ func isIDAllowed(id string) bool {
 	return ok
 }
 
-func getIDSocket(id string) string {
+func getIDUpstream(id string) (upstream, bool) {
 	allowedMu.RLock()
 	defer allowedMu.RUnlock()
-	return allowedIDs[id]
+	u, ok := allowedIDs[id]
+	return u, ok
 }
 
 // rewriteCDPUrl rewrites a CDP URL (webSocketDebuggerUrl or devtoolsFrontendUrl)
@@ -198,11 +246,11 @@ func rewriteCDPUrl(rawURL string) string {
 }
 
 func handleJSONList(w http.ResponseWriter, r *http.Request) {
-	newAllowed := make(map[string]string)
+	newAllowed := make(map[string]upstream)
 	var allTargets []CDPTarget
 
 	for _, u := range upstreams {
-		resp, err := fetchFromSocket(u.sockPath, "/json/list")
+		resp, err := fetchFromUpstream(u, "/json/list")
 		if err != nil {
 			continue
 		}
@@ -221,7 +269,7 @@ func handleJSONList(w http.ResponseWriter, r *http.Request) {
 				t.WebSocketDebuggerUrl = rewriteCDPUrl(t.WebSocketDebuggerUrl)
 				t.DevtoolsFrontendUrl = rewriteCDPUrl(t.DevtoolsFrontendUrl)
 				allTargets = append(allTargets, t)
-				newAllowed[t.ID] = u.sockPath
+				newAllowed[t.ID] = u
 			}
 		}
 	}
@@ -242,7 +290,7 @@ func handleJSONPassthrough(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := fetchFromSocket(upstreams[0].sockPath, r.URL.Path)
+	resp, err := fetchFromUpstream(upstreams[0], r.URL.Path)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -303,12 +351,12 @@ func handleDevTools(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Otherwise passthrough to the target's upstream
-	sock := getIDSocket(targetID)
-	if sock == "" {
+	u, ok := getIDUpstream(targetID)
+	if !ok {
 		http.Error(w, "target not found", http.StatusNotFound)
 		return
 	}
-	resp, err := fetchFromSocket(sock, r.URL.Path)
+	resp, err := fetchFromUpstream(u, r.URL.Path)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -323,14 +371,13 @@ func handleDevTools(w http.ResponseWriter, r *http.Request) {
 
 func handleWebSocket(w http.ResponseWriter, r *http.Request, targetID string) {
 	// Look up which upstream socket owns this target
-	sock := getIDSocket(targetID)
-	if sock == "" {
+	u, ok := getIDUpstream(targetID)
+	if !ok {
 		http.Error(w, "target not found", http.StatusNotFound)
 		return
 	}
 
-	// Connect to upstream via unix socket
-	upstreamConn, err := net.Dial("unix", sock)
+	upstreamConn, err := net.Dial(u.network, u.address)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -506,7 +553,7 @@ func handlePassthrough(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no upstreams", http.StatusBadGateway)
 		return
 	}
-	resp, err := fetchFromSocket(upstreams[0].sockPath, r.URL.Path)
+	resp, err := fetchFromUpstream(upstreams[0], r.URL.Path)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -520,8 +567,8 @@ func handlePassthrough(w http.ResponseWriter, r *http.Request) {
 	io.Copy(w, resp.Body)
 }
 
-func fetchFromSocket(sockPath string, path string) (*http.Response, error) {
-	conn, err := net.Dial("unix", sockPath)
+func fetchFromUpstream(u upstream, path string) (*http.Response, error) {
+	conn, err := net.Dial(u.network, u.address)
 	if err != nil {
 		return nil, err
 	}

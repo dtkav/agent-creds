@@ -267,7 +267,10 @@ func renderTokenLine(t TokenInfo) string {
 
 func checkBrowserForward() string {
 	// tcp-bridge creates this socket
-	sock := "/tmp/browser-forward.sock"
+	sock := os.Getenv("BROWSER_SOCKET_PATH")
+	if sock == "" {
+		sock = "/tmp/browser-forward.sock"
+	}
 	if _, err := os.Stat(sock); err != nil {
 		return ""
 	}

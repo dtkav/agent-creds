@@ -7,8 +7,9 @@ if [ -z "$url" ]; then
     exit 1
 fi
 
-# tcp-bridge creates this socket
-sock=/tmp/browser-forward.sock
+# tcp-bridge creates this socket. bwrap publishes its protected bridge from a
+# read-only per-instance directory; container runtimes use the legacy path.
+sock="${BROWSER_SOCKET_PATH:-/tmp/browser-forward.sock}"
 if [ ! -S "$sock" ]; then
     echo "No browser-forward socket found" >&2
     exit 1

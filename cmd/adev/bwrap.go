@@ -17,7 +17,7 @@ package main
 //             └─ unshare --map-current-user --net --keep-caps bwrap-setup.sh
 //                 │   configures tap0 with ONLY a 10.0.2.2/32 host route
 //                 │   (no default route -> no direct internet), installs an
-//                 │   nft output filter (envoy port only), starts the
+//                 │   nft output filter (envoy + explicit forwarders), starts the
 //                 │   dns-responder on :53 inside the netns, then drops all
 //                 │   capabilities and
 //                 └─ exec bwrap (mount sandbox, --unshare-pid, no
@@ -27,14 +27,15 @@ package main
 // The agent sits in bwrap's nested user namespace which does NOT own the
 // network namespace, so even a compromised agent cannot re-add a default
 // route or alter the nft filter: the only reachable destination is the
-// instance's envoy CONNECT listener, published by docker on
-// 127.0.0.1:<per-slug port> and reached from inside as 10.0.2.2:<port>.
-// Egress is envoy or nothing, the same invariant as the containers.
+// instance's envoy CONNECT listener and explicitly enabled, policy-filtered
+// host forwarders. They are published on loopback and reached from inside as
+// 10.0.2.2:<per-instance port>; raw CDP and arbitrary host ports stay blocked.
 
 import (
 	"context"
 	"fmt"
 	"hash/fnv"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -43,7 +44,9 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -54,6 +57,38 @@ func BwrapEnvoyPort(slug string) int {
 	h := fnv.New32a()
 	h.Write([]byte(slug))
 	return 20000 + int(h.Sum32()%9000)
+}
+
+// BwrapCDPProxyPort is the host-loopback port of the filtered CDP proxy.
+// The sandbox may reach this port, but never Chrome's raw debugging port.
+func BwrapCDPProxyPort(slug string) int {
+	h := fnv.New32a()
+	h.Write([]byte("cdp:" + slug))
+	return 29000 + int(h.Sum32()%9000)
+}
+
+func bwrapHostRuntimeDir(slug string) string {
+	root := os.Getenv("XDG_RUNTIME_DIR")
+	if root == "" {
+		// /tmp is replaced by a private tmpfs inside bwrap, so this host path
+		// cannot be reached even when agent-creds itself is the project.
+		root = filepath.Join(os.TempDir(), fmt.Sprintf("agent-creds-%d", os.Getuid()))
+	}
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(slug))
+	return filepath.Join(root, "agent-creds", fmt.Sprintf("bwrap-%016x", h.Sum64()))
+}
+
+func bwrapSlirpAPISocket(slug string) string {
+	return filepath.Join(bwrapHostRuntimeDir(slug), "control", "slirp.sock")
+}
+
+func bwrapHostForwardDir(slug string) string {
+	return filepath.Join(bwrapHostRuntimeDir(slug), "forward")
+}
+
+func bwrapBrowserSocket(slug string) string {
+	return filepath.Join(bwrapHostForwardDir(slug), "browser.sock")
 }
 
 // bwrapSessionName returns the zmx session name for an instance.
@@ -137,6 +172,12 @@ func stopBwrapInstance(scriptDir, slug string) bool {
 	}
 	// slirp4netns usually exits with the netns; kill leftovers by pid file.
 	instanceGenDir := filepath.Join(scriptDir, "generated", "instances", slug)
+	if stopBwrapBrowserForward(instanceGenDir) {
+		found = true
+	}
+	if stopBwrapCDPProxy(instanceGenDir) {
+		found = true
+	}
 	pidFile := filepath.Join(instanceGenDir, "slirp.pid")
 	if data, err := os.ReadFile(pidFile); err == nil {
 		if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid > 1 {
@@ -147,10 +188,189 @@ func stopBwrapInstance(scriptDir, slug string) bool {
 		os.Remove(pidFile)
 		found = true
 	}
+	_ = os.Remove(bwrapSlirpAPISocket(slug))
+	_ = os.Remove(bwrapBrowserSocket(slug))
 	// Release the scope (no-op when systemd was unavailable at launch).
 	runQuiet("systemctl", "--user", "stop", bwrapScopeUnit(slug))
 	runQuiet("systemctl", "--user", "reset-failed", bwrapScopeUnit(slug))
 	return found
+}
+
+func stopBwrapCDPProxy(instanceGenDir string) bool {
+	pidFile := filepath.Join(instanceGenDir, "cdp-proxy.pid")
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		return false
+	}
+	if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid > 1 {
+		if proc, err := os.FindProcess(pid); err == nil {
+			_ = proc.Signal(syscall.SIGTERM)
+		}
+	}
+	_ = os.Remove(pidFile)
+	return true
+}
+
+func stopBwrapBrowserForward(instanceGenDir string) bool {
+	pidFile := filepath.Join(instanceGenDir, "browser-forward.pid")
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		return false
+	}
+	if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid > 1 {
+		if proc, err := os.FindProcess(pid); err == nil {
+			_ = proc.Signal(syscall.SIGTERM)
+		}
+	}
+	_ = os.Remove(pidFile)
+	return true
+}
+
+// runBwrapBrowserForward is the persistent host-side half of browser
+// forwarding. It is an internal adev subcommand so detached bwrap sessions do
+// not depend on the short-lived `adev start` process remaining alive.
+func runBwrapBrowserForward(args []string) {
+	if len(args) != 3 {
+		fmt.Fprintln(os.Stderr, "internal browser forward: expected port, config, and slirp API socket")
+		os.Exit(2)
+	}
+	port, err := strconv.Atoi(args[0])
+	if err != nil || port < 1 || port > 65535 {
+		fmt.Fprintln(os.Stderr, "internal browser forward: invalid port")
+		os.Exit(2)
+	}
+	var cfg ProjectConfig
+	if _, err := toml.DecodeFile(args[1], &cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "internal browser forward: loading config: %v\n", err)
+		os.Exit(1)
+	}
+	callbackForwarder := newSlirpHostForwarder(args[2])
+	state, err := startBrowserForwardTCP("127.0.0.1", port, cfg.BrowserTargets, callbackForwarder.Forward)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "internal browser forward: %v\n", err)
+		os.Exit(1)
+	}
+	defer state.Close()
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	<-sig
+}
+
+func startBwrapBrowserForward(instanceGenDir, slirpAPISocket, slug string, cfg ProjectConfig) (int, error) {
+	if !cfg.Sandbox.UseHostBrowserEnabled() {
+		return 0, nil
+	}
+	stopBwrapBrowserForward(instanceGenDir)
+	port := AllocateTCPBrowserPort(slug)
+	executable, err := os.Executable()
+	if err != nil {
+		return 0, err
+	}
+	if resolved, err := filepath.EvalSymlinks(executable); err == nil {
+		executable = resolved
+	}
+	logFile, err := os.OpenFile(
+		filepath.Join(instanceGenDir, "logs", "browser-forward.log"),
+		os.O_CREATE|os.O_WRONLY|os.O_APPEND,
+		0600,
+	)
+	if err != nil {
+		return 0, err
+	}
+	defer logFile.Close()
+	cmd := exec.Command(
+		executable,
+		"_bwrap-browser-forward",
+		strconv.Itoa(port),
+		filepath.Join(instanceGenDir, "merged-config.toml"),
+		slirpAPISocket,
+	)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		return 0, err
+	}
+	pidFile := filepath.Join(instanceGenDir, "browser-forward.pid")
+	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n", cmd.Process.Pid)), 0600); err != nil {
+		_ = cmd.Process.Kill()
+		return 0, err
+	}
+	ready := false
+	for i := 0; i < 50; i++ {
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 50*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			ready = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !ready {
+		_ = cmd.Process.Kill()
+		_ = os.Remove(pidFile)
+		return 0, fmt.Errorf("browser forward did not start on 127.0.0.1:%d", port)
+	}
+	_ = cmd.Process.Release()
+	return port, nil
+}
+
+func startBwrapCDPProxy(scriptDir, instanceGenDir, slug string, cfg ProjectConfig) (int, error) {
+	if !cfg.Sandbox.UseHostBrowserCDPEnabled() || len(CDPPorts(cfg.CDPTargets)) == 0 {
+		return 0, nil
+	}
+	stopBwrapCDPProxy(instanceGenDir)
+	port := BwrapCDPProxyPort(slug)
+	var pairs []string
+	for _, chromePort := range CDPPorts(cfg.CDPTargets) {
+		pairs = append(pairs, fmt.Sprintf("%d:%d", chromePort, chromePort))
+	}
+	logFile, err := os.OpenFile(
+		filepath.Join(instanceGenDir, "logs", "cdp-proxy.log"),
+		os.O_CREATE|os.O_WRONLY|os.O_APPEND,
+		0600,
+	)
+	if err != nil {
+		return 0, err
+	}
+	defer logFile.Close()
+	cmd := exec.Command(filepath.Join(scriptDir, "generated", "cdp-proxy"))
+	cmd.Env = append(os.Environ(),
+		"CDP_PORT_MAP=",
+		"CDP_TRUST_FILTERED_UPSTREAM=0",
+		"CDP_CONFIG_PATH="+filepath.Join(instanceGenDir, "merged-config.toml"),
+		fmt.Sprintf("CDP_LISTEN_ADDR=127.0.0.1:%d", port),
+		"CDP_TCP_HOST=127.0.0.1",
+		"CDP_TCP_PORT_MAP="+strings.Join(pairs, ","),
+	)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		return 0, err
+	}
+	pidFile := filepath.Join(instanceGenDir, "cdp-proxy.pid")
+	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n", cmd.Process.Pid)), 0600); err != nil {
+		_ = cmd.Process.Kill()
+		return 0, err
+	}
+	ready := false
+	for i := 0; i < 50; i++ {
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 50*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			ready = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !ready {
+		_ = cmd.Process.Kill()
+		_ = os.Remove(pidFile)
+		return 0, fmt.Errorf("filtered CDP proxy did not start on 127.0.0.1:%d", port)
+	}
+	_ = cmd.Process.Release()
+	return port, nil
 }
 
 // bwrapPreflight verifies the host tools the backend depends on.
@@ -321,7 +541,9 @@ func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig, att
 	instanceGenDir := filepath.Join(scriptDir, "generated", "instances", slug)
 	instanceLogsDir := filepath.Join(instanceGenDir, "logs")
 	instanceHomeDir := filepath.Join(instanceGenDir, "home")
-	for _, dir := range []string{instanceLogsDir, instanceHomeDir} {
+	instanceHostControlDir := filepath.Dir(bwrapSlirpAPISocket(slug))
+	instanceHostForwardDir := bwrapHostForwardDir(slug)
+	for _, dir := range []string{instanceLogsDir, instanceHomeDir, instanceHostControlDir, instanceHostForwardDir} {
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating instance directory: %v\n", err)
 			os.Exit(1)
@@ -338,6 +560,8 @@ func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig, att
 	spinner.Start()
 
 	cleanup := func() {
+		stopBwrapBrowserForward(instanceGenDir)
+		stopBwrapCDPProxy(instanceGenDir)
 		run("docker", "rm", "-f", envoyName)
 		run("docker", "network", "rm", networkName)
 	}
@@ -454,6 +678,55 @@ func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig, att
 		cmd.Run()
 	}
 
+	// Browser forwarding reuses the container bridge inside the bwrap netns.
+	// It creates the protected Unix socket and the localhost callback shim.
+	tcpBridgeBin := filepath.Join(scriptDir, "generated", "tcp-bridge")
+	tcpBridgeSrc := filepath.Join(scriptDir, "cmd", "tcp-bridge", "main.go")
+	if !fileExists(tcpBridgeBin) || fileNewer(tcpBridgeSrc, tcpBridgeBin) {
+		spinner.Status("building tcp-bridge...")
+		cmd := exec.Command("go", "build", "-o", "../../generated/tcp-bridge", ".")
+		cmd.Dir = filepath.Join(scriptDir, "cmd", "tcp-bridge")
+		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+		if err := cmd.Run(); err != nil {
+			spinner.Stop()
+			fmt.Fprintf(os.Stderr, "Error building tcp-bridge: %v\n", err)
+			cleanup()
+			os.Exit(1)
+		}
+	}
+
+	// The host proxy applies the target allowlist before traffic crosses into
+	// bwrap. Its filtered listener is the only CDP port admitted by nft.
+	cdpProxyBin := filepath.Join(scriptDir, "generated", "cdp-proxy")
+	cdpProxySrc := filepath.Join(scriptDir, "cmd", "cdp-proxy", "main.go")
+	if !fileExists(cdpProxyBin) || fileNewer(cdpProxySrc, cdpProxyBin) {
+		spinner.Status("building cdp-proxy...")
+		cmd := exec.Command("go", "build", "-o", "../../generated/cdp-proxy", ".")
+		cmd.Dir = filepath.Join(scriptDir, "cmd", "cdp-proxy")
+		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+		if err := cmd.Run(); err != nil {
+			spinner.Stop()
+			fmt.Fprintf(os.Stderr, "Error building cdp-proxy: %v\n", err)
+			cleanup()
+			os.Exit(1)
+		}
+	}
+	cdpProxyPort, err := startBwrapCDPProxy(scriptDir, instanceGenDir, slug, cfg)
+	if err != nil {
+		spinner.Stop()
+		fmt.Fprintf(os.Stderr, "Error starting filtered CDP proxy: %v\n", err)
+		cleanup()
+		os.Exit(1)
+	}
+	slirpAPISocket := bwrapSlirpAPISocket(slug)
+	browserForwardPort, err := startBwrapBrowserForward(instanceGenDir, slirpAPISocket, slug, cfg)
+	if err != nil {
+		spinner.Stop()
+		fmt.Fprintf(os.Stderr, "Error starting browser forward: %v\n", err)
+		cleanup()
+		os.Exit(1)
+	}
+
 	// Per-instance envoy container with the CONNECT listener published on
 	// host loopback. Inside the sandbox this is 10.0.2.2:<port> — the ONLY
 	// reachable destination.
@@ -466,6 +739,7 @@ func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig, att
 	if err := run("docker", "network", "create", "--ipv6", networkName); err != nil {
 		spinner.Stop()
 		fmt.Fprintf(os.Stderr, "Error creating network %s: %v\n", networkName, err)
+		cleanup()
 		os.Exit(1)
 	}
 	envoyArgs := []string{"run", "-d",
@@ -557,7 +831,7 @@ func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig, att
 
 	bwrapArgs, err := buildBwrapArgs(
 		workDir, scriptDir, slug, cfg, sandboxEnv, nixMounts,
-		agentBinds, agentPathDirs,
+		browserForwardPort, instanceHostForwardDir, agentBinds, agentPathDirs,
 	)
 	if err != nil {
 		spinner.Stop()
@@ -567,14 +841,14 @@ func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig, att
 	}
 
 	setupScript := filepath.Join(instanceGenDir, "bwrap-setup.sh")
-	if err := writeBwrapSetupScript(setupScript, scriptDir, instanceGenDir, envoyPort, bwrapArgs, agentArgv); err != nil {
+	if err := writeBwrapSetupScript(setupScript, scriptDir, instanceGenDir, envoyPort, cdpProxyPort, browserForwardPort, bwrapBrowserSocket(slug), bwrapArgs, agentArgv); err != nil {
 		spinner.Stop()
 		fmt.Fprintf(os.Stderr, "Error writing setup script: %v\n", err)
 		cleanup()
 		os.Exit(1)
 	}
 	launchScript := filepath.Join(instanceGenDir, "bwrap-launch.sh")
-	if err := writeBwrapLaunchScript(launchScript, instanceGenDir, setupScript); err != nil {
+	if err := writeBwrapLaunchScript(launchScript, instanceGenDir, setupScript, slirpAPISocket); err != nil {
 		spinner.Stop()
 		fmt.Fprintf(os.Stderr, "Error writing launch script: %v\n", err)
 		cleanup()
@@ -705,6 +979,8 @@ func buildBwrapArgs(
 	cfg ProjectConfig,
 	sandboxEnv string,
 	nixMounts []NixStoreMount,
+	browserForwardPort int,
+	browserForwardDir string,
 	agentBinds, agentPathDirs []string,
 ) ([]string, error) {
 	if sandboxEnv == "" {
@@ -785,6 +1061,15 @@ func buildBwrapArgs(
 	args = append(args, bwrapDirMountArgs(workDir, workDir, false)...)
 	args = append(args, "--ro-bind", instanceGenDir, "/run/adev-instance")
 	args = append(args, bwrapResolvMountArgs(filepath.Join(instanceGenDir, "bwrap-resolv.conf"))...)
+	if browserForwardPort > 0 {
+		// The bridge owns this directory outside bwrap. Exposing it read-only
+		// lets the agent connect to the socket without replacing it.
+		args = append(args, "--ro-bind", browserForwardDir, "/run/adev-forward")
+		args = append(args, bwrapFileMountArgs(
+			filepath.Join(scriptDir, "claude-dev", "open-browser"),
+			"/run/adev-tools/open-browser",
+		)...)
+	}
 
 	// Host binds for the agent installation (resolved from host PATH).
 	args = append(args, agentBinds...)
@@ -842,6 +1127,12 @@ func buildBwrapArgs(
 			[2]string{"CLAUDE_CODE_FORCE_SESSION_PERSISTENCE", "1"},
 		)
 	}
+	if browserForwardPort > 0 {
+		env = append(env,
+			[2]string{"BROWSER", "/run/adev-tools/open-browser"},
+			[2]string{"BROWSER_SOCKET_PATH", "/run/adev-forward/browser.sock"},
+		)
+	}
 	// Plugin/project env vars.
 	var projectEnvNames []string
 	for _, e := range cfg.Env {
@@ -872,8 +1163,8 @@ func envOr(key, fallback string) string {
 // writeBwrapSetupScript writes the script that runs inside the instance
 // user+net namespace (host mount ns, ambient caps from unshare --keep-caps):
 // configure the slirp tap with a host-only route, install the nft output
-// filter, start the dns-responder, then drop ALL capabilities and exec bwrap.
-func writeBwrapSetupScript(path, scriptDir, instanceGenDir string, envoyPort int, bwrapArgs, agentArgv []string) error {
+// filter, start the dns-responder, then drop ALL capabilities and run bwrap.
+func writeBwrapSetupScript(path, scriptDir, instanceGenDir string, envoyPort, cdpProxyPort, browserForwardPort int, browserForwardSocket string, bwrapArgs, agentArgv []string) error {
 	var b strings.Builder
 	b.WriteString("#!/bin/bash\n")
 	b.WriteString("# Auto-generated by adev (bwrap runtime) — do not edit\n")
@@ -881,6 +1172,9 @@ func writeBwrapSetupScript(path, scriptDir, instanceGenDir string, envoyPort int
 	b.WriteString("set -u\n")
 	fmt.Fprintf(&b, "GEN=%s\n", shq(instanceGenDir))
 	fmt.Fprintf(&b, "PORT=%d\n", envoyPort)
+	fmt.Fprintf(&b, "CDP_PROXY_PORT=%d\n", cdpProxyPort)
+	fmt.Fprintf(&b, "BROWSER_FORWARD_PORT=%d\n", browserForwardPort)
+	fmt.Fprintf(&b, "BROWSER_FORWARD_SOCKET=%s\n", shq(browserForwardSocket))
 	b.WriteString(`
 # Wait for slirp4netns to attach the tap device.
 for i in $(seq 1 300); do ip link show tap0 >/dev/null 2>&1 && break; sleep 0.1; done
@@ -892,12 +1186,13 @@ ip link set tap0 up 2>/dev/null
 # Host-only route: 10.0.2.2 (the slirp gateway = host loopback) is the ONLY
 # destination with a route. No default route -> no direct internet.
 ip addr add 10.0.2.100 peer 10.0.2.2/32 dev tap0 2>/dev/null
-# Port-level filter: envoy's published CONNECT port only (plus loopback).
+# Port-level filter: envoy plus explicitly configured forwarders (and loopback).
 if ! nft -f - >/dev/null 2>&1 <<NFT
 table inet adev {
   chain output {
     type filter hook output priority 0; policy drop;
     oif "lo" accept
+    ct state established,related accept
     ip daddr 10.0.2.2 tcp dport $PORT accept
   }
 }
@@ -905,12 +1200,65 @@ NFT
 then
     echo "adev: nft unavailable; relying on route confinement only" >&2
 fi
+if [ "$CDP_PROXY_PORT" -gt 0 ]; then
+    nft add rule inet adev output ip daddr 10.0.2.2 tcp dport "$CDP_PROXY_PORT" accept 2>/dev/null || true
+fi
+if [ "$BROWSER_FORWARD_PORT" -gt 0 ]; then
+    nft add rule inet adev output ip daddr 10.0.2.2 tcp dport "$BROWSER_FORWARD_PORT" accept 2>/dev/null || true
+fi
 # dns-responder inside the netns: allowlist-enforcing, answers 10.0.2.2.
 setpriv --ambient-caps=-all,+net_bind_service --inh-caps=-all,+net_bind_service -- \
 `)
 	fmt.Fprintf(&b, "    %s -ip 10.0.2.2 -domains \"$GEN/domains.json\" -log \"$GEN/logs/dns.log\" >/dev/null 2>&1 &\n",
 		shq(filepath.Join(scriptDir, "generated", "dns-responder")))
 	b.WriteString(`
+# Publish protected loopback interfaces inside the shared netns. CDP gets a
+# second presenter that trusts the host filter; raw Chrome is not routable.
+INNER_CDP_PID=""
+BROWSER_BRIDGE_PID=""
+cleanup() {
+    if [ -n "$BROWSER_BRIDGE_PID" ]; then
+        kill "$BROWSER_BRIDGE_PID" 2>/dev/null || true
+        wait "$BROWSER_BRIDGE_PID" 2>/dev/null || true
+    fi
+    if [ -n "$INNER_CDP_PID" ]; then
+        kill "$INNER_CDP_PID" 2>/dev/null || true
+        wait "$INNER_CDP_PID" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT INT TERM
+if [ "$BROWSER_FORWARD_PORT" -gt 0 ]; then
+    rm -f "$BROWSER_FORWARD_SOCKET"
+    setpriv --ambient-caps=-all --inh-caps=-all --bounding-set=-all -- \
+        env TCP_BROWSER_PORT="$BROWSER_FORWARD_PORT" \
+            TCP_BRIDGE_HOST=10.0.2.2 \
+            CALLBACK_LISTEN_HOST=10.0.2.100 \
+            BROWSER_SOCKET_PATH="$BROWSER_FORWARD_SOCKET" \
+            TCP_BRIDGE_LOG="$GEN/logs/tcp-bridge.log" \
+`)
+	fmt.Fprintf(&b, "            %s >/dev/null 2>&1 &\n",
+		shq(filepath.Join(scriptDir, "generated", "tcp-bridge")))
+	b.WriteString(`    BROWSER_BRIDGE_PID=$!
+    for i in $(seq 1 100); do [ -S "$BROWSER_FORWARD_SOCKET" ] && break; sleep 0.05; done
+    if [ ! -S "$BROWSER_FORWARD_SOCKET" ]; then
+        echo "adev: browser bridge did not create its socket" >&2
+        exit 1
+    fi
+fi
+if [ "$CDP_PROXY_PORT" -gt 0 ]; then
+    setpriv --ambient-caps=-all --inh-caps=-all --bounding-set=-all -- \
+        env CDP_CONFIG_PATH="$GEN/merged-config.toml" \
+            CDP_PORT_MAP= \
+            CDP_LISTEN_ADDR=127.0.0.1:9222 \
+            CDP_TCP_HOST=10.0.2.2 \
+            CDP_TCP_PORT_MAP="9222:$CDP_PROXY_PORT" \
+            CDP_TRUST_FILTERED_UPSTREAM=1 \
+`)
+	fmt.Fprintf(&b, "            %s >>\"$GEN/logs/cdp-inner.log\" 2>&1 &\n",
+		shq(filepath.Join(scriptDir, "generated", "cdp-proxy")))
+	b.WriteString(`    INNER_CDP_PID=$!
+fi
+
 # Credential tokens + static env, re-read every session start.
 ENVARGS=()
 if [ -f "$GEN/sandbox.env" ]; then
@@ -923,7 +1271,7 @@ fi
 # Drop ALL capabilities before entering the mount sandbox: the agent (in
 # bwrap's nested userns) ends up with no privileges over this netns, so the
 # route + filter confinement above cannot be undone from inside.
-exec setpriv --ambient-caps=-all --inh-caps=-all --bounding-set=-all -- \
+setpriv --ambient-caps=-all --inh-caps=-all --bounding-set=-all -- \
     bwrap \
 `)
 	for _, a := range bwrapArgs {
@@ -939,22 +1287,25 @@ exec setpriv --ambient-caps=-all --inh-caps=-all --bounding-set=-all -- \
 		}
 		fmt.Fprintf(&b, "    %s%s", shq(a), sep)
 	}
+	b.WriteString("STATUS=$?\ncleanup\ntrap - EXIT INT TERM\nexit $STATUS\n")
 	return os.WriteFile(path, []byte(b.String()), 0700)
 }
 
 // writeBwrapLaunchScript writes the zmx session command: it forks the
 // slirp4netns attacher (which waits for this pid to enter its new netns),
 // then execs into the unshare'd setup script, keeping the session PTY.
-func writeBwrapLaunchScript(path, instanceGenDir, setupScript string) error {
+func writeBwrapLaunchScript(path, instanceGenDir, setupScript, slirpAPISocket string) error {
 	var b strings.Builder
 	b.WriteString("#!/bin/bash\n")
 	b.WriteString("# Auto-generated by adev (bwrap runtime) — do not edit\n")
 	b.WriteString("set -u\n")
 	fmt.Fprintf(&b, "GEN=%s\n", shq(instanceGenDir))
 	fmt.Fprintf(&b, "SETUP=%s\n", shq(setupScript))
+	fmt.Fprintf(&b, "SLIRP_API=%s\n", shq(slirpAPISocket))
 	b.WriteString(`P=$$
 HOST_NET=$(readlink /proc/self/ns/net)
 mkdir -p "$GEN/logs"
+rm -f "$SLIRP_API"
 (
     # Wait until the launcher (same pid after exec) is in its new netns,
     # then attach slirp4netns via the owning userns.
@@ -962,7 +1313,7 @@ mkdir -p "$GEN/logs"
         [ "$(readlink /proc/$P/ns/net 2>/dev/null || echo "$HOST_NET")" != "$HOST_NET" ] && break
         sleep 0.1
     done
-    exec slirp4netns --mtu=65520 --userns-path=/proc/$P/ns/user --netns-type=path /proc/$P/ns/net tap0
+    exec slirp4netns --mtu=65520 --api-socket="$SLIRP_API" --userns-path=/proc/$P/ns/user --netns-type=path /proc/$P/ns/net tap0
 ) >> "$GEN/logs/slirp.log" 2>&1 &
 echo $! > "$GEN/slirp.pid"
 exec unshare --map-current-user --net --keep-caps /bin/bash "$SETUP"

@@ -76,26 +76,37 @@ EOF
 }
 
 build_env() {
-    # Ensure host Nix store directory exists
-    mkdir -p "$NIX_DIR/store" "$NIX_DIR/var/nix/profiles"
+    local env_key="${1:-0000000000000000}"
+    case "$env_key" in
+        *[!0-9a-f]*|'')
+            echo "invalid sandbox env cache key: $env_key" >&2
+            exit 2
+            ;;
+    esac
+    if [ "${#env_key}" -ne 16 ]; then
+        echo "invalid sandbox env cache key length: $env_key" >&2
+        exit 2
+    fi
+
+    # Each environment is a real, self-contained chroot Nix store. Mounting
+    # that store as /nix/store keeps absolute store symlinks valid without
+    # exposing the host's global store or copying paths out of a build store.
+    local private_root="$NIX_DIR/envs/$env_key"
+    mkdir -p "$private_root/nix/store" "$private_root/nix/var/nix" \
+        "$NIX_DIR/var/nix/stores"
 
     echo "Building sandbox env into host Nix store..." >&2
 
-    # We can't mount the host dir directly as /nix during the build because
-    # the nixos/nix image needs its own /nix/store to run. Instead:
-    # 1. Use the nix-store Docker volume for the build (has nix toolchain cached)
-    # 2. Export the env closure and unpack it into the host store
+    # The image keeps its own /nix store so the Nix CLI can run. --store points
+    # the build at the separately mounted chroot store owned by this env key.
     docker volume create nix-store 2>/dev/null || true
 
-    # Build sandbox-env and copy its closure to the host store.
-    # Uses the nix-store Docker volume for the build (has nix toolchain),
-    # then copies all required store paths to the host-mounted directory.
     local env_path
     env_path=$(docker run --rm \
       -v nix-store:/nix \
-      -v "$NIX_DIR/store":/host-store \
-      -v "$NIX_DIR/var":/host-var \
+      -v "$NIX_DIR":/agent-creds-nix \
       -v "$PROJECT_DIR":/src:ro \
+      -e "AGENT_CREDS_ENV_KEY=$env_key" \
       "$NIX_IMAGE" \
       sh -c '
         set -eu
@@ -114,51 +125,28 @@ build_env() {
         # Force-add generated/packages.nix even though generated/ is gitignored
         git add -f generated/packages.nix 2>/dev/null || true
 
-        # Build sandbox-env
-        env_path=$(nix build .#sandbox-env --no-link --print-out-paths)
+        private_root="/agent-creds-nix/envs/$AGENT_CREDS_ENV_KEY"
+        env_path=$(nix build --store "$private_root" \
+          .#sandbox-env --no-link --print-out-paths)
 
-        # Copy the full closure to the host store directory.
-        # nix-store -qR lists all store paths in the closure.
-        for p in $(nix-store -qR "$env_path"); do
-            base=$(basename "$p")
-            dest="/host-store/$base"
-            # A top-level symlink is never a usable bind source for the
-            # private store, even when its target happens to exist in the
-            # Docker build store right now.
-            if [ -L "$dest" ]; then
-                rm -f "$dest"
-            fi
-            if [ ! -e "$dest" ]; then
-                # Store outputs may themselves be absolute symlinks into
-                # /nix/store. Preserve symlinks inside the output, but
-                # materialize the top-level output: the private host store is
-                # mounted path-by-path and cannot use a source whose canonical
-                # target exists only in the Docker build volume.
-                source="$p"
-                if [ -L "$source" ]; then
-                    source=$(readlink -f "$source")
-                fi
-                cp -a "$source" "$dest"
-            fi
-            test -e "$dest" && test ! -L "$dest" || {
-                echo "failed to export Nix closure path: $p" >&2
-                exit 1
-            }
-        done
+        # Querying the same store proves the output and its references were
+        # registered there. Lstat semantics matter: sandbox-env may itself be
+        # an absolute symlink that resolves only after the store is mounted at
+        # its logical /nix/store location.
+        nix path-info --store "$private_root" --recursive "$env_path" >/dev/null
+        physical="$private_root$env_path"
+        test -e "$physical" || test -L "$physical" || {
+            echo "sandbox env was not built into private store: $env_path" >&2
+            exit 1
+        }
 
-        # Persist the exact closure for runtimes such as bwrap that mount
-        # individual store paths instead of exposing the whole Nix store.
-        closure_dir=/host-var/nix/closures
-        closure_file="$closure_dir/$(basename "$env_path").paths"
-        closure_tmp="$closure_file.tmp.$$"
-        mkdir -p "$closure_dir"
-        nix-store -qR "$env_path" | sort -u > "$closure_tmp"
-        chmod 0644 "$closure_tmp"
-        mv "$closure_tmp" "$closure_file"
-
-        # Create a profile symlink
-        mkdir -p /host-var/nix/profiles
-        ln -sfn "$env_path" /host-var/nix/profiles/sandbox-env
+        store_dir=/agent-creds-nix/var/nix/stores
+        store_file="$store_dir/$(basename "$env_path").store"
+        store_tmp="$store_file.tmp.$$"
+        mkdir -p "$store_dir"
+        printf "%s\n" "$AGENT_CREDS_ENV_KEY" > "$store_tmp"
+        chmod 0644 "$store_tmp"
+        mv "$store_tmp" "$store_file"
 
         echo "$env_path"
       ')
@@ -176,14 +164,14 @@ case "${1:-all}" in
         build_base "${2:-sandbox-base}"
         ;;
     env)
-        build_env
+        build_env "${2:-0000000000000000}"
         ;;
     all)
         build_base "${2:-sandbox-base}"
-        build_env
+        build_env "${3:-0000000000000000}"
         ;;
     *)
-        echo "Usage: $0 {base|env|all} [image-name]" >&2
+        echo "Usage: $0 base [image-name] | env [cache-key] | all [image-name] [cache-key]" >&2
         exit 1
         ;;
 esac

@@ -36,14 +36,55 @@ func sandboxEnvClosureFile(envPath string) string {
 	)
 }
 
+func sandboxEnvStoreFile(envPath string) string {
+	return filepath.Join(
+		nixDir(), "var", "nix", "stores", filepath.Base(envPath)+".store",
+	)
+}
+
+// sandboxEnvPrivateStore resolves the physical store built for one logical
+// sandbox environment. The manifest contains only the validated env cache key,
+// never an arbitrary host path.
+func sandboxEnvPrivateStore(envPath string) (string, error) {
+	data, err := os.ReadFile(sandboxEnvStoreFile(envPath))
+	if err != nil {
+		return "", fmt.Errorf("reading sandbox env store: %w", err)
+	}
+	key := strings.TrimSpace(string(data))
+	if len(key) != 16 || filepath.Base(key) != key {
+		return "", fmt.Errorf("invalid sandbox env store key %q", key)
+	}
+	for _, char := range key {
+		if !strings.ContainsRune("0123456789abcdef", char) {
+			return "", fmt.Errorf("invalid sandbox env store key %q", key)
+		}
+	}
+	store := filepath.Join(nixDir(), "envs", key, "nix", "store")
+	if info, err := os.Stat(store); err != nil || !info.IsDir() {
+		return "", fmt.Errorf("sandbox env store is unavailable: %s", store)
+	}
+	physicalEnv := filepath.Join(store, filepath.Base(envPath))
+	if _, err := os.Lstat(physicalEnv); err != nil {
+		return "", fmt.Errorf("sandbox env is unavailable: %s", envPath)
+	}
+	return store, nil
+}
+
 func sandboxEnvHostPath(envPath string) string {
 	if fileExists(envPath) {
 		return envPath
+	}
+	if store, err := sandboxEnvPrivateStore(envPath); err == nil {
+		return filepath.Join(store, filepath.Base(envPath))
 	}
 	return filepath.Join(nixDir(), "store", filepath.Base(envPath))
 }
 
 func sandboxEnvAvailable(envPath string) bool {
+	if fileExists(sandboxEnvStoreFile(envPath)) {
+		_, err := sandboxEnvPrivateStore(envPath)
+		return err == nil
+	}
 	if !fileExists(sandboxEnvHostPath(envPath)) ||
 		!fileExists(sandboxEnvClosureFile(envPath)) {
 		return false
@@ -60,6 +101,14 @@ func sandboxEnvAvailable(envPath string) bool {
 // mounts. Targets remain canonical so store references embedded in binaries
 // and scripts continue to resolve inside bwrap.
 func sandboxEnvClosureMounts(envPath string) ([]NixStoreMount, error) {
+	if fileExists(sandboxEnvStoreFile(envPath)) {
+		store, err := sandboxEnvPrivateStore(envPath)
+		if err != nil {
+			return nil, err
+		}
+		return []NixStoreMount{{Source: store, Target: "/nix/store"}}, nil
+	}
+
 	data, err := os.ReadFile(sandboxEnvClosureFile(envPath))
 	if err != nil {
 		return nil, fmt.Errorf("reading sandbox env closure: %w", err)
@@ -286,7 +335,7 @@ func ensureSandboxEnv(cfg ProjectConfig, scriptDir string, spinner *Spinner) (st
 	spinner.Status("building sandbox env (this may take a while on first run)...")
 
 	buildScript := filepath.Join(scriptDir, "scripts", "build-nix.sh")
-	cmd := exec.Command(buildScript, "env")
+	cmd := exec.Command(buildScript, "env", envHash(cfg, scriptDir))
 	cmd.Dir = scriptDir
 	cmd.Stderr = nil
 
@@ -302,11 +351,11 @@ func ensureSandboxEnv(cfg ProjectConfig, scriptDir string, spinner *Spinner) (st
 	if !strings.HasPrefix(envPath, "/nix/store/") {
 		return "", fmt.Errorf("unexpected env path: %s", envPath)
 	}
-	if !fileExists(sandboxEnvHostPath(envPath)) {
-		return "", fmt.Errorf("sandbox env was not exported: %s", envPath)
+	if !sandboxEnvAvailable(envPath) {
+		return "", fmt.Errorf("sandbox env was not built into its private store: %s", envPath)
 	}
 	if _, err := sandboxEnvClosureMounts(envPath); err != nil {
-		return "", fmt.Errorf("sandbox env closure was not exported: %w", err)
+		return "", fmt.Errorf("sandbox env store was not exported: %w", err)
 	}
 
 	if err := saveEnvHash(cfg, scriptDir, envPath); err != nil {

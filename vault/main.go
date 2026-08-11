@@ -541,7 +541,6 @@ func main() {
 	} else if err != nil {
 		log.Fatalf("Failed to load vault config %s: %v", vaultPath, err)
 	}
-
 	// Load macaroon keys: from config, or fall back to env vars
 	var keyStore *macaroon.KeyStore
 	if vaultCfg.SigningKey != "" {

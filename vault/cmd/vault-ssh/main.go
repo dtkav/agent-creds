@@ -907,7 +907,6 @@ func main() {
 	if err != nil {
 		log.Printf("Warning: Could not load vault config from %s: %v", vaultConfigPath, err)
 	}
-
 	// Load keystore from vault config when present; otherwise fall back to env vars.
 	if vaultConfig != nil && vaultConfig.SigningKey != "" {
 		keyStore, err = tfmac.LoadKeyStoreFromConfig(vaultConfig.SigningKey, vaultConfig.EncryptionKey)

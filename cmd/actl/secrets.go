@@ -27,7 +27,6 @@ func runSecrets(args []string) {
 		secretsUsage()
 		os.Exit(1)
 	}
-
 	switch args[0] {
 	case "init":
 		secretsInit()

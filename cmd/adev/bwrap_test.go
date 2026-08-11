@@ -149,7 +149,10 @@ func TestBwrapGeneratedScriptsParse(t *testing.T) {
 	if err := writeBwrapSetupScript(setup, "/opt/agent-creds", dir, 21281, 31281, 50281, "/host-only/browser.sock", args, argv); err != nil {
 		t.Fatalf("writeBwrapSetupScript: %v", err)
 	}
-	if err := writeBwrapLaunchScript(launch, dir, setup, "/host-only/slirp-api.sock"); err != nil {
+	if err := writeBwrapLaunchScript(
+		launch, "/opt/agent-creds/bin/adev", "/workspace", dir, setup,
+		"/host-only/slirp-api.sock", true,
+	); err != nil {
 		t.Fatalf("writeBwrapLaunchScript: %v", err)
 	}
 	for _, script := range []string{setup, launch} {
@@ -178,6 +181,10 @@ func TestBwrapGeneratedScriptsParse(t *testing.T) {
 		"CALLBACK_LISTEN_HOST=10.0.2.100",
 		"BROWSER_SOCKET_PATH=\"$BROWSER_FORWARD_SOCKET\"",
 		"SLIRP_API='/host-only/slirp-api.sock'",
+		"ADEV='/opt/agent-creds/bin/adev'",
+		"WORK='/workspace'",
+		`setpriv --pdeathsig TERM "$ADEV" _credential-refresh`,
+		`credential-refresh.log`,
 		"--api-socket=\"$SLIRP_API\"",
 		"setpriv --ambient-caps=-all",
 		`export GIT_EXEC_PATH="$(git --exec-path)"`,

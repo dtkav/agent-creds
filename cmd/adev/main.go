@@ -199,6 +199,8 @@ func main() {
 		runSetup(args)
 	case "_bwrap-browser-forward":
 		runBwrapBrowserForward(args)
+	case "_credential-refresh":
+		runCredentialRefresh(args)
 	case "help", "-h", "--help":
 		printUsage()
 	default:

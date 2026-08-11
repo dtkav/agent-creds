@@ -10,12 +10,14 @@ nix = '''
 [
   (pkgs.writeShellScriptBin "git-credential-agent-creds-github"
     (builtins.readFile ../plugins/git-credential-agent-creds-github.sh))
+  (pkgs.writeShellScriptBin "gh"
+    (builtins.replaceStrings [ "@gh@" ] [ "${pkgs.gh}/bin/gh" ]
+      (builtins.readFile ../plugins/gh-agent-creds.sh)))
 ]
 '''
 
 [packages]
 git = true
-gh = true
 
 [upstream."github.com"]
 [upstream."api.github.com"]

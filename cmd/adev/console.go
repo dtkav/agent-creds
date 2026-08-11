@@ -857,7 +857,9 @@ func mintTokens(cfg ProjectConfig, instanceGenDir string, spinner *Spinner) ([]T
 		}
 
 		// Step 1: Get credential metadata
-		spinner.Status(fmt.Sprintf("minting tokens... %s", host))
+		if spinner != nil {
+			spinner.Status(fmt.Sprintf("minting tokens... %s", host))
+		}
 		info, err := vaultSSHInfo(cfg.Vault, upstream.Credential)
 		if err != nil {
 			return nil, nil, fmt.Errorf("reading credential metadata for %s: %w", host, err)
@@ -998,6 +1000,78 @@ func startDischargeRefresh(ctx context.Context, cfg ProjectConfig, scriptDir, in
 			}
 		}
 	}()
+}
+
+// refreshSandboxCredentialEnv re-discharges every configured authorization
+// and atomically replaces the environment file mounted into a sandbox. Long-
+// lived bwrap sessions invoke this from a host-side companion process, because
+// a process environment cannot be changed after the sandbox starts.
+func refreshSandboxCredentialEnv(workDir, scriptDir, instanceGenDir string) error {
+	cfg, err := LoadProjectConfigWithPlugins(workDir, scriptDir)
+	if err != nil {
+		return fmt.Errorf("loading sandbox config: %w", err)
+	}
+	tokens, infos, err := mintTokens(cfg, instanceGenDir, nil)
+	if err != nil {
+		return err
+	}
+	var vaultConfigYAML []byte
+	if staticEnvNeedsSecrets(cfg.StaticEnv) {
+		vaultConfigYAML, err = decryptVaultConfigYAML()
+		if err != nil {
+			return fmt.Errorf("decrypting static environment: %w", err)
+		}
+	}
+	staticResolved, err := resolveStaticEnvForConsole(
+		cfg.StaticEnv, vaultConfigYAML, scriptDir)
+	if err != nil {
+		return fmt.Errorf("resolving static environment: %w", err)
+	}
+	return generateSandboxEnv(
+		instanceGenDir, shapeTokens(tokens, infos), staticResolved)
+}
+
+// runCredentialRefresh is an internal host-side companion for bwrap. The
+// launcher gives it a parent-death signal, so it cannot outlive the sandbox
+// session whose mounted credential environment it renews.
+func runCredentialRefresh(args []string) {
+	if len(args) != 2 {
+		fmt.Fprintln(os.Stderr,
+			"Usage: adev _credential-refresh <work-dir> <instance-dir>")
+		os.Exit(2)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "credential refresh: resolving adev: %v\n", err)
+		os.Exit(1)
+	}
+	exe, err = filepath.EvalSymlinks(exe)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "credential refresh: resolving adev: %v\n", err)
+		os.Exit(1)
+	}
+	scriptDir := filepath.Dir(filepath.Dir(exe))
+	workDir := args[0]
+	instanceGenDir := args[1]
+
+	ctx, stop := signal.NotifyContext(
+		context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	ticker := time.NewTicker(45 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := refreshSandboxCredentialEnv(
+				workDir, scriptDir, instanceGenDir); err != nil {
+				fmt.Fprintf(os.Stderr,
+					"credential refresh failed: %v (current discharge remains usable until its expiry)\n",
+					err)
+			}
+		}
+	}
 }
 
 // sortDomains sorts domains so subdomains are grouped under their parent.

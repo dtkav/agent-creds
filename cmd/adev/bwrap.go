@@ -1043,13 +1043,18 @@ func buildBwrapArgs(
 	if _, err := os.Stat(claudeJSON); os.IsNotExist(err) {
 		os.WriteFile(claudeJSON, []byte("{}"), 0600)
 	}
+	instanceClaudeJSON, err := prepareClaudeProjectState(
+		scriptDir, instanceGenDir, workDir, cfg)
+	if err != nil {
+		return nil, err
+	}
 	codexConfigDir := filepath.Join(scriptDir, "claude-dev", "codex-config")
 	os.MkdirAll(codexConfigDir, 0755)
 	piConfigDir := filepath.Join(scriptDir, "claude-dev", "pi-config")
 	os.MkdirAll(piConfigDir, 0755)
 	args = append(args,
 		"--bind", claudeConfigDir, filepath.Join(homeDir, ".claude"),
-		"--bind", claudeJSON, filepath.Join(homeDir, ".claude.json"),
+		"--bind", instanceClaudeJSON, filepath.Join(homeDir, ".claude.json"),
 		"--bind", codexConfigDir, filepath.Join(homeDir, ".codex"),
 		"--bind", piConfigDir, filepath.Join(homeDir, ".pi"),
 	)

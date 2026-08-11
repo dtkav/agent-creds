@@ -163,6 +163,7 @@ func MergePlugins(cfg *ProjectConfig, discovered map[string]string, enabled []st
 				Source:   expandMountPath(mount.Source, projectDir),
 				Target:   mount.Target,
 				Readonly: mount.Readonly,
+				Trusted:  mount.Trusted,
 			}
 			cfg.Mounts = append(cfg.Mounts, expandedMount)
 		}
@@ -213,6 +214,7 @@ func MergeAgent(cfg *ProjectConfig, agent AgentConfig, projectDir string) {
 			Source:   expandMountPath(mount.Source, projectDir),
 			Target:   mount.Target,
 			Readonly: mount.Readonly,
+			Trusted:  mount.Trusted,
 		}
 		cfg.Mounts = append(cfg.Mounts, expandedMount)
 	}

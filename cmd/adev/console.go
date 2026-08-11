@@ -328,6 +328,13 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	if _, err := os.Stat(claudeJSON); os.IsNotExist(err) {
 		os.WriteFile(claudeJSON, []byte("{}"), 0600)
 	}
+	instanceClaudeJSON, err := prepareClaudeProjectState(
+		scriptDir, instanceGenDir, "/workspace", cfg)
+	if err != nil {
+		spinner.Stop()
+		fmt.Fprintf(os.Stderr, "Error preparing Claude project state: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Create codex config dir (persisted across sandbox restarts)
 	codexConfigDir := filepath.Join(scriptDir, "claude-dev/codex-config")
@@ -597,7 +604,7 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		"-e", "CLAUDE_CONFIG_DIR=/home/devuser/.claude",
 		"-v", workDir+":/workspace",
 		"-v", claudeConfigDir+":/home/devuser/.claude",
-		"-v", claudeConfigDir+"/.claude.json:/home/devuser/.claude.json",
+		"-v", instanceClaudeJSON+":/home/devuser/.claude.json",
 		"-v", codexConfigDir+":/home/devuser/.codex",
 		"-v", piConfigDir+":/home/devuser/.pi",
 		// Mount agent-creds CA so proxy TLS is trusted system-wide

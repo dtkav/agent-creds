@@ -163,6 +163,7 @@ type MountConfig struct {
 	Source   string `toml:"source"`   // host path (~ expanded, ./ relative to project)
 	Target   string `toml:"target"`   // container path
 	Readonly bool   `toml:"readonly"` // default: false
+	Trusted  bool   `toml:"trusted"`  // agent may trust code/config loaded from this directory
 }
 
 // EnvConfig defines an environment variable to set in the container.

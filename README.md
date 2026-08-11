@@ -484,7 +484,10 @@ A deployment adapter can define both a service's incoming client framing and
 its outgoing credential injection. Those protocol details stay in the plugin;
 the Go verifier understands only agent-creds capabilities.
 
-Standalone, syntax-checked examples live in [`examples/`](examples/README.md).
+See the [Vault JavaScript API reference](docs/reference/vault-js-api.md) for
+registration fields, callback contracts, runtime globals, ordering, caching,
+and execution limits. Standalone, syntax-checked examples live in
+[`examples/`](examples/README.md).
 
 ### Example: exchange a long-lived secret for a session
 

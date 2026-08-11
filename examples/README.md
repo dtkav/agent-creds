@@ -8,8 +8,9 @@ to add or edit the scripts loaded by Vault.
 This directory contains two deployment-neutral examples:
 
 - [`providers/command-session.provider.js`](providers/command-session.provider.js)
-  invokes a separately installed credential helper with a minimal child
-  environment and caches the returned session until expiry.
+  demonstrates the complete credential extension surface: schema and semantic
+  validation, custom capability extraction, request matching, a minimal child
+  process environment, an HTTP session exchange, and credential-scoped caching.
 - [`policies/subject-scope.policy.js`](policies/subject-scope.policy.js)
   requires a verified subject and evaluates every application constraint.
 
@@ -33,19 +34,24 @@ Configure the command-backed provider in `vault.yaml`:
 ```yaml
 secrets:
   service:
-    ACCESS_TOKEN: replace-with-the-helper-token
+    CLIENT_SECRET: replace-with-the-client-secret
 
 credentials:
   service/prod:
     type: command_session
     command: /usr/local/bin/session-helper
+    token_url: https://auth.service.example/session
+    client_id: deployment-client
     audience: api.service.example
-    access_token:
-      $secret: service#ACCESS_TOKEN
+    allowed_audiences: [api.service.example]
+    client_secret:
+      $secret: service#CLIENT_SECRET
     env: SERVICE_API_TOKEN
 ```
 
-The helper is expected to print one JSON object to standard output:
+The helper receives `SERVICE_CLIENT_SECRET` in an otherwise minimal child
+environment and prints an assertion to standard output. Vault exchanges that
+assertion at `token_url`. The endpoint response is one JSON object:
 
 ```json
 {"access_token":"eyJ...","expires_at":1893456000}
@@ -53,6 +59,16 @@ The helper is expected to print one JSON object to standard output:
 
 `expires_at` is a Unix timestamp. It may be omitted when `access_token` is a
 JWT with an `exp` claim.
+
+The extractor also accepts custom client framing in which the agent-creds
+capability is standard-base64 encoded:
+
+```text
+X-Service-Authorization: Session <base64 capability>
+```
+
+Returning the decoded value from the extractor does not bypass verification;
+Vault verifies it before running the provider.
 
 Configure the policy independently:
 
@@ -95,3 +111,6 @@ and return upstream headers. Review them like other credential-plane code.
 that receive credentials, use an absolute executable path and
 `inheritEnv: false`. Never interpolate request-controlled values into a remote
 shell command.
+
+The complete registration and helper contract is documented in the
+[Vault JavaScript API reference](../docs/reference/vault-js-api.md).

@@ -495,8 +495,6 @@ func extractBuiltinCapabilityToken(header, prefix string) (string, bool) {
 	return "", false
 }
 
-// extractBasicAuthMacaroon extracts a macaroon token from a Basic auth header's password field.
-// Returns the macaroon token if found, or empty string if not a Basic auth macaroon.
 func extractBasicAuthMacaroon(header, prefix string) string {
 	if !strings.HasPrefix(header, "Basic ") {
 		return ""
@@ -505,15 +503,11 @@ func extractBasicAuthMacaroon(header, prefix string) string {
 	if err != nil {
 		return ""
 	}
-	// Format: username:password — macaroon is in the password
 	_, password, ok := strings.Cut(string(decoded), ":")
-	if !ok {
+	if !ok || !strings.HasPrefix(password, prefix) {
 		return ""
 	}
-	if strings.HasPrefix(password, prefix) {
-		return password
-	}
-	return ""
+	return password
 }
 
 func credentialExtractionErrorResponse() *authv3.CheckResponse {

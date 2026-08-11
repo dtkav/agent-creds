@@ -1,3 +1,18 @@
+registerCredentialType({
+  credentialType: "command_session",
+  configSchema: {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    type: "object",
+    additionalProperties: false,
+    required: ["command", "audience", "access_token"],
+    properties: {
+      command: { type: "string", pattern: "^/" },
+      audience: { type: "string", minLength: 1 },
+      access_token: { type: "string", minLength: 1 },
+    },
+  },
+});
+
 registerCredentialProvider({
   name: "example-command-session",
   credentialType: "command_session",
@@ -7,14 +22,6 @@ registerCredentialProvider({
     hosts: ["api.service.example"],
     methods: ["GET", "POST"],
     paths: ["/v1/**"],
-  },
-
-  validate(config) {
-    if (!config.command || config.command[0] !== "/") {
-      throw new Error("command must be an absolute path");
-    }
-    if (!config.audience) throw new Error("audience is required");
-    if (!config.access_token) throw new Error("access_token is required");
   },
 
   resolve(_request, config) {

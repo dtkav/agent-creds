@@ -239,6 +239,188 @@ func TestConfiguredTypeMustBeRegistered(t *testing.T) {
 	}
 }
 
+func TestCredentialTypeConfigSchemaValidatesConfiguredCredentials(t *testing.T) {
+	directory := t.TempDir()
+	writeScript(t, directory, "schema.provider.js", `
+registerCredentialType({
+  credentialType: "schema-test",
+  configSchema: {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    type: "object",
+    additionalProperties: false,
+    required: ["active", "identities"],
+    properties: {
+      active: { type: "string", minLength: 1 },
+      optional: { type: "string", default: "must-not-be-applied" },
+      identities: {
+        type: "object",
+        minProperties: 1,
+        additionalProperties: { $ref: "#/$defs/identity" }
+      }
+    },
+    $defs: {
+      identity: {
+        type: "object",
+        additionalProperties: false,
+        required: ["token"],
+        properties: {
+          token: { type: "string", pattern: "^oauth-" }
+        }
+      }
+    }
+  },
+  validate: function (config) {
+    if (!config.identities[config.active]) {
+      throw new Error("active identity is not configured");
+    }
+  }
+});
+registerCredentialProvider({
+  name: "schema-provider",
+  credentialType: "schema-test",
+  resolve: function (_request, config) {
+    return { headers: { authorization: config.identities[config.active].token } };
+  }
+});
+`)
+
+	valid := Spec{
+		Name: "configured",
+		Type: "schema-test",
+		Config: map[string]any{
+			"active": "work",
+			"identities": map[string]any{
+				"work": map[string]any{"token": "oauth-valid"},
+			},
+		},
+	}
+	if _, err := NewManager([]string{directory}, 1, []Spec{valid}); err != nil {
+		t.Fatalf("valid config rejected: %v", err)
+	}
+	if _, exists := valid.Config["optional"]; exists {
+		t.Fatal("schema default mutated provider configuration")
+	}
+
+	secret := "must-not-appear-in-validation-errors"
+	invalid := valid
+	invalid.Config = map[string]any{
+		"active": "work",
+		"identities": map[string]any{
+			"work": map[string]any{"token": secret},
+		},
+	}
+	_, err := NewManager([]string{directory}, 1, []Spec{invalid})
+	if err == nil {
+		t.Fatal("schema-invalid config was accepted")
+	}
+	if got := err.Error(); !strings.Contains(got, "/identities/work/token (pattern)") {
+		t.Fatalf("validation error lacks safe instance detail: %v", err)
+	} else if strings.Contains(got, secret) {
+		t.Fatalf("validation error exposed credential value: %v", err)
+	}
+
+	semantic := valid
+	semantic.Config = map[string]any{
+		"active": "personal",
+		"identities": map[string]any{
+			"work": map[string]any{"token": "oauth-valid"},
+		},
+	}
+	_, err = NewManager([]string{directory}, 1, []Spec{semantic})
+	if err == nil || !strings.Contains(err.Error(), "active identity is not configured") {
+		t.Fatalf("semantic validation error = %v", err)
+	}
+}
+
+func TestCredentialTypeConfigSchemaRegistrationRejectsInvalidDefinitions(t *testing.T) {
+	tests := []struct {
+		name   string
+		schema string
+		want   string
+	}{
+		{
+			name:   "invalid schema",
+			schema: `{ type: 42 }`,
+			want:   "invalid configSchema",
+		},
+		{
+			name:   "remote ref",
+			schema: `{ $ref: "https://schemas.example.test/credential.json" }`,
+			want:   "external schema references are disabled",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			directory := t.TempDir()
+			writeScript(t, directory, "invalid.provider.js", `
+registerCredentialType({
+  credentialType: "invalid-test",
+  configSchema: `+test.schema+`
+});
+registerCredentialProvider({
+  name: "invalid-provider",
+  credentialType: "invalid-test",
+  resolve: function () { return { headers: { authorization: "unused" } }; }
+});
+`)
+			_, err := NewManager([]string{directory}, 1, []Spec{{
+				Name: "configured",
+				Type: "invalid-test",
+			}})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("schema registration error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestCredentialTypeCanOnlyBeRegisteredOnce(t *testing.T) {
+	directory := t.TempDir()
+	for _, name := range []string{"a", "b"} {
+		writeScript(t, directory, name+".provider.js", `
+registerCredentialType({
+  credentialType: "duplicate-test",
+  configSchema: { type: "object" }
+});
+`)
+	}
+	_, err := NewManager([]string{directory}, 1, nil)
+	if err == nil || !strings.Contains(err.Error(), `credential type "duplicate-test"`) {
+		t.Fatalf("duplicate registration error = %v", err)
+	}
+}
+
+func TestCredentialTypeSchemaReloadKeepsLastKnownGoodRuntime(t *testing.T) {
+	directory := t.TempDir()
+	scriptPath := writeScript(t, directory, "schema-reload.provider.js", schemaReloadScript("one", "token"))
+	spec := Spec{
+		Name:   "configured",
+		Type:   "schema-reload-test",
+		Config: map[string]any{"token": "configured"},
+	}
+	manager, err := NewManager([]string{directory}, 1, []Spec{spec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	configured := manager.Provider(spec)
+	request := provider.Request{Host: "api.example.com", Method: "GET", Path: "/"}
+	if got := resolveForTest(t, configured, request).Headers["x-version"]; got != "one" {
+		t.Fatalf("initial version = %q, want one", got)
+	}
+	initialGeneration := manager.current.Load().generation
+
+	if err := os.WriteFile(scriptPath, []byte(schemaReloadScript("two", "replacement")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager.reloadIfChanged()
+	if got := manager.current.Load().generation; got != initialGeneration {
+		t.Fatalf("invalid schema reload published generation %d, want %d", got, initialGeneration)
+	}
+	if got := resolveForTest(t, configured, request).Headers["x-version"]; got != "one" {
+		t.Fatalf("invalid schema reload replaced last-known-good provider: %q", got)
+	}
+}
+
 func TestLocalProviderScriptsLoadWhenPresent(t *testing.T) {
 	providerDirectory := filepath.Join("..", "..", "providers.d")
 	files, _, err := scanScripts([]string{providerDirectory})
@@ -650,4 +832,28 @@ registerCredentialProvider({
   }
 });
 `
+}
+
+func schemaReloadScript(version, required string) string {
+	return fmt.Sprintf(`
+registerCredentialType({
+  credentialType: "schema-reload-test",
+  configSchema: {
+    type: "object",
+    additionalProperties: false,
+    required: [%q],
+    properties: {
+      token: { type: "string" },
+      replacement: { type: "string" }
+    }
+  }
+});
+registerCredentialProvider({
+  name: "schema-reload",
+  credentialType: "schema-reload-test",
+  resolve: function () {
+    return { headers: { "x-version": %q } };
+  }
+});
+`, required, version)
 }

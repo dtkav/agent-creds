@@ -16,6 +16,7 @@ require (
 	github.com/go-webauthn/webauthn v0.10.0
 	github.com/hanwen/go-fuse/v2 v2.4.2
 	github.com/mattn/go-sqlite3 v1.14.19
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	github.com/superfly/macaroon v0.3.0
 	github.com/zalando/go-keyring v0.2.3
 	golang.org/x/crypto v0.36.0

@@ -490,6 +490,21 @@ Standalone, syntax-checked examples live in [`examples/`](examples/README.md).
 Create `vault/providers.d/acme-session.provider.js`:
 
 ```js
+registerCredentialType({
+  credentialType: "acme_session",
+  configSchema: {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    type: "object",
+    additionalProperties: false,
+    required: ["token_url", "client_id", "client_secret"],
+    properties: {
+      token_url: { type: "string", pattern: "^https://" },
+      client_id: { type: "string", minLength: 1 },
+      client_secret: { type: "string", minLength: 1 },
+    },
+  },
+});
+
 registerCredentialProvider({
   name: "acme-session",
   credentialType: "acme_session",
@@ -499,12 +514,6 @@ registerCredentialProvider({
     hosts: ["api.acme.example"],
     methods: ["GET", "POST"],
     paths: ["/v1/**"],
-  },
-
-  validate(config) {
-    if (!config.token_url) throw new Error("token_url is required");
-    if (!config.client_id) throw new Error("client_id is required");
-    if (!config.client_secret) throw new Error("client_secret is required");
   },
 
   resolve(_request, config) {
@@ -556,6 +565,21 @@ credentials:
 Then select `/acme/prod` from a project upstream. The agent receives a
 macaroon in `ACME_API_TOKEN`; Vault performs the exchange and caches only the
 short-lived session until its JWT expiry.
+
+`registerCredentialType` declares one configuration contract for an exact
+credential type. Vault compiles its `configSchema` when it loads the extension,
+using JSON Schema Draft 2020-12 when `$schema` is omitted. It validates every
+configured credential of that type after resolving `$secret` references and
+publishes a new runtime generation only if validation succeeds. Document-local
+`$ref` values and `$defs` are supported; file and network references are
+rejected without I/O. Schema errors report configuration paths and keywords
+without echoing rejected values.
+
+A type registration may also define `validate(config)` for semantic rules
+that JSON Schema cannot express, such as checking that one configured name
+refers to another entry. Existing `validate(config)` hooks on individual
+provider registrations remain supported for compatibility. Schemas do not
+apply defaults or otherwise mutate provider configuration.
 
 Provider functions receive request facts and credential configuration:
 

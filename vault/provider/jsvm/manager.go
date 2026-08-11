@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -25,6 +26,7 @@ import (
 	"time"
 
 	"github.com/dop251/goja"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"vault/macaroon"
 	"vault/policy"
@@ -79,15 +81,28 @@ type runtimeSet struct {
 }
 
 type scriptRuntime struct {
-	vm            *goja.Runtime
-	httpClient    *http.Client
-	registrations []registration
-	policies      []policyRegistration
-	names         map[string]string
-	policyNames   map[string]string
-	callContext   context.Context
-	source        string
-	nextOrder     int
+	vm              *goja.Runtime
+	httpClient      *http.Client
+	credentialTypes map[string]credentialTypeRegistration
+	registrations   []registration
+	policies        []policyRegistration
+	names           map[string]string
+	policyNames     map[string]string
+	callContext     context.Context
+	source          string
+	nextOrder       int
+}
+
+type credentialTypeRegistration struct {
+	configSchema *jsonschema.Schema
+	validate     goja.Callable
+	source       string
+}
+
+type rejectingSchemaLoader struct{}
+
+func (rejectingSchemaLoader) Load(schemaURL string) (any, error) {
+	return nil, fmt.Errorf("external schema references are disabled: %s", schemaURL)
 }
 
 type registration struct {
@@ -421,7 +436,8 @@ func (p *jsCredentialProvider) Resolve(ctx context.Context, request provider.Req
 
 func newScriptRuntime(files []scriptFile) (*scriptRuntime, error) {
 	scriptVM := &scriptRuntime{
-		vm: goja.New(),
+		vm:              goja.New(),
+		credentialTypes: make(map[string]credentialTypeRegistration),
 		httpClient: &http.Client{
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
@@ -469,6 +485,9 @@ func newScriptRuntime(files []scriptFile) (*scriptRuntime, error) {
 }
 
 func (r *scriptRuntime) installGlobals() error {
+	if err := r.vm.Set("registerCredentialType", r.registerCredentialType); err != nil {
+		return err
+	}
 	if err := r.vm.Set("registerCredentialProvider", r.register); err != nil {
 		return err
 	}
@@ -507,6 +526,47 @@ func (r *scriptRuntime) installGlobals() error {
 }
 
 func ignoredRegistration(goja.FunctionCall) goja.Value {
+	return goja.Undefined()
+}
+
+func (r *scriptRuntime) registerCredentialType(call goja.FunctionCall) goja.Value {
+	if len(call.Arguments) != 1 || isNullish(call.Arguments[0]) {
+		panic(r.vm.NewTypeError("registerCredentialType expects one credential type object"))
+	}
+	object := call.Arguments[0].ToObject(r.vm)
+	credentialType := requiredObjectString(r.vm, object, "credentialType")
+	if previous, exists := r.credentialTypes[credentialType]; exists {
+		panic(r.vm.NewTypeError(
+			"credential type %q from %s is already registered by %s",
+			credentialType,
+			r.source,
+			previous.source,
+		))
+	}
+
+	schemaValue := object.Get("configSchema")
+	if isNullish(schemaValue) {
+		panic(r.vm.NewTypeError("credential type %q must define configSchema", credentialType))
+	}
+	compiledSchema, err := compileCredentialConfigSchema(credentialType, schemaValue.Export())
+	if err != nil {
+		panic(r.vm.NewTypeError("credential type %q has invalid configSchema: %v", credentialType, err))
+	}
+
+	var validate goja.Callable
+	if value := object.Get("validate"); !isNullish(value) {
+		var valid bool
+		validate, valid = goja.AssertFunction(value)
+		if !valid {
+			panic(r.vm.NewTypeError("credential type %q validate must be a function", credentialType))
+		}
+	}
+
+	r.credentialTypes[credentialType] = credentialTypeRegistration{
+		configSchema: compiledSchema,
+		validate:     validate,
+		source:       r.source,
+	}
 	return goja.Undefined()
 }
 
@@ -615,6 +675,33 @@ func (r *scriptRuntime) registerPolicy(call goja.FunctionCall) goja.Value {
 
 func (r *scriptRuntime) validateSpecs(specs []Spec) error {
 	for _, spec := range specs {
+		if registeredType, ok := r.credentialTypes[spec.Type]; ok {
+			if err := registeredType.configSchema.Validate(cloneMap(spec.Config)); err != nil {
+				return fmt.Errorf(
+					"validating credential %q with schema for type %q: %s",
+					spec.Name,
+					spec.Type,
+					safeSchemaValidationError(err),
+				)
+			}
+			if registeredType.validate != nil {
+				validationContext, cancel := context.WithTimeout(context.Background(), initializationTimeout)
+				r.callContext = validationContext
+				err := r.runWithContext(validationContext, func() error {
+					_, validateErr := registeredType.validate(
+						goja.Undefined(),
+						r.vm.ToValue(cloneMap(spec.Config)),
+					)
+					return validateErr
+				})
+				cancel()
+				r.callContext = nil
+				if err != nil {
+					return fmt.Errorf("validating credential %q with type %q: %w", spec.Name, spec.Type, err)
+				}
+			}
+		}
+
 		matched := false
 		for _, registration := range r.registrations {
 			if !matchesCredentialType(registration.credentialType, spec.Type) {
@@ -644,6 +731,83 @@ func (r *scriptRuntime) validateSpecs(specs []Spec) error {
 		}
 	}
 	return nil
+}
+
+func compileCredentialConfigSchema(credentialType string, exported any) (*jsonschema.Schema, error) {
+	encoded, err := json.Marshal(exported)
+	if err != nil {
+		return nil, fmt.Errorf("schema must be a JSON value: %w", err)
+	}
+	document, err := jsonschema.UnmarshalJSON(bytes.NewReader(encoded))
+	if err != nil {
+		return nil, fmt.Errorf("decoding schema: %w", err)
+	}
+
+	compiler := jsonschema.NewCompiler()
+	compiler.DefaultDraft(jsonschema.Draft2020)
+	// Built-in meta-schemas and document-local references work, while file and
+	// network references fail closed without attempting I/O.
+	compiler.UseLoader(rejectingSchemaLoader{})
+	resourceURL := "https://agent-creds.invalid/schemas/credential/" + url.PathEscape(credentialType)
+	if err := compiler.AddResource(resourceURL, document); err != nil {
+		return nil, err
+	}
+	compiled, err := compiler.Compile(resourceURL)
+	if err != nil {
+		return nil, fmt.Errorf("compiling Draft 2020-12 schema: %w", err)
+	}
+	return compiled, nil
+}
+
+func safeSchemaValidationError(err error) string {
+	var validationErr *jsonschema.ValidationError
+	if !errors.As(err, &validationErr) {
+		return "configuration does not match the registered schema"
+	}
+
+	var details []string
+	appendSchemaValidationDetails(validationErr, &details)
+	if len(details) == 0 {
+		return "configuration does not match the registered schema"
+	}
+	if len(details) > 8 {
+		details = append(details[:8], "additional validation errors omitted")
+	}
+	return "configuration does not match the registered schema: " + strings.Join(details, "; ")
+}
+
+func appendSchemaValidationDetails(err *jsonschema.ValidationError, details *[]string) {
+	if len(*details) >= 9 {
+		return
+	}
+	if len(err.Causes) > 0 {
+		for _, cause := range err.Causes {
+			appendSchemaValidationDetails(cause, details)
+			if len(*details) >= 9 {
+				return
+			}
+		}
+		return
+	}
+
+	instancePath := schemaInstancePath(err.InstanceLocation)
+	keyword := "schema"
+	if path := err.ErrorKind.KeywordPath(); len(path) > 0 {
+		keyword = path[len(path)-1]
+	}
+	*details = append(*details, fmt.Sprintf("%s (%s)", instancePath, keyword))
+}
+
+func schemaInstancePath(parts []string) string {
+	if len(parts) == 0 {
+		return "/"
+	}
+	escaped := make([]string, len(parts))
+	for i, part := range parts {
+		part = strings.ReplaceAll(part, "~", "~0")
+		escaped[i] = strings.ReplaceAll(part, "/", "~1")
+	}
+	return "/" + strings.Join(escaped, "/")
 }
 
 func (r *scriptRuntime) validatePolicySpecs(specs []PolicySpec) error {

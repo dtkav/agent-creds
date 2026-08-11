@@ -82,6 +82,9 @@ func newExtractorRuntime(files []scriptFile) (*extractorRuntime, error) {
 func (r *extractorRuntime) installGlobals() error {
 	// Provider and policy registrations are intentionally ignored here so a
 	// single reviewed plugin file can declare both execution-zone hooks.
+	if err := r.vm.Set("registerCredentialType", ignoredRegistration); err != nil {
+		return err
+	}
 	if err := r.vm.Set("registerCredentialProvider", ignoredRegistration); err != nil {
 		return err
 	}

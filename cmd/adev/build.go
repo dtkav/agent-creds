@@ -302,11 +302,10 @@ func ensureBaseImage(scriptDir string, spinner *Spinner) error {
 	buildScript := filepath.Join(scriptDir, "scripts", "build-nix.sh")
 	cmd := exec.Command(buildScript, "base", "sandbox-base")
 	cmd.Dir = scriptDir
-	cmd.Stdout = nil
-	cmd.Stderr = nil
 
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("building base image: %w", err)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("building base image: %w\n%s", err, strings.TrimSpace(string(out)))
 	}
 
 	if err := saveBaseHash(scriptDir); err != nil {
@@ -342,11 +341,10 @@ func ensureSandboxEnv(cfg ProjectConfig, scriptDir string, spinner *Spinner) (st
 	buildScript := filepath.Join(scriptDir, "scripts", "build-nix.sh")
 	cmd := exec.Command(buildScript, "env", envHash(cfg, scriptDir))
 	cmd.Dir = scriptDir
-	cmd.Stderr = nil
 
-	out, err := cmd.Output()
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("building sandbox env: %w", err)
+		return "", fmt.Errorf("building sandbox env: %w\n%s", err, strings.TrimSpace(string(out)))
 	}
 
 	// The last line of output is the env path

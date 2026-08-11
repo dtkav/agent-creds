@@ -1,10 +1,57 @@
 package main
 
 import (
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
+
+func TestCopyNixSourceExcludesRuntimeState(t *testing.T) {
+	sourceDir := t.TempDir()
+	workspaceDir := t.TempDir()
+
+	for path, contents := range map[string]string{
+		"flake.nix":              "{}",
+		"dirty-source.txt":       "included",
+		".git/config":            "excluded",
+		"generated/packages.nix": "included",
+		"generated/runtime.log":  "excluded",
+	} {
+		fullPath := filepath.Join(sourceDir, path)
+		if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(fullPath, []byte(contents), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	socketPath := filepath.Join(sourceDir, "generated", "admin.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	script := filepath.Join("..", "..", "scripts", "copy-nix-source.sh")
+	out, err := exec.Command(script, sourceDir, workspaceDir).CombinedOutput()
+	if err != nil {
+		t.Fatalf("copy-nix-source.sh: %v\n%s", err, out)
+	}
+
+	for _, path := range []string{"flake.nix", "dirty-source.txt", "generated/packages.nix"} {
+		if _, err := os.Stat(filepath.Join(workspaceDir, path)); err != nil {
+			t.Errorf("expected %s in workspace: %v", path, err)
+		}
+	}
+	for _, path := range []string{".git", "generated/runtime.log", "generated/admin.sock"} {
+		if _, err := os.Lstat(filepath.Join(workspaceDir, path)); !os.IsNotExist(err) {
+			t.Errorf("runtime path %s was copied", path)
+		}
+	}
+}
 
 func TestSandboxEnvAvailableRequiresCompleteClosure(t *testing.T) {
 	configHome := t.TempDir()

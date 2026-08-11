@@ -45,7 +45,7 @@ build_base() {
         echo "experimental-features = nix-command flakes" > ~/.config/nix/nix.conf
 
         # Copy source to a clean directory (avoids dirty git tree issues)
-        cp -r /src /workspace
+        /src/scripts/copy-nix-source.sh /src /workspace
         cd /workspace
 
         # Initialize git if needed (flakes require git)
@@ -88,17 +88,20 @@ build_env() {
         exit 2
     fi
 
-    # Each environment is a real, self-contained chroot Nix store. Mounting
-    # that store as /nix/store keeps absolute store symlinks valid without
-    # exposing the host's global store or copying paths out of a build store.
+    # Each environment gets a self-contained copy of its exact Nix closure.
+    # Mounting that directory as /nix/store keeps absolute store references
+    # valid without exposing packages from any other sandbox environment.
     local private_root="$NIX_DIR/envs/$env_key"
     mkdir -p "$private_root/nix/store" "$private_root/nix/var/nix" \
         "$NIX_DIR/var/nix/stores"
 
     echo "Building sandbox env into host Nix store..." >&2
 
-    # The image keeps its own /nix store so the Nix CLI can run. --store points
-    # the build at the separately mounted chroot store owned by this env key.
+    # Build in the native image store, where builders and their logical
+    # /nix/store output paths agree, then export the closure to the host mount.
+    # A local store rooted at a bind mount is not sufficient here: the stock
+    # Nix image disables build sandboxing, so builders would still write to the
+    # image's logical /nix/store instead of the rooted store.
     docker volume create nix-store 2>/dev/null || true
 
     local env_path
@@ -116,7 +119,7 @@ build_env() {
         echo "experimental-features = nix-command flakes" > ~/.config/nix/nix.conf
 
         # Copy source to a clean directory (avoids dirty git tree issues)
-        cp -r /src /workspace
+        /src/scripts/copy-nix-source.sh /src /workspace
         cd /workspace
 
         # Initialize git if needed (flakes require git)
@@ -125,18 +128,35 @@ build_env() {
         # Force-add generated/packages.nix even though generated/ is gitignored
         git add -f generated/packages.nix 2>/dev/null || true
 
-        private_root="/agent-creds-nix/envs/$AGENT_CREDS_ENV_KEY"
-        env_path=$(nix build --store "$private_root" \
-          .#sandbox-env --no-link --print-out-paths)
+        env_path=$(nix build .#sandbox-env --no-link --print-out-paths)
 
-        # Querying the same store proves the output and its references were
-        # registered there. Lstat semantics matter: sandbox-env may itself be
-        # an absolute symlink that resolves only after the store is mounted at
-        # its logical /nix/store location.
-        nix path-info --store "$private_root" --recursive "$env_path" >/dev/null
-        physical="$private_root$env_path"
-        test -e "$physical" || test -L "$physical" || {
-            echo "sandbox env was not built into private store: $env_path" >&2
+        private_store="/agent-creds-nix/envs/$AGENT_CREDS_ENV_KEY/nix/store"
+        for source in $(nix-store -qR "$env_path"); do
+            name=$(basename "$source")
+            destination="$private_store/$name"
+
+            # symlinkJoin outputs can be top-level absolute symlinks. A bind
+            # source cannot depend on the build container store, so copy the
+            # resolved output while preserving symlinks inside it.
+            if [ -L "$destination" ]; then
+                rm -f "$destination"
+            fi
+            if [ ! -e "$destination" ]; then
+                resolved="$source"
+                if [ -L "$resolved" ]; then
+                    resolved=$(readlink -f "$resolved")
+                fi
+                cp -a "$resolved" "$destination"
+            fi
+            test -e "$destination" && test ! -L "$destination" || {
+                echo "failed to export Nix closure path: $source" >&2
+                exit 1
+            }
+        done
+
+        physical="$private_store/$(basename "$env_path")"
+        test -e "$physical" || {
+            echo "sandbox env was not exported to private store: $env_path" >&2
             exit 1
         }
 

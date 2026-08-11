@@ -213,12 +213,15 @@ func (m *InstanceManager) CleanupInstance(inst *Instance) error {
 	sandboxName := "adev-" + inst.Slug + "-sandbox"
 	netName := "adev-" + inst.Slug + "-net"
 	envoyName := "adev-" + inst.Slug + "-envoy"
+	legacyTapName := legacyTapContainerName(inst.Slug)
 	networkName := "adev-" + inst.Slug
 
 	// Remove containers
 	exec.Command("docker", "rm", "-f", sandboxName).Run()
 	exec.Command("docker", "rm", "-f", netName).Run()
+	exec.Command("docker", "rm", "-f", legacyTapName).Run()
 	exec.Command("docker", "rm", "-f", envoyName).Run()
+	_ = unregisterTapSource(m.scriptDir, inst.Slug)
 
 	// Remove network
 	exec.Command("docker", "network", "rm", networkName).Run()

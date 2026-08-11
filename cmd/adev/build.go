@@ -276,7 +276,7 @@ func buildGoBinaries(scriptDir string) error {
 	}
 
 	for _, b := range binaries {
-		cmd := exec.Command("go", "build", "-o", filepath.Join(scriptDir, b.out), ".")
+		cmd := exec.Command("go", "build", "-buildvcs=false", "-o", filepath.Join(scriptDir, b.out), ".")
 		cmd.Dir = filepath.Join(scriptDir, b.src)
 		cmd.Env = append(os.Environ(), "CGO_ENABLED=0") // static binary required for Nix image
 		if err := cmd.Run(); err != nil {

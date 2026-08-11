@@ -536,6 +536,7 @@ func runBwrapStart(workDir, scriptDir, slug string, cfg ProjectConfig) {
 // session. When attach is true, the current terminal follows the session.
 func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig, attach bool) {
 	envoyName := "adev-" + slug + "-envoy"
+	legacyTapName := legacyTapContainerName(slug)
 	networkName := "adev-" + slug
 	sessionName := bwrapSessionName(slug)
 	instanceGenDir := filepath.Join(scriptDir, "generated", "instances", slug)
@@ -562,8 +563,12 @@ func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig, att
 	cleanup := func() {
 		stopBwrapBrowserForward(instanceGenDir)
 		stopBwrapCDPProxy(instanceGenDir)
+		run("docker", "rm", "-f", legacyTapName)
 		run("docker", "rm", "-f", envoyName)
 		run("docker", "network", "rm", networkName)
+		if cfg.TapEnabled {
+			_ = unregisterTapSource(scriptDir, slug)
+		}
 	}
 
 	sigChan := make(chan os.Signal, 1)
@@ -604,6 +609,14 @@ func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig, att
 		spinner.Stop()
 		fmt.Fprintf(os.Stderr, "Error generating configs: %v\n", err)
 		os.Exit(1)
+	}
+	if cfg.TapEnabled {
+		if err := registerTapSource(scriptDir, slug); err != nil {
+			spinner.Stop()
+			fmt.Fprintf(os.Stderr, "Error preparing traffic tap: %v\n", err)
+			cleanup()
+			os.Exit(1)
+		}
 	}
 	vaultConfigYAML, vaultConfigErr := decryptVaultConfigYAML()
 	legacyEnvLoaded := exportLegacyVaultEnv()
@@ -674,7 +687,7 @@ func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig, att
 	dnsResponderSrc := filepath.Join(scriptDir, "cmd", "dns-responder", "main.go")
 	if !fileExists(dnsResponderBin) || fileNewer(dnsResponderSrc, dnsResponderBin) {
 		spinner.Status("building dns-responder...")
-		cmd := exec.Command("go", "build", "-o", "../../generated/dns-responder", ".")
+		cmd := exec.Command("go", "build", "-buildvcs=false", "-o", "../../generated/dns-responder", ".")
 		cmd.Dir = filepath.Join(scriptDir, "cmd", "dns-responder")
 		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 		cmd.Run()
@@ -686,7 +699,7 @@ func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig, att
 	tcpBridgeSrc := filepath.Join(scriptDir, "cmd", "tcp-bridge", "main.go")
 	if !fileExists(tcpBridgeBin) || fileNewer(tcpBridgeSrc, tcpBridgeBin) {
 		spinner.Status("building tcp-bridge...")
-		cmd := exec.Command("go", "build", "-o", "../../generated/tcp-bridge", ".")
+		cmd := exec.Command("go", "build", "-buildvcs=false", "-o", "../../generated/tcp-bridge", ".")
 		cmd.Dir = filepath.Join(scriptDir, "cmd", "tcp-bridge")
 		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 		if err := cmd.Run(); err != nil {
@@ -703,7 +716,7 @@ func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig, att
 	cdpProxySrc := filepath.Join(scriptDir, "cmd", "cdp-proxy", "main.go")
 	if !fileExists(cdpProxyBin) || fileNewer(cdpProxySrc, cdpProxyBin) {
 		spinner.Status("building cdp-proxy...")
-		cmd := exec.Command("go", "build", "-o", "../../generated/cdp-proxy", ".")
+		cmd := exec.Command("go", "build", "-buildvcs=false", "-o", "../../generated/cdp-proxy", ".")
 		cmd.Dir = filepath.Join(scriptDir, "cmd", "cdp-proxy")
 		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 		if err := cmd.Run(); err != nil {
@@ -736,6 +749,7 @@ func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig, att
 	os.WriteFile(filepath.Join(instanceGenDir, "envoy-port"), []byte(fmt.Sprintf("%d\n", envoyPort)), 0600)
 
 	spinner.Status("starting envoy...")
+	run("docker", "rm", "-f", legacyTapName)    // stale pre-global collector
 	run("docker", "rm", "-f", envoyName)        // stale instance
 	run("docker", "network", "rm", networkName) // may not exist
 	if err := run("docker", "network", "create", "--ipv6", networkName); err != nil {
@@ -758,6 +772,11 @@ func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig, att
 		"-v", scriptDir + "/envoy-entrypoint.sh:/entrypoint.sh:ro",
 		"-v", scriptDir + "/generated/dns-responder:/usr/local/bin/dns-responder:ro",
 		"-v", instanceLogsDir + ":/var/log/adev",
+	}
+	if cfg.TapEnabled {
+		envoyArgs = append(envoyArgs,
+			"-v", tapSourceRuntimeDir(scriptDir, slug)+":/run/adev-tap",
+		)
 	}
 	envoyArgs = append(envoyArgs,
 		"--entrypoint", "/entrypoint.sh",
@@ -791,6 +810,13 @@ func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig, att
 			cleanup()
 			os.Exit(1)
 		}
+	}
+	tapUIPort, err := ensureGlobalTap(scriptDir, slug, spinner)
+	if err != nil {
+		spinner.Stop()
+		fmt.Fprintf(os.Stderr, "Error starting traffic tap: %v\n", err)
+		cleanup()
+		os.Exit(1)
 	}
 	// Generated files consumed by the sandbox.
 	spinner.Status("generating sandbox...")
@@ -886,10 +912,18 @@ func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig, att
 			cleanup()
 			os.Exit(1)
 		}
-		fmt.Printf("Started '%s' (bwrap, envoy 127.0.0.1:%d).\n", slug, envoyPort)
+		if tapUIPort != 0 {
+			fmt.Printf("Started '%s' (bwrap, envoy 127.0.0.1:%d, tap http://127.0.0.1:%d).\n", slug, envoyPort, tapUIPort)
+		} else {
+			fmt.Printf("Started '%s' (bwrap, envoy 127.0.0.1:%d).\n", slug, envoyPort)
+		}
 		return
 	}
-	fmt.Printf("Starting '%s' (bwrap, envoy 127.0.0.1:%d, ctrl+\\ detaches)...\n", slug, envoyPort)
+	if tapUIPort != 0 {
+		fmt.Printf("Starting '%s' (bwrap, envoy 127.0.0.1:%d, tap http://127.0.0.1:%d, ctrl+\\ detaches)...\n", slug, envoyPort, tapUIPort)
+	} else {
+		fmt.Printf("Starting '%s' (bwrap, envoy 127.0.0.1:%d, ctrl+\\ detaches)...\n", slug, envoyPort)
+	}
 	attached := exec.Command("zmx", append([]string{"attach", sessionName}, sessionCmd...)...)
 	attached.Stdin = os.Stdin
 	attached.Stdout = os.Stdout
@@ -1377,6 +1411,10 @@ func startBwrapConfigWatcher(workDir, scriptDir, instanceGenDir, envoyName strin
 					continue
 				}
 				newCfg, err := LoadProjectConfigWithPlugins(workDir, scriptDir)
+				if err != nil {
+					continue
+				}
+				newCfg, err = applyGlobalTapConfig(newCfg)
 				if err != nil {
 					continue
 				}

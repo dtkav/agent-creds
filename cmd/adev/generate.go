@@ -219,11 +219,34 @@ func routerFilter() map[string]interface{} {
 	}
 }
 
+// tapFilter exposes HTTP exchanges to an explicitly attached collector through
+// Envoy's admin tap endpoint. With no collector attached, no trace sink exists.
+func tapFilter() map[string]interface{} {
+	return map[string]interface{}{
+		"name": "envoy.filters.http.tap",
+		"typed_config": map[string]interface{}{
+			"@type": "type.googleapis.com/envoy.extensions.filters.http.tap.v3.Tap",
+			"common_config": map[string]interface{}{
+				"admin_config": map[string]interface{}{
+					"config_id": tapConfigID,
+				},
+			},
+		},
+	}
+}
+
 func (g *Generator) httpFilters() []map[string]interface{} {
-	return []map[string]interface{}{g.extAuthzFilter(), routerFilter()}
+	filters := make([]map[string]interface{}, 0, 3)
+	if g.cfg.TapEnabled {
+		// Observe the downstream request before Vault injects credentials.
+		filters = append(filters, tapFilter())
+	}
+	return append(filters, g.extAuthzFilter(), routerFilter())
 }
 
 func (g *Generator) connectHTTPFilters() []map[string]interface{} {
+	// The outer CONNECT HCM carries an encrypted byte tunnel. HTTPS is tapped
+	// after termination by the internal listener instead.
 	return []map[string]interface{}{g.extAuthzFilter(), routerFilter()}
 }
 
@@ -623,6 +646,16 @@ func (g *Generator) generateEnvoyJSON() error {
 				"@type": "type.googleapis.com/envoy.extensions.bootstrap.internal_listener.v3.InternalListener",
 			},
 		}},
+	}
+	if g.cfg.TapEnabled {
+		envoyConfig["admin"] = map[string]interface{}{
+			"address": map[string]interface{}{
+				"pipe": map[string]interface{}{
+					"path": tapAdminSocket,
+					"mode": 438, // 0666; collector is an unprivileged peer on the shared mount.
+				},
+			},
+		}
 	}
 	data, _ := json.MarshalIndent(envoyConfig, "", "  ")
 	return writeIfChanged(filepath.Join(g.genDir, "envoy.json"), data, 0644)

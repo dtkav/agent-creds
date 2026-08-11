@@ -39,6 +39,11 @@ func runConsole(args []string) {
 		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
 		os.Exit(1)
 	}
+	cfg, err = applyGlobalTapConfig(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading global tap config: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Determine instance name
 	name := cfg.Sandbox.Name
@@ -94,6 +99,11 @@ func runStart(args []string) {
 		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
 		os.Exit(1)
 	}
+	cfg, err = applyGlobalTapConfig(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading global tap config: %v\n", err)
+		os.Exit(1)
+	}
 	name := cfg.Sandbox.Name
 	if name == "" {
 		name = filepath.Base(workDir)
@@ -111,6 +121,7 @@ func runStart(args []string) {
 func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	containerName := "adev-" + slug + "-net"
 	envoyName := "adev-" + slug + "-envoy"
+	legacyTapName := legacyTapContainerName(slug)
 	sandboxName := "adev-" + slug + "-sandbox"
 	networkName := "adev-" + slug
 	instanceGenDir := filepath.Join(scriptDir, "generated", "instances", slug)
@@ -132,8 +143,12 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	cleanup := func() {
 		run("docker", "rm", "-f", sandboxName)
 		run("docker", "rm", "-f", containerName)
+		run("docker", "rm", "-f", legacyTapName)
 		run("docker", "rm", "-f", envoyName)
 		run("docker", "network", "rm", networkName)
+		if cfg.TapEnabled {
+			_ = unregisterTapSource(scriptDir, slug)
+		}
 	}
 
 	// Handle cleanup on interrupt
@@ -158,6 +173,13 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		spinner.Stop()
 		fmt.Fprintf(os.Stderr, "Error generating configs: %v\n", err)
 		os.Exit(1)
+	}
+	if cfg.TapEnabled {
+		if err := registerTapSource(scriptDir, slug); err != nil {
+			spinner.Stop()
+			fmt.Fprintf(os.Stderr, "Error preparing traffic tap: %v\n", err)
+			os.Exit(1)
+		}
 	}
 	vaultConfigYAML, vaultConfigErr := decryptVaultConfigYAML()
 	legacyEnvLoaded := exportLegacyVaultEnv()
@@ -235,7 +257,7 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	aenvSrc := "cmd/aenv/main.go"
 	if !fileExists(aenvBin) || fileNewer(aenvSrc, aenvBin) {
 		spinner.Status("building aenv...")
-		cmd := exec.Command("go", "build", "-o", "../../generated/aenv", ".")
+		cmd := exec.Command("go", "build", "-buildvcs=false", "-o", "../../generated/aenv", ".")
 		cmd.Dir = "cmd/aenv"
 		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 		cmd.Run()
@@ -246,7 +268,7 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	cdpProxySrc := "cmd/cdp-proxy/main.go"
 	if !fileExists(cdpProxyBin) || fileNewer(cdpProxySrc, cdpProxyBin) {
 		spinner.Status("building cdp-proxy...")
-		cmd := exec.Command("go", "build", "-o", "../../generated/cdp-proxy", ".")
+		cmd := exec.Command("go", "build", "-buildvcs=false", "-o", "../../generated/cdp-proxy", ".")
 		cmd.Dir = "cmd/cdp-proxy"
 		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 		cmd.Run()
@@ -257,7 +279,7 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	tcpBridgeSrc := "cmd/tcp-bridge/main.go"
 	if !fileExists(tcpBridgeBin) || fileNewer(tcpBridgeSrc, tcpBridgeBin) {
 		spinner.Status("building tcp-bridge...")
-		cmd := exec.Command("go", "build", "-o", "../../generated/tcp-bridge", ".")
+		cmd := exec.Command("go", "build", "-buildvcs=false", "-o", "../../generated/tcp-bridge", ".")
 		cmd.Dir = "cmd/tcp-bridge"
 		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 		cmd.Run()
@@ -268,7 +290,7 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	dnsResponderSrc := "cmd/dns-responder/main.go"
 	if !fileExists(dnsResponderBin) || fileNewer(dnsResponderSrc, dnsResponderBin) {
 		spinner.Status("building dns-responder...")
-		cmd := exec.Command("go", "build", "-o", "../../generated/dns-responder", ".")
+		cmd := exec.Command("go", "build", "-buildvcs=false", "-o", "../../generated/dns-responder", ".")
 		cmd.Dir = "cmd/dns-responder"
 		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 		cmd.Run()
@@ -354,6 +376,7 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 
 	// Create per-sandbox network (remove stale one first if it exists without containers)
 	spinner.Status("creating network...")
+	run("docker", "rm", "-f", legacyTapName)
 	run("docker", "network", "rm", networkName) // ignore error - may not exist
 	if err := run("docker", "network", "create", "--ipv6", networkName); err != nil {
 		spinner.Stop()
@@ -376,6 +399,11 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		"-v", scriptDir + "/envoy-entrypoint.sh:/entrypoint.sh:ro",
 		"-v", scriptDir + "/generated/dns-responder:/usr/local/bin/dns-responder:ro",
 		"-v", instanceLogsDir + ":/var/log/adev",
+	}
+	if cfg.TapEnabled {
+		envoyArgs = append(envoyArgs,
+			"-v", tapSourceRuntimeDir(scriptDir, slug)+":/run/adev-tap",
+		)
 	}
 	envoyArgs = append(envoyArgs,
 		"--entrypoint", "/entrypoint.sh",
@@ -413,6 +441,13 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 			cleanup()
 			os.Exit(1)
 		}
+	}
+	tapUIPort, err := ensureGlobalTap(scriptDir, slug, spinner)
+	if err != nil {
+		spinner.Stop()
+		fmt.Fprintf(os.Stderr, "Error starting traffic tap: %v\n", err)
+		cleanup()
+		os.Exit(1)
 	}
 	// gVisor (default): sandbox-net starts later with --network=host
 	// runc: sandbox-net starts now, sandbox shares its network namespace
@@ -502,6 +537,10 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 						if event.Op&(fsnotify.Write|fsnotify.Create) != 0 {
 							// Reload config with plugins
 							newCfg, err := LoadProjectConfigWithPlugins(workDir, scriptDir)
+							if err != nil {
+								continue
+							}
+							newCfg, err = applyGlobalTapConfig(newCfg)
 							if err != nil {
 								continue
 							}
@@ -787,6 +826,9 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 
 	spinner.Stop()
 	signal.Stop(sigChan)
+	if tapUIPort != 0 {
+		fmt.Printf("Traffic tap: http://127.0.0.1:%d\n", tapUIPort)
+	}
 	// Start background discharge refresh for credentialed upstreams
 	refreshCtx, refreshCancel := context.WithCancel(context.Background())
 	defer refreshCancel()

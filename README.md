@@ -250,11 +250,46 @@ $ adev console review  # Use a named instance
 $ adev start           # Start a bwrap instance in the background
 $ adev stop            # Stop this project's instance
 $ adev setup           # Configure credential access interactively
+$ adev tap status      # Inspect the global metrics collector
 ```
 
 A `bwrap` agent runs in a zmx-hosted session, so it can detach and resume
 without losing the process. Multiple agents can run concurrently; they share
 Vault but not Envoy, tokens, generated configuration, or network namespaces.
+
+### Collect GenAI operation metrics
+
+Enable the system-wide collector once:
+
+```console
+$ adev tap enable                  # UI defaults to 127.0.0.1:52000
+$ adev tap enable --ui-port 52812  # choose another loopback port
+$ adev tap status
+```
+
+On the next instance start, its Envoy automatically registers its private admin
+socket with the singleton. No project configuration is required. Envoy copies
+provider exchanges before credential injection. The collector recognizes
+OpenAI Responses and Anthropic Messages traffic, builds normalized operations
+in bounded memory, then discards the transport data. Its SQLite schema stores
+only source, provider, operation, model, timing, outcome, byte counts, and
+provider-reported token counts. It has no fields for headers, URLs,
+request/response bodies, prompts, or generic JSON.
+
+All instances feed one database at `generated/tap/data/operations.db`. The
+loopback service provides the live UI at `/`, normalized JSON at
+`/api/operations`, an SSE feed at
+`/api/operations/stream`, Prometheus metrics at `/metrics`, and normalized
+OpenTelemetry GenAI JSONL at `/api/export/otel-genai.jsonl`.
+
+The collector is out of the request path: `adev tap disable` stops it without
+interrupting agent traffic or deleting the database. It uses a dedicated,
+non-masqueraded Docker network only for its loopback-published UI and receives
+a read-only tree of Envoy admin sockets—no Vault configuration, macaroons,
+provider credentials, routed internet egress, or instance network attachment.
+The global switch is stored in `~/.config/agent-creds/tap.toml`. Because the
+Envoy tap filter is part of bootstrap configuration, restart an instance after
+changing the global switch.
 
 ### Declare network and credential access
 

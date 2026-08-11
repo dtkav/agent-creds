@@ -48,8 +48,8 @@ build_base() {
         /src/scripts/copy-nix-source.sh /src /workspace
         cd /workspace
 
-        # Initialize git if needed (flakes require git)
-        git init -q 2>/dev/null || true
+        # Initialize the disposable repository (flakes require git)
+        git init -q
         git add -A 2>/dev/null || true
         # Force-add generated/packages.nix even though generated/ is gitignored
         git add -f generated/packages.nix 2>/dev/null || true
@@ -122,8 +122,8 @@ build_env() {
         /src/scripts/copy-nix-source.sh /src /workspace
         cd /workspace
 
-        # Initialize git if needed (flakes require git)
-        git init -q 2>/dev/null || true
+        # Initialize the disposable repository (flakes require git)
+        git init -q
         git add -A 2>/dev/null || true
         # Force-add generated/packages.nix even though generated/ is gitignored
         git add -f generated/packages.nix 2>/dev/null || true

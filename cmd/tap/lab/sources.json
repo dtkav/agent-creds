@@ -1,0 +1,14 @@
+{
+  "sources": [
+    {
+      "id": "lab-openai-envoy",
+      "admin_url": "http://envoy-openai:9901",
+      "config_id": "agent_creds_global_tap"
+    },
+    {
+      "id": "lab-anthropic-envoy",
+      "admin_url": "http://envoy-anthropic:9901",
+      "config_id": "agent_creds_global_tap"
+    }
+  ]
+}

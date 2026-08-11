@@ -215,6 +215,7 @@ type AgentConfig struct {
 type ProjectConfig struct {
 	Sandbox        SandboxConfig             `toml:"sandbox"`
 	Vault          VaultConfig               `toml:"vault"`
+	TapEnabled     bool                      `toml:"-"` // derived from the global tap config
 	Entrypoint     string                    // set by agent
 	NixExprs       []string                  // inline nix expressions from plugins/agents
 	NixPkgFields                             // embedded Nix package set fields

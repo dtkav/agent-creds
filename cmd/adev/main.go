@@ -197,6 +197,8 @@ func main() {
 		runGenerateNix(args)
 	case "setup":
 		runSetup(args)
+	case "tap":
+		runTap(args)
 	case "_bwrap-browser-forward":
 		runBwrapBrowserForward(args)
 	case "_credential-refresh":
@@ -220,6 +222,7 @@ Commands:
   console [name]  Start or attach to a sandbox
   start [name]    Start a bwrap sandbox without attaching
   setup           Interactive TUI for credential configuration
+  tap             Manage the global GenAI operation collector
   stop [name]     Stop a running instance
   help            Show this help
 
@@ -230,6 +233,7 @@ Examples:
   adev console      Start/attach to sandbox for current directory
   adev console foo  Start/attach to sandbox named "foo"
   adev start        Start a bwrap sandbox in the background
+  adev tap status   Inspect the global GenAI operation collector
   adev stop         Stop the sandbox for current directory
   adev stop foo     Stop the sandbox named "foo"`)
 }

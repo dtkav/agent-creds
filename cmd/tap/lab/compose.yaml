@@ -1,0 +1,47 @@
+services:
+  tap:
+    build:
+      context: ..
+    environment:
+      AGENT_CREDS_TAP_CONFIG: /etc/agent-creds-tap/sources.json
+      AGENT_CREDS_TAP_DATA_DIR: /data
+      AGENT_CREDS_TAP_LISTEN: :8080
+    volumes:
+      - ./sources.json:/etc/agent-creds-tap/sources.json:ro
+      - tap-data:/data
+    depends_on:
+      - envoy-openai
+      - envoy-anthropic
+    networks: [tap-lab]
+
+  mock-provider:
+    build:
+      context: ..
+    command: ["mock-provider"]
+    networks: [tap-lab]
+
+  envoy-openai:
+    image: envoyproxy/envoy:v1.28-latest
+    volumes:
+      - ./envoy.yaml:/etc/envoy/envoy.yaml:ro
+    depends_on: [mock-provider]
+    networks: [tap-lab]
+
+  envoy-anthropic:
+    image: envoyproxy/envoy:v1.28-latest
+    volumes:
+      - ./envoy.yaml:/etc/envoy/envoy.yaml:ro
+    depends_on: [mock-provider]
+    networks: [tap-lab]
+
+  probe:
+    image: alpine:3.23
+    command: ["sleep", "infinity"]
+    networks: [tap-lab]
+
+volumes:
+  tap-data:
+
+networks:
+  tap-lab:
+    internal: true

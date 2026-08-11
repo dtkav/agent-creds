@@ -105,6 +105,9 @@ func (g *Generator) generateMergedConfig() error {
 		if ucfg.Credential != "" {
 			sb.WriteString(fmt.Sprintf("credential = %q\n", ucfg.Credential))
 		}
+		if ucfg.Env != "" {
+			sb.WriteString(fmt.Sprintf("env = %q\n", ucfg.Env))
+		}
 		if ucfg.Policy != "" {
 			sb.WriteString(fmt.Sprintf("policy = %q\n", ucfg.Policy))
 		}

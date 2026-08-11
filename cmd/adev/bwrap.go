@@ -647,20 +647,12 @@ func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig, att
 	}
 
 	// Mint tokens for credentialed upstreams and shape them into env vars.
-	tokenEntries, _ := mintTokens(cfg, instanceGenDir, spinner)
-	if want := expectedMintedTokens(cfg); len(tokenEntries) != want {
+	tokenEntries, infos, err := mintTokens(cfg, instanceGenDir, spinner)
+	if err != nil {
 		spinner.Stop()
-		fmt.Fprintf(os.Stderr,
-			"Error minting sandbox credentials: minted %d of %d configured tokens\n",
-			len(tokenEntries), want)
+		fmt.Fprintf(os.Stderr, "Error minting sandbox credentials: %v\n", err)
 		cleanup()
 		os.Exit(1)
-	}
-	infos := make(map[string]*CredentialInfo)
-	for _, e := range tokenEntries {
-		if info, err := vaultSSHInfo(cfg.Vault, cfg.Upstream[e.Host].Credential); err == nil {
-			infos[e.Host] = info
-		}
 	}
 	shaped := shapeTokens(tokenEntries, infos)
 	staticResolved, err := resolveStaticEnvForConsole(cfg.StaticEnv, vaultConfigYAML, scriptDir)
@@ -671,7 +663,10 @@ func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig, att
 	// sandbox.env is sourced by the setup script at every session start, so
 	// discharge refresh and hot reload keep working across restarts.
 	if err := generateSandboxEnv(instanceGenDir, shaped, staticResolved); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: generating sandbox.env: %v\n", err)
+		spinner.Stop()
+		fmt.Fprintf(os.Stderr, "Error generating sandbox credential environment: %v\n", err)
+		cleanup()
+		os.Exit(1)
 	}
 
 	// Build dns-responder if needed (runs INSIDE the instance netns on :53).

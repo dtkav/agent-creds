@@ -24,15 +24,3 @@ func TestUpstreamEnvChangeRequiresRemint(t *testing.T) {
 		t.Fatal("env override change did not invalidate the minted token environment")
 	}
 }
-
-func TestExpectedMintedTokens(t *testing.T) {
-	cfg := ProjectConfig{Upstream: map[string]UpstreamConfig{
-		"github.com":     {Credential: "/github/relay"},
-		"api.github.com": {Credential: "/github/relay"},
-		"example.com":    {},
-		"identity.local": {Credential: "/identity", ForwardToken: true},
-	}}
-	if got := expectedMintedTokens(cfg); got != 2 {
-		t.Fatalf("expectedMintedTokens = %d, want 2", got)
-	}
-}

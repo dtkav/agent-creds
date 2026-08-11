@@ -199,19 +199,19 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		}
 	}
 
-	// Mint tokens for credentialed upstreams
-	tokenEntries, _ := mintTokens(cfg, instanceGenDir, spinner)
+	// Mint every configured credential before starting the sandbox. A partial
+	// environment is never useful: anonymous reads can otherwise disguise a
+	// broken write credential.
+	tokenEntries, infos, err := mintTokens(cfg, instanceGenDir, spinner)
+	if err != nil {
+		spinner.Stop()
+		fmt.Fprintf(os.Stderr, "Error minting sandbox credentials: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Generate sandbox.env if there are credentialed upstreams or static env vars
 	sandboxEnvGenerated := false
 	if len(tokenEntries) > 0 || len(cfg.StaticEnv) > 0 {
-		// Collect credential info for token shaping
-		infos := make(map[string]*CredentialInfo)
-		for _, e := range tokenEntries {
-			if info, err := vaultSSHInfo(cfg.Vault, cfg.Upstream[e.Host].Credential); err == nil {
-				infos[e.Host] = info
-			}
-		}
 		shaped := shapeTokens(tokenEntries, infos)
 
 		// Resolve static env vars
@@ -222,7 +222,9 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		}
 
 		if err := generateSandboxEnv(instanceGenDir, shaped, staticResolved); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: generating sandbox.env: %v\n", err)
+			spinner.Stop()
+			fmt.Fprintf(os.Stderr, "Error generating sandbox credential environment: %v\n", err)
+			os.Exit(1)
 		} else {
 			sandboxEnvGenerated = true
 		}
@@ -836,26 +838,20 @@ func upstreamTokenEnv(upstream UpstreamConfig, info *CredentialInfo) string {
 	return ""
 }
 
-func expectedMintedTokens(cfg ProjectConfig) int {
-	count := 0
-	for _, upstream := range cfg.Upstream {
-		if upstream.MintsToken() {
-			count++
-		}
-	}
-	return count
-}
-
 // mintTokens mints tokens for all credentialed upstreams.
-// Returns token entries keyed by env var name, plus cached authz tokens keyed by host.
-func mintTokens(cfg ProjectConfig, instanceGenDir string, spinner *Spinner) ([]TokenEntry, map[string]string) {
+// It returns an error instead of a partial result: all sandbox engines share
+// the same fail-closed credential bootstrap.
+func mintTokens(cfg ProjectConfig, instanceGenDir string, spinner *Spinner) ([]TokenEntry, map[string]*CredentialInfo, error) {
 	authzDir := filepath.Join(instanceGenDir, "authz")
-	os.MkdirAll(authzDir, 0755)
+	if err := os.MkdirAll(authzDir, 0755); err != nil {
+		return nil, nil, fmt.Errorf("creating token cache: %w", err)
+	}
 
 	var tokens []TokenEntry
-	authzCache := make(map[string]string) // host → authz token
+	infos := make(map[string]*CredentialInfo)
 
-	for host, upstream := range cfg.Upstream {
+	for _, host := range sortedUpstreamKeys(cfg.Upstream) {
+		upstream := cfg.Upstream[host]
 		if !upstream.MintsToken() {
 			continue
 		}
@@ -864,15 +860,14 @@ func mintTokens(cfg ProjectConfig, instanceGenDir string, spinner *Spinner) ([]T
 		spinner.Status(fmt.Sprintf("minting tokens... %s", host))
 		info, err := vaultSSHInfo(cfg.Vault, upstream.Credential)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: info %s failed: %v\n", upstream.Credential, err)
-			continue
+			return nil, nil, fmt.Errorf("reading credential metadata for %s: %w", host, err)
 		}
+		infos[host] = info
 
 		// Determine primary env var name
 		envVar := upstreamTokenEnv(upstream, info)
 		if envVar == "" {
-			fmt.Fprintf(os.Stderr, "Warning: no env var for %s, skipping\n", host)
-			continue
+			return nil, nil, fmt.Errorf("credential for %s declares no environment variable", host)
 		}
 
 		// Step 2: Check for cached authz token
@@ -886,13 +881,13 @@ func mintTokens(cfg ProjectConfig, instanceGenDir string, spinner *Spinner) ([]T
 		if authzToken == "" {
 			authzToken, err = vaultSSHMint(cfg.Vault, host, upstream.Methods, upstream.Paths)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: mint %s failed: %v\n", host, err)
-				continue
+				return nil, nil, fmt.Errorf("minting %s: %w", host, err)
 			}
 			// Step 4: Cache authz token
-			os.WriteFile(cachePath, []byte(authzToken+"\n"), 0600)
+			if err := os.WriteFile(cachePath, []byte(authzToken+"\n"), 0600); err != nil {
+				return nil, nil, fmt.Errorf("caching token for %s: %w", host, err)
+			}
 		}
-		authzCache[host] = authzToken
 
 		// Step 5: Get discharge (retry with fresh token if cached token fails)
 		discharge, err := vaultSSHDischarge(cfg.Vault, authzToken)
@@ -901,16 +896,15 @@ func mintTokens(cfg ProjectConfig, instanceGenDir string, spinner *Spinner) ([]T
 			os.Remove(cachePath)
 			authzToken, err = vaultSSHMint(cfg.Vault, host, upstream.Methods, upstream.Paths)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: re-mint %s failed: %v\n", host, err)
-				continue
+				return nil, nil, fmt.Errorf("re-minting %s: %w", host, err)
 			}
-			os.WriteFile(cachePath, []byte(authzToken+"\n"), 0600)
-			authzCache[host] = authzToken
+			if err := os.WriteFile(cachePath, []byte(authzToken+"\n"), 0600); err != nil {
+				return nil, nil, fmt.Errorf("caching refreshed token for %s: %w", host, err)
+			}
 			discharge, err = vaultSSHDischarge(cfg.Vault, authzToken)
 		}
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: discharge %s failed: %v\n", host, err)
-			continue
+			return nil, nil, fmt.Errorf("discharging %s: %w", host, err)
 		}
 
 		// Step 6: Store combined token
@@ -920,7 +914,7 @@ func mintTokens(cfg ProjectConfig, instanceGenDir string, spinner *Spinner) ([]T
 		fmt.Fprintf(os.Stderr, "  %s → %s ✓\n", host, envVar)
 	}
 
-	return tokens, authzCache
+	return tokens, infos, nil
 }
 
 func sortedUpstreamKeys(m map[string]UpstreamConfig) []string {

@@ -25,6 +25,7 @@ COPY --from=builder /app/mintfs .
 COPY --from=builder /app/vault-admin .
 COPY --from=builder /app/vault-ssh .
 COPY --from=builder /app/vaultctl .
+COPY entrypoint.sh .
 COPY providers ./providers
 
 # Standard reviewed adapters ship in /app/providers. Compose can additionally
@@ -41,5 +42,6 @@ EXPOSE 8033
 # SSH port for vault-ssh
 EXPOSE 2222
 
-# Run both vault and vault-ssh
-CMD sh -c './vault & ./vault-ssh & wait'
+# Vault is the primary service. The entrypoint stops vault-ssh and exits if
+# Vault exits, so a surviving SSH process cannot keep the container "running".
+CMD ["/bin/sh", "/app/entrypoint.sh"]

@@ -8,27 +8,27 @@ plugins = ["python", "nodejs", "go", "rust", "cli-tools", "build-tools", "github
 
 nix = """
 let
-  version = "0.144.1";
+  version = "0.147.0";
   platforms = {
     "x86_64-linux" = {
       suffix = "linux-x64";
       triple = "x86_64-unknown-linux-musl";
-      hash = "sha512-HNGVI+BulrOaC/0IzBvd6EL62j7LrlbFKibrhw6hZjjCjAeUYzRB2jB4qDzXN1NfqDi6Xrvniof3kwbwab24lg==";
+      hash = "sha512-0W9MBxPpWW0cSkNqrTDN2jR7rzzT7oNMhQY5446lT2Lw5cz5yhDTck4Va9rjkQEm+HlFzP/dmEMSZbXfJsINmw==";
     };
     "aarch64-linux" = {
       suffix = "linux-arm64";
       triple = "aarch64-unknown-linux-musl";
-      hash = "sha512-451o15+XtaXCCb35t/KCyyPqXHnTPxPxtdqEYOnE3e4sH5AfnI/uVJwfdjOksMG6vRLy6R+fLvSDOMguRFLmQw==";
+      hash = "sha512-SLC1JXw2TYfr/c3HhrJubyyLelq7vTOLWVmiThFA+z0+WgzCPmaseJ/kzDD3Gge/TO7fCnnj7UcPmC0d2c8XAg==";
     };
     "x86_64-darwin" = {
       suffix = "darwin-x64";
       triple = "x86_64-apple-darwin";
-      hash = "sha512-K2g3Q3tNxzFhV0SuzO6HcsYK7EQrp/o4HyeReyhkwVrwwUPoYwyIbB0IRjHIiDzRhbKriDccid2iyF5aPqdTcg==";
+      hash = "sha512-Tb8McE5SvJIH0Vs5R6sq7u+quiC931yan2KOOl6km1OdZ82+Wi7eF5XrSFPs5CF7xCgoIK4Vs+byMbT5hN+ZUw==";
     };
     "aarch64-darwin" = {
       suffix = "darwin-arm64";
       triple = "aarch64-apple-darwin";
-      hash = "sha512-dABeDK+ATqMG54MGBd3VjpKfh5EOoqx9PKVQB2QYDaEXx3F6CdUCXue5QIMfr4OxziUj8pUcLAQyd+KFqiTUFw==";
+      hash = "sha512-BEUVkiOW7kLcRyrMLfAr/h9wF8sRVJyZDy6OHtVn6QGDXiv3BvAZVTY1Pu9xF7KdIdkYXbp4uayN0aDQQaAUJw==";
     };
   };
   platform = platforms.${pkgs.stdenv.hostPlatform.system} or

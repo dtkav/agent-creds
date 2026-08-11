@@ -187,6 +187,11 @@ func envHash(cfg ProjectConfig, scriptDir string) string {
 	// Hash agent name
 	h.Write([]byte(cfg.Sandbox.Agent))
 
+	// Hash the exact generated package expression. This catches changes to
+	// package composition itself (for example, Python withPackages semantics),
+	// even when the declarative package names did not change.
+	h.Write([]byte(renderPackagesNix(cfg)))
+
 	// Hash Nix package sets (sorted for determinism)
 	for prefix, pkgSet := range cfg.NixPackageSets {
 		var names []string

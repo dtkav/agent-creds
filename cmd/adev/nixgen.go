@@ -12,19 +12,39 @@ import (
 // Package sets come from TOML sections like [packages], [python3Packages], etc.
 // Each maps to pkgs.<name> or pkgs.<prefix>.<name> in the generated Nix.
 func GeneratePackagesNix(cfg ProjectConfig, outputPath string) error {
+	contents := renderPackagesNix(cfg)
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(outputPath, []byte(contents), 0644)
+}
+
+// renderPackagesNix is also part of the sandbox-environment cache key. Keep
+// package composition and cache invalidation tied to the same representation.
+func renderPackagesNix(cfg ProjectConfig) string {
 	// Collect unique nixpkgs attributes from all package sets
 	nixPkgs := make(map[string]bool)
+	var python3Pkgs []string
 
 	for prefix, pkgSet := range cfg.NixPackageSets {
 		for name, enabled := range pkgSet {
 			if enabled {
-				if prefix == "" {
+				if prefix == "python3Packages" {
+					python3Pkgs = append(python3Pkgs, name)
+				} else if prefix == "" {
 					nixPkgs[name] = true
 				} else {
 					nixPkgs[prefix+"."+name] = true
 				}
 			}
 		}
+	}
+	if len(python3Pkgs) > 0 {
+		// A Python package merely included beside pkgs.python3 in buildEnv is
+		// not importable: its site-packages directory never reaches sys.path.
+		// withPackages produces one interpreter with the requested modules.
+		delete(nixPkgs, "python3")
+		sort.Strings(python3Pkgs)
 	}
 
 	// Sort for deterministic output
@@ -44,6 +64,13 @@ func GeneratePackagesNix(cfg ProjectConfig, outputPath string) error {
 	for _, pkg := range pkgList {
 		sb.WriteString(fmt.Sprintf("  pkgs.%s\n", pkg))
 	}
+	if len(python3Pkgs) > 0 {
+		sb.WriteString("  (pkgs.python3.withPackages (ps: [\n")
+		for _, pkg := range python3Pkgs {
+			sb.WriteString(fmt.Sprintf("    ps.%s\n", pkg))
+		}
+		sb.WriteString("  ]))\n")
+	}
 
 	sb.WriteString("]")
 
@@ -56,11 +83,7 @@ func GeneratePackagesNix(cfg ProjectConfig, outputPath string) error {
 
 	sb.WriteString("\n")
 
-	// Write file
-	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
-		return err
-	}
-	return os.WriteFile(outputPath, []byte(sb.String()), 0644)
+	return sb.String()
 }
 
 func runGenerateNix(args []string) {

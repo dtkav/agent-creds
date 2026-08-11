@@ -18,11 +18,11 @@
         #   curl -s https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/VERSION/manifest.json
         # Ref: https://github.com/sadjow/claude-code-nix
         claudeCodeOverlay = final: prev: let
-          version = "2.1.207";
+          version = "2.1.227";
           gcs = "https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases";
           platforms = {
-            "x86_64-linux"  = { platform = "linux-x64";  hash = "sha256-hefpiKOS2Fn5CALKIfsm6J08mrUn9e0LCN85VeNNXIM="; };
-            "aarch64-linux" = { platform = "linux-arm64"; hash = "sha256-i8FKKEBlODRg83mB1yS496p8qTyYSdL+Nn4I8DOD9FQ="; };
+            "x86_64-linux"  = { platform = "linux-x64";  hash = "sha256-aDLcPxeXuJC3ERbl8tu/moP9PQSYwjW0sPnNDm5JmtY="; };
+            "aarch64-linux" = { platform = "linux-arm64"; hash = "sha256-20czVTLLyrZ6SzqxbY8/d5dr+F1Tx9efgpZTiqIr/OY="; };
           };
           meta = platforms.${system} or (throw "claude-code: unsupported system ${system}");
         in {

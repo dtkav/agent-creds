@@ -143,6 +143,7 @@ be healthy:
 $ actl vault start
 $ actl vault restart       # rebuild/recreate after code changes
 $ actl vault stop
+$ actl vault reload        # apply credential-only edits without a restart
 ```
 
 Do not invoke `docker compose up vault` directly: without the decrypted secret

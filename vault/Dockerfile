@@ -14,6 +14,7 @@ RUN CGO_ENABLED=1 go build -o mint ./cmd/mint
 RUN CGO_ENABLED=1 go build -o mintfs ./cmd/mintfs
 RUN CGO_ENABLED=1 go build -o vault-admin ./cmd/vault-admin
 RUN CGO_ENABLED=1 go build -o vault-ssh ./cmd/vault-ssh
+RUN CGO_ENABLED=0 go build -o vaultctl ./cmd/vaultctl
 
 FROM alpine:latest
 RUN apk --no-cache add ca-certificates fuse libfido2
@@ -23,6 +24,7 @@ COPY --from=builder /app/mint .
 COPY --from=builder /app/mintfs .
 COPY --from=builder /app/vault-admin .
 COPY --from=builder /app/vault-ssh .
+COPY --from=builder /app/vaultctl .
 COPY providers ./providers
 
 # Standard reviewed adapters ship in /app/providers. Compose can additionally

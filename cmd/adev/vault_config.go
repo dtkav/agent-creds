@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -127,11 +128,32 @@ func commandError(err error, output []byte) error {
 	return fmt.Errorf("%w\n%s", err, msg)
 }
 
-func waitForVaultRunning() error {
-	deadline := time.Now().Add(3 * time.Second)
+func vaultHTTPHealthy(url string) bool {
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	return vaultHTTPHealthyWithClient(client, url)
+}
+
+func vaultHTTPHealthyWithClient(client *http.Client, url string) bool {
+	response, err := client.Get(url)
+	if err != nil {
+		return false
+	}
+	response.Body.Close()
+	return response.StatusCode == http.StatusOK
+}
+
+func vaultHealthURL(url string) string {
+	url = strings.TrimRight(url, "/")
+	if strings.HasSuffix(url, "/health") {
+		return url
+	}
+	return url + "/health"
+}
+
+func waitForVaultRunning(healthURL string) error {
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		out, _ := runOutput("docker", "compose", "ps", "--status", "running")
-		if contains(string(out), "vault") {
+		if vaultHTTPHealthy(healthURL) {
 			return nil
 		}
 		time.Sleep(200 * time.Millisecond)
@@ -142,4 +164,28 @@ func waitForVaultRunning() error {
 		return fmt.Errorf("vault is not running after startup\n%s", strings.TrimSpace(string(logs)))
 	}
 	return fmt.Errorf("vault is not running after startup")
+}
+
+// reloadLocalVaultConfig streams the already-decrypted configuration through
+// docker exec stdin to Vault's loopback-only control plane. No plaintext
+// config is written to disk or placed in process arguments.
+func reloadLocalVaultConfig(vaultYAML []byte) error {
+	if len(vaultYAML) == 0 {
+		return nil
+	}
+	containerOutput, err := exec.Command("docker", "compose", "ps", "-q", "vault").Output()
+	if err != nil {
+		return fmt.Errorf("finding local Vault container: %w", err)
+	}
+	containerID := strings.TrimSpace(string(containerOutput))
+	if containerID == "" || strings.Contains(containerID, "\n") {
+		return fmt.Errorf("expected one running local Vault container")
+	}
+	cmd := exec.Command("docker", "exec", "-i", containerID, "/app/vaultctl", "reload")
+	cmd.Stdin = bytes.NewReader(vaultYAML)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return commandError(err, output)
+	}
+	return nil
 }

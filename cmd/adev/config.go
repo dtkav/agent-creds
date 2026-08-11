@@ -62,6 +62,17 @@ type VaultConfig struct {
 	SSH  string `toml:"ssh"`  // explicit ssh address (e.g. localhost:2222)
 }
 
+// HTTPAddr returns the HTTP URL for the Vault API.
+func (v VaultConfig) HTTPAddr() string {
+	if v.HTTP != "" {
+		return v.HTTP
+	}
+	if v.Host != "" {
+		return "https://" + v.Host
+	}
+	return "http://localhost:8033"
+}
+
 // VaultAddr returns the host and port for the vault gRPC service.
 // Remote: host on port 443. Local: "vault" on port 9001.
 func (v VaultConfig) VaultAddr() (host string, port int) {

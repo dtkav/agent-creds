@@ -90,12 +90,25 @@ func checkIdentity(sshAddr string) identityInfo {
 
 func checkVaultHTTP(url string) bool {
 	client := &http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Get(url)
+	return checkVaultHTTPWithClient(client, url)
+}
+
+func checkVaultHTTPWithClient(client *http.Client, url string) bool {
+	healthURL := vaultHealthURL(url)
+	resp, err := client.Get(healthURL)
 	if err != nil {
 		return false
 	}
 	resp.Body.Close()
-	return true
+	return resp.StatusCode == http.StatusOK
+}
+
+func vaultHealthURL(url string) string {
+	url = strings.TrimRight(url, "/")
+	if strings.HasSuffix(url, "/health") {
+		return url
+	}
+	return url + "/health"
 }
 
 func runStatus(cfg ProjectConfig) {

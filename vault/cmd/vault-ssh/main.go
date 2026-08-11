@@ -8,6 +8,8 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"sort"
@@ -381,69 +383,58 @@ func cmdInfo(sess ssh.Session, status string, args []string) {
 	}
 
 	credPath := args[0]
-
-	if vaultConfig == nil {
-		fmt.Fprintln(sess, "Error: Vault config not loaded")
-		return
-	}
-
-	// Look up credential by path (e.g., "/stripe/prod" maps to key "stripe/prod" or we strip leading slash)
-	lookupKey := strings.TrimPrefix(credPath, "/")
-
-	cc, ok := vaultConfig.Credentials[lookupKey]
-	if !ok {
-		fmt.Fprintf(sess, "Error: Unknown credential path: %s\n", credPath)
-		return
-	}
-
-	// Build response JSON
-	type endpointInfo struct {
-		Methods     []string `json:"methods"`
-		Paths       []string `json:"paths"`
-		Description string   `json:"description,omitempty"`
-	}
-
-	type infoResponse struct {
-		Type      string         `json:"type"`
-		EnvVars   []string       `json:"env_vars,omitempty"`
-		Hosts     []string       `json:"hosts,omitempty"`
-		Endpoints []endpointInfo `json:"endpoints,omitempty"`
-	}
-
-	resp := infoResponse{
-		Type: cc.Type,
-	}
-
-	// Collect env var names
-	if cc.Env != "" {
-		resp.EnvVars = append(resp.EnvVars, cc.Env)
-	}
-	if cc.EnvUser != "" {
-		resp.EnvVars = append(resp.EnvVars, cc.EnvUser)
-	}
-	if cc.EnvPass != "" {
-		resp.EnvVars = append(resp.EnvVars, cc.EnvPass)
-	}
-
-	// Collect hosts and endpoints from capabilities
-	if cc.Capabilities != nil {
-		resp.Hosts = cc.Capabilities.Hosts
-		for _, ep := range cc.Capabilities.Endpoints {
-			resp.Endpoints = append(resp.Endpoints, endpointInfo{
-				Methods:     ep.Methods,
-				Paths:       ep.Paths,
-				Description: ep.Description,
-			})
-		}
-	}
-
-	out, err := json.Marshal(resp)
+	out, err := fetchCredentialInfo(credPath)
 	if err != nil {
 		fmt.Fprintf(sess, "Error: %v\n", err)
 		return
 	}
-
 	fmt.Fprintln(sess, string(out))
+}
+
+func fetchCredentialInfo(credentialPath string) ([]byte, error) {
+	baseURL := strings.TrimRight(strings.TrimSpace(os.Getenv("VAULT_CONTROL_URL")), "/")
+	if baseURL == "" {
+		baseURL = "http://127.0.0.1:8034"
+	}
+	endpoint, err := url.Parse(baseURL + "/v1/credentials/info")
+	if err != nil {
+		return nil, err
+	}
+	query := endpoint.Query()
+	query.Set("path", credentialPath)
+	endpoint.RawQuery = query.Encode()
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		response, requestErr := client.Get(endpoint.String())
+		if requestErr != nil {
+			if time.Now().Before(deadline) {
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			return nil, fmt.Errorf("contacting live Vault config: %w", requestErr)
+		}
+		body, readErr := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+		response.Body.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("reading live Vault config: %w", readErr)
+		}
+		if response.StatusCode != http.StatusOK {
+			var controlError struct {
+				Error string `json:"error"`
+			}
+			if json.Unmarshal(body, &controlError) == nil && controlError.Error != "" {
+				return nil, fmt.Errorf("%s", controlError.Error)
+			}
+			return nil, fmt.Errorf("live Vault config returned %s", response.Status)
+		}
+		var info map[string]any
+		if err := json.Unmarshal(body, &info); err != nil {
+			return nil, fmt.Errorf("decoding live Vault credential info: %w", err)
+		}
+		return json.Marshal(info)
+	}
 }
 
 func cmdKeys(sess ssh.Session, userID []byte, args []string) {

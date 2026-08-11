@@ -623,19 +623,26 @@ func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig, att
 
 	// Ensure vault is running (local only)
 	if !cfg.Vault.IsRemote() {
-		out, _ := runOutput("docker", "compose", "ps", "--status", "running")
-		if len(out) == 0 || !contains(string(out), "vault") {
+		vaultHealth := vaultHealthURL(cfg.Vault.HTTPAddr())
+		if !vaultHTTPHealthy(vaultHealth) {
 			spinner.Status("starting vault...")
-			if err := runWithOutput("docker", "compose", "up", "-d", "--build", "--quiet-pull"); err != nil {
+			if err := runWithOutput("docker", "compose", "up", "-d", "--build", "--quiet-pull", "--force-recreate", "vault"); err != nil {
 				spinner.Stop()
 				fmt.Fprintf(os.Stderr, "Error starting vault: %v\n", err)
 				os.Exit(1)
 			}
-			if err := waitForVaultRunning(); err != nil {
+			if err := waitForVaultRunning(vaultHealth); err != nil {
 				spinner.Stop()
 				fmt.Fprintf(os.Stderr, "Error starting vault: %v\n", err)
 				os.Exit(1)
 			}
+		}
+		spinner.Status("reloading vault config...")
+		if err := reloadLocalVaultConfig(vaultConfigYAML); err != nil {
+			spinner.Stop()
+			fmt.Fprintf(os.Stderr, "Error reloading vault config: %v\n", err)
+			cleanup()
+			os.Exit(1)
 		}
 	}
 

@@ -28,7 +28,6 @@ import (
 	"vault/macaroon"
 	"vault/policy"
 	"vault/provider"
-	"vault/provider/jsvm"
 	"vault/sigv4"
 	"vault/vault"
 )
@@ -48,6 +47,8 @@ type authServer struct {
 	credentials map[string]configuredCredential
 	// Map of configured policy key -> trusted upstream authorizer.
 	policies map[string]policy.Authorizer
+	// Atomic configuration-derived state used by production requests.
+	runtime *runtimeStore
 	// StrictMode requires macaroon tokens for all requests (no passthrough)
 	strictMode bool
 	// Database for audit logging
@@ -60,6 +61,7 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 	contextExtensions := req.GetAttributes().GetContextExtensions()
 	routeMode := contextExtensions["agent_creds_mode"]
 	routePolicy := strings.TrimPrefix(contextExtensions["policy"], "/")
+	runtime := s.currentRuntime()
 
 	// Prefer the original target host when an upstream proxy rewrites Host.
 	host := headers["x-target-host"]
@@ -85,7 +87,7 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 	if configured := strings.TrimPrefix(contextExtensions["credential"], "/"); configured != "" {
 		credentialKey = configured
 	}
-	cred, hasConfiguredCredential := s.credentials[credentialKey]
+	cred, hasConfiguredCredential := runtime.credentials[credentialKey]
 
 	// Let the selected credential adapter understand client-specific framing.
 	// Built-in schemes remain the fallback for built-in providers and identity
@@ -234,7 +236,7 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 				},
 			}, nil
 		}
-		decision, policyErr := s.authorizePolicies(ctx, result, access, nil, false, routePolicy)
+		decision, policyErr := s.authorizePoliciesWithRuntime(runtime, ctx, result, access, nil, false, routePolicy)
 		if policyErr != nil {
 			reason := fmt.Sprintf("upstream policy failed: %v", policyErr)
 			s.logAudit("deny", access.Method, host, access.Path, reason, tokenID)
@@ -280,7 +282,7 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 			},
 		}, nil
 	}
-	decision, policyErr := s.authorizePolicies(ctx, result, access, &cred, true, routePolicy, cred.policy)
+	decision, policyErr := s.authorizePoliciesWithRuntime(runtime, ctx, result, access, &cred, true, routePolicy, cred.policy)
 	if policyErr != nil {
 		reason := fmt.Sprintf("upstream policy failed: %v", policyErr)
 		log.Printf("%s", reason)
@@ -348,6 +350,18 @@ func (s *authServer) authorizePolicies(
 	requireForConstraints bool,
 	names ...string,
 ) (policy.Decision, error) {
+	return s.authorizePoliciesWithRuntime(s.currentRuntime(), ctx, verified, access, credential, requireForConstraints, names...)
+}
+
+func (s *authServer) authorizePoliciesWithRuntime(
+	runtime *runtimeSnapshot,
+	ctx context.Context,
+	verified *macaroon.VerifyResult,
+	access *macaroon.Access,
+	credential *configuredCredential,
+	requireForConstraints bool,
+	names ...string,
+) (policy.Decision, error) {
 	constraints := make([]policy.Constraint, 0, len(verified.ApplicationConstraints))
 	for _, caveat := range verified.ApplicationConstraints {
 		constraints = append(constraints, policy.Constraint{
@@ -384,7 +398,7 @@ func (s *authServer) authorizePolicies(
 		request.CredentialType = credential.credentialType
 	}
 	for _, name := range selected {
-		authorizer := s.policies[name]
+		authorizer := runtime.policies[name]
 		if authorizer == nil {
 			return policy.Decision{}, fmt.Errorf("upstream policy %q is not configured", name)
 		}
@@ -549,105 +563,22 @@ func main() {
 	}
 	log.Printf("Loaded macaroon signing key")
 
-	warnings, err := vaultCfg.Validate()
+	initialRuntime, warnings, err := buildRuntimeSnapshot(vaultCfg, providerPaths(), providerPoolSize())
 	if err != nil {
-		log.Fatalf("Invalid vault config: %v", err)
+		log.Fatalf("Failed to build Vault runtime: %v", err)
 	}
 	for _, w := range warnings {
 		log.Printf("Warning: %s", w)
 	}
-
-	verifier := macaroon.NewVerifier(keyStore)
-
-	registry := provider.NewRegistry()
-	if err := provider.RegisterBuiltins(registry); err != nil {
-		log.Fatalf("Failed to register built-in credential providers: %v", err)
-	}
-
-	var jsSpecs []jsvm.Spec
+	runtime := newRuntimeStore(initialRuntime, providerPaths(), providerPoolSize())
+	defer runtime.Close()
 	for name, credential := range vaultCfg.Credentials {
-		if registry.Has(credential.Type) {
-			continue
-		}
-		jsSpecs = append(jsSpecs, jsvm.Spec{
-			Name:   name,
-			Type:   credential.Type,
-			Config: credential.ProviderConfig(),
-		})
-	}
-	sort.Slice(jsSpecs, func(i, j int) bool {
-		return jsSpecs[i].Name < jsSpecs[j].Name
-	})
-	var jsPolicySpecs []jsvm.PolicySpec
-	for name, configuredPolicy := range vaultCfg.Policies {
-		jsPolicySpecs = append(jsPolicySpecs, jsvm.PolicySpec{
-			Name:   name,
-			Type:   configuredPolicy.Type,
-			Config: configuredPolicy.Config(),
-		})
-	}
-	sort.Slice(jsPolicySpecs, func(i, j int) bool {
-		return jsPolicySpecs[i].Name < jsPolicySpecs[j].Name
-	})
-
-	var jsManager *jsvm.Manager
-	if len(jsSpecs) > 0 || len(jsPolicySpecs) > 0 {
-		jsManager, err = jsvm.NewManagerWithPolicies(
-			providerPaths(),
-			providerPoolSize(),
-			jsSpecs,
-			jsPolicySpecs,
-		)
-		if err != nil {
-			log.Fatalf("Failed to load JavaScript extensions: %v", err)
-		}
-	}
-
-	policies := make(map[string]policy.Authorizer, len(jsPolicySpecs))
-	for _, spec := range jsPolicySpecs {
-		policies[spec.Name] = jsManager.Policy(spec)
-		log.Printf("Loaded %s upstream policy for %s", spec.Type, spec.Name)
-	}
-
-	credentials := make(map[string]configuredCredential)
-	for name, credential := range vaultCfg.Credentials {
-		var credentialProvider provider.CredentialProvider
-		var credentialExtractor provider.CredentialExtractor
-		if registry.Has(credential.Type) {
-			credentialProvider, err = registry.Build(credential.Type, credential.ProviderConfig())
-		} else if jsManager != nil {
-			spec := jsvm.Spec{
-				Name:   name,
-				Type:   credential.Type,
-				Config: credential.ProviderConfig(),
-			}
-			credentialProvider = jsManager.Provider(spec)
-			credentialExtractor = jsManager.Extractor(spec)
-		} else {
-			err = fmt.Errorf("credential provider %q is not registered", credential.Type)
-		}
-		if err != nil {
-			log.Fatalf("Failed to configure credentials for %s: %v", name, err)
-		}
-		credentials[name] = configuredCredential{
-			name:           name,
-			credentialType: credential.Type,
-			extractor:      credentialExtractor,
-			provider:       credentialProvider,
-			policy:         strings.TrimPrefix(credential.Policy, "/"),
-		}
 		log.Printf("Loaded %s credentials for %s", credential.Type, name)
 	}
-
-	if len(credentials) == 0 {
+	if len(initialRuntime.credentials) == 0 {
 		log.Printf("Warning: No credentials configured in %s", vaultPath)
 	}
-
-	providerContext, stopProviders := context.WithCancel(context.Background())
-	defer stopProviders()
-	if jsManager != nil {
-		jsManager.StartHotReload(providerContext)
-	}
+	verifier := macaroon.NewVerifier(keyStore)
 
 	// Open database
 	database, err := db.OpenDefault()
@@ -721,6 +652,23 @@ func main() {
 		}
 	}()
 
+	// Loopback-only control plane for atomic config reload and non-secret
+	// credential metadata used by vault-ssh. It is not published by Docker.
+	controlAddr := strings.TrimSpace(os.Getenv("VAULT_CONTROL_ADDR"))
+	if controlAddr == "" {
+		controlAddr = "127.0.0.1:8034"
+	}
+	controlServer := &http.Server{
+		Addr:    controlAddr,
+		Handler: newControlHandler(runtime),
+	}
+	go func() {
+		log.Printf("Vault control server listening on http://%s", controlAddr)
+		if err := controlServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Vault control server error: %v", err)
+		}
+	}()
+
 	// Start gRPC server
 	grpcPort := os.Getenv("PORT")
 	if grpcPort == "" {
@@ -744,11 +692,10 @@ func main() {
 
 	grpcServer := grpc.NewServer()
 	authv3.RegisterAuthorizationServer(grpcServer, &authServer{
-		verifier:    verifier,
-		credentials: credentials,
-		policies:    policies,
-		strictMode:  strictMode,
-		database:    database,
+		verifier:   verifier,
+		runtime:    runtime,
+		strictMode: strictMode,
+		database:   database,
 	})
 
 	// Handle graceful shutdown
@@ -758,11 +705,12 @@ func main() {
 	go func() {
 		<-sigCh
 		log.Println("Shutting down...")
-		stopProviders()
+		runtime.Close()
 		grpcServer.GracefulStop()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		httpServer.Shutdown(ctx)
+		_ = controlServer.Shutdown(ctx)
+		_ = httpServer.Shutdown(ctx)
 	}()
 
 	log.Printf("gRPC vault server listening on %s", grpcPort)

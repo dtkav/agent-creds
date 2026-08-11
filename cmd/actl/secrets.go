@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
@@ -38,6 +39,8 @@ func runSecrets(args []string) {
 		secretsDecrypt(args[1:])
 	case "import":
 		secretsImport(args[1:])
+	case "reload":
+		secretsReload(args[1:])
 	case "env":
 		secretsEnv(args[1:])
 	case "export":
@@ -67,6 +70,7 @@ Commands:
   decrypt <path>    Decrypt vault.yaml to a file (for mounting into containers)
   import <file>     Import KEY=VALUE pairs into secrets (keyed by file path)
   env [file]        Print KEY=VALUE for secrets (default: .auth.env)
+  reload            Atomically apply vault.yaml to the running local Vault
   credentials add   Add a new credential interactively
   log               Display audit log entries
 
@@ -74,6 +78,44 @@ Import examples:
   actl vault import auth.env
   actl vault import auth.staging.env
 `)
+}
+
+func secretsReload(args []string) {
+	if len(args) != 0 {
+		fmt.Fprintln(os.Stderr, "Usage: actl vault reload")
+		os.Exit(1)
+	}
+	yamlPath := vaultYAMLPath()
+	config, err := runSops("--decrypt", yamlPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error decrypting vault.yaml: %v\n", err)
+		os.Exit(1)
+	}
+
+	containerOutput, err := exec.Command(
+		"docker", "ps",
+		"--filter", "label=com.docker.compose.project=agent-creds",
+		"--filter", "label=com.docker.compose.service=vault",
+		"--format", "{{.ID}}",
+	).Output()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error finding local Vault container: %v\n", err)
+		os.Exit(1)
+	}
+	containers := strings.Fields(string(containerOutput))
+	if len(containers) != 1 {
+		fmt.Fprintf(os.Stderr, "Error: expected one running local Vault container, found %d\n", len(containers))
+		os.Exit(1)
+	}
+
+	cmd := exec.Command("docker", "exec", "-i", containers[0], "/app/vaultctl", "reload")
+	cmd.Stdin = bytes.NewReader(config)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintln(os.Stderr, "Vault config was not changed.")
+		os.Exit(1)
+	}
 }
 
 func vaultYAMLPath() string {

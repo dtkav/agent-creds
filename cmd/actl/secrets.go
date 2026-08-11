@@ -13,6 +13,7 @@ import (
 	"filippo.io/age"
 	"github.com/zalando/go-keyring"
 	"gopkg.in/yaml.v3"
+	vaultcfg "vault/vault"
 )
 
 const (
@@ -172,6 +173,89 @@ func sopsEncrypt(plainPath string) ([]byte, error) {
 	return cmd.Output()
 }
 
+func validateVaultYAML(plaintext []byte) error {
+	config, err := vaultcfg.LoadBytes(plaintext)
+	if err != nil {
+		return err
+	}
+	if _, err := config.Validate(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// saveVaultYAML validates plaintext before encrypting it and atomically
+// replacing the saved file. A validation or encryption failure leaves the
+// existing encrypted document untouched.
+func saveVaultYAML(yamlPath string, plaintext []byte) error {
+	if err := validateVaultYAML(plaintext); err != nil {
+		return fmt.Errorf("invalid vault config: %w", err)
+	}
+
+	plainFile, err := os.CreateTemp("", "vault-save-*.yaml")
+	if err != nil {
+		return err
+	}
+	plainPath := plainFile.Name()
+	defer os.Remove(plainPath)
+	if _, err := plainFile.Write(plaintext); err != nil {
+		plainFile.Close()
+		return err
+	}
+	if err := plainFile.Close(); err != nil {
+		return err
+	}
+
+	encrypted, err := sopsEncrypt(plainPath)
+	if err != nil {
+		return fmt.Errorf("encrypting vault config: %w", err)
+	}
+
+	encryptedFile, err := os.CreateTemp(filepath.Dir(yamlPath), ".vault-*.yaml")
+	if err != nil {
+		return err
+	}
+	encryptedPath := encryptedFile.Name()
+	defer os.Remove(encryptedPath)
+	if err := encryptedFile.Chmod(0600); err != nil {
+		encryptedFile.Close()
+		return err
+	}
+	if _, err := encryptedFile.Write(encrypted); err != nil {
+		encryptedFile.Close()
+		return err
+	}
+	if err := encryptedFile.Sync(); err != nil {
+		encryptedFile.Close()
+		return err
+	}
+	if err := encryptedFile.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(encryptedPath, yamlPath); err != nil {
+		return err
+	}
+	return nil
+}
+
+func editPlaintextFile(path string) error {
+	editor := strings.TrimSpace(os.Getenv("SOPS_EDITOR"))
+	if editor == "" {
+		editor = strings.TrimSpace(os.Getenv("VISUAL"))
+	}
+	if editor == "" {
+		editor = strings.TrimSpace(os.Getenv("EDITOR"))
+	}
+	if editor == "" {
+		editor = "vi"
+	}
+	cmd := exec.Command("/bin/sh", "-c", editor+` "$@"`, "actl-vault-editor", path)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
 func vaultTemplate(signingKey, encryptionKey string) string {
 	return fmt.Sprintf(`secrets:
   vault:
@@ -225,32 +309,11 @@ func secretsInit() {
 		os.Exit(1)
 	}
 
-	// Write template to temp file, encrypt, write to final path
-	tmpFile, err := os.CreateTemp("", "vault-*.yaml")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-	tmpPath := tmpFile.Name()
-	defer os.Remove(tmpPath)
-
-	if _, err := tmpFile.WriteString(vaultTemplate(
+	plaintext := []byte(vaultTemplate(
 		base64.StdEncoding.EncodeToString(sigKey),
 		base64.StdEncoding.EncodeToString(encKey),
-	)); err != nil {
-		tmpFile.Close()
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-	tmpFile.Close()
-
-	out, err := sopsEncrypt(tmpPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error encrypting vault.yaml: %v\n", err)
-		os.Exit(1)
-	}
-
-	if err := os.WriteFile(yamlPath, out, 0600); err != nil {
+	))
+	if err := saveVaultYAML(yamlPath, plaintext); err != nil {
 		fmt.Fprintf(os.Stderr, "Error writing %s: %v\n", yamlPath, err)
 		os.Exit(1)
 	}
@@ -268,10 +331,43 @@ func secretsEdit() {
 		os.Exit(1)
 	}
 
-	if err := runSopsInteractive(yamlPath); err != nil {
+	if err := editVaultFile(yamlPath); err != nil {
 		fmt.Fprintf(os.Stderr, "Error editing vault: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func editVaultFile(yamlPath string) error {
+	plaintext, err := runSops("--decrypt", yamlPath)
+	if err != nil {
+		return fmt.Errorf("decrypting vault: %w", err)
+	}
+
+	plainFile, err := os.CreateTemp("", "vault-edit-*.yaml")
+	if err != nil {
+		return err
+	}
+	plainPath := plainFile.Name()
+	defer os.Remove(plainPath)
+	if _, err := plainFile.Write(plaintext); err != nil {
+		plainFile.Close()
+		return err
+	}
+	if err := plainFile.Close(); err != nil {
+		return err
+	}
+
+	if err := editPlaintextFile(plainPath); err != nil {
+		return err
+	}
+	edited, err := os.ReadFile(plainPath)
+	if err != nil {
+		return err
+	}
+	if err := saveVaultYAML(yamlPath, edited); err != nil {
+		return fmt.Errorf("saving vault: %w", err)
+	}
+	return nil
 }
 
 func secretsShow(args []string) {
@@ -604,36 +700,14 @@ func secretsImport(args []string) {
 		setMappingValue(groupNode, k, v)
 	}
 
-	// Write modified YAML to temp file
+	// Validate, encrypt, and atomically replace the saved config.
 	modified, err := yaml.Marshal(&doc)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error serializing vault.yaml: %v\n", err)
 		os.Exit(1)
 	}
 
-	tmpFile, err := os.CreateTemp("", "vault-*.yaml")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-	tmpPath := tmpFile.Name()
-	defer os.Remove(tmpPath)
-
-	if _, err := tmpFile.Write(modified); err != nil {
-		tmpFile.Close()
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-	tmpFile.Close()
-
-	// Re-encrypt
-	encrypted, err := sopsEncrypt(tmpPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error encrypting vault.yaml: %v\n", err)
-		os.Exit(1)
-	}
-
-	if err := os.WriteFile(yamlPath, encrypted, 0600); err != nil {
+	if err := saveVaultYAML(yamlPath, modified); err != nil {
 		fmt.Fprintf(os.Stderr, "Error writing %s: %v\n", yamlPath, err)
 		os.Exit(1)
 	}

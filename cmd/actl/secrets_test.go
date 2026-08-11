@@ -1,6 +1,9 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -13,6 +16,57 @@ func TestCredentialShowConfigAcceptsSecretReference(t *testing.T) {
 	}
 	if got := string(cfg.Token); got != "$secret:/path/to/auth.env#TOKEN" {
 		t.Fatalf("token reference = %q", got)
+	}
+}
+
+func TestValidateVaultYAMLRejectsUnpairedBasicEnvFields(t *testing.T) {
+	config := []byte(`signing_key: test-signing-key
+credentials:
+  github/example:
+    type: basic
+    env_user: GITHUB_USER
+`)
+
+	err := validateVaultYAML(config)
+	if err == nil {
+		t.Fatal("validateVaultYAML accepted an unpaired env_user")
+	}
+	if !strings.Contains(err.Error(), "env_user and env_pass must both be set or both absent") {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+}
+
+func TestValidateVaultYAMLAcceptsPairedBasicEnvFields(t *testing.T) {
+	config := []byte(`signing_key: test-signing-key
+credentials:
+  github/example:
+    type: basic
+    env_user: GITHUB_USER
+    env_pass: GITHUB_PASSWORD
+`)
+
+	if err := validateVaultYAML(config); err != nil {
+		t.Fatalf("validateVaultYAML rejected a valid config: %v", err)
+	}
+}
+
+func TestSaveVaultYAMLLeavesEncryptedFileUntouchedWhenInvalid(t *testing.T) {
+	yamlPath := filepath.Join(t.TempDir(), "vault.yaml")
+	original := []byte("existing encrypted document")
+	if err := os.WriteFile(yamlPath, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	invalid := []byte("signing_key: ''\ncredentials: {}\n")
+	if err := saveVaultYAML(yamlPath, invalid); err == nil {
+		t.Fatal("saveVaultYAML accepted an invalid config")
+	}
+	got, err := os.ReadFile(yamlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(original) {
+		t.Fatal("saveVaultYAML modified the encrypted file after validation failed")
 	}
 }
 

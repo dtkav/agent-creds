@@ -209,35 +209,14 @@ func credentialsAdd(args []string) {
 		credNode,
 	)
 
-	// Write modified YAML to temp file, re-encrypt
+	// Validate, encrypt, and atomically replace the saved config.
 	modified, err := yaml.Marshal(&doc)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error serializing vault.yaml: %v\n", err)
 		os.Exit(1)
 	}
 
-	tmpFile, err := os.CreateTemp("", "vault-*.yaml")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-	tmpPath := tmpFile.Name()
-	defer os.Remove(tmpPath)
-
-	if _, err := tmpFile.Write(modified); err != nil {
-		tmpFile.Close()
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-	tmpFile.Close()
-
-	encrypted, err := sopsEncrypt(tmpPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error encrypting vault.yaml: %v\n", err)
-		os.Exit(1)
-	}
-
-	if err := os.WriteFile(yamlPath, encrypted, 0600); err != nil {
+	if err := saveVaultYAML(yamlPath, modified); err != nil {
 		fmt.Fprintf(os.Stderr, "Error writing %s: %v\n", yamlPath, err)
 		os.Exit(1)
 	}

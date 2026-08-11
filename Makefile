@@ -45,7 +45,7 @@ binaries: bin/actl bin/adev bin/aenv bin/arun bin/cdp-proxy bin/tcp-bridge bin/m
 
 
 # Root-level cmd binaries
-bin/actl: cmd/actl/main.go cmd/actl/go.mod
+bin/actl: $(wildcard cmd/actl/*.go) cmd/actl/go.mod cmd/actl/go.sum vault/vault/config.go
 	cd cmd/actl && go build -o ../../bin/actl .
 
 bin/adev: $(wildcard cmd/adev/*.go) cmd/adev/go.mod

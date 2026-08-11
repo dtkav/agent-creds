@@ -94,6 +94,13 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to read vault config: %w", err)
 	}
+	return LoadBytes(data)
+}
+
+// LoadBytes parses a vault configuration and resolves $secret references.
+// It is the in-memory counterpart to Load, used by the live reload control
+// path so decrypted configuration never needs a temporary plaintext file.
+func LoadBytes(data []byte) (*Config, error) {
 
 	// First pass: extract the secrets map
 	var raw struct {

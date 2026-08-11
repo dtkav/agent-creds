@@ -1295,6 +1295,11 @@ setpriv --ambient-caps=-all --inh-caps=-all --bounding-set=-all -- \
 	b.WriteString("    ${ENVARGS[@]+\"${ENVARGS[@]}\"} \\\n")
 	b.WriteString("    --setenv TERM \"${TERM:-xterm-256color}\" \\\n")
 	b.WriteString("    -- \\\n")
+	// Git frontends such as igit carry their own compiled-in exec path. Make
+	// every descendant use the helper directory belonging to the Git selected
+	// by the sandbox PATH, so the frontend and git-remote-* implementations
+	// cannot drift across host and Nix runtimes.
+	b.WriteString("    /bin/bash -c 'if command -v git >/dev/null 2>&1; then export GIT_EXEC_PATH=\"$(git --exec-path)\"; else unset GIT_EXEC_PATH; fi; exec \"$@\"' adev-agent \\\n")
 	for i, a := range agentArgv {
 		sep := " \\\n"
 		if i == len(agentArgv)-1 {

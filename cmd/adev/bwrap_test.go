@@ -180,6 +180,8 @@ func TestBwrapGeneratedScriptsParse(t *testing.T) {
 		"SLIRP_API='/host-only/slirp-api.sock'",
 		"--api-socket=\"$SLIRP_API\"",
 		"setpriv --ambient-caps=-all",
+		`export GIT_EXEC_PATH="$(git --exec-path)"`,
+		`exec "$@"`,
 		"'a b '\\''c'\\'''",
 	} {
 		if !strings.Contains(string(data), want) {

@@ -79,12 +79,17 @@ func startBrowserForwardTCP(bindIP string, port int, targets []BrowserTargetConf
 			time.Sleep(100 * time.Millisecond)
 		}
 
-		cmd := exec.Command("xdg-open", rawURL)
-		if err := cmd.Start(); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		cmd := hostBrowserCommand(rawURL)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			detail := strings.TrimSpace(string(output))
+			if detail == "" {
+				detail = err.Error()
+			}
+			fmt.Fprintf(os.Stderr, "[browser-fwd] opening host browser: %s\n", detail)
+			http.Error(w, detail, http.StatusInternalServerError)
 			return
 		}
-		go cmd.Wait()
 
 		w.Header().Set("Connection", "close")
 		w.WriteHeader(http.StatusOK)
@@ -92,6 +97,31 @@ func startBrowserForwardTCP(bindIP string, port int, targets []BrowserTargetConf
 	}))
 
 	return &ForwardState{Listener: listener}, nil
+}
+
+// hostBrowserCommand must not inherit the sandbox's browser bridge. adev is
+// commonly launched from another adev identity, whose BROWSER points back to
+// /run/adev-tools/open-browser. Passing that value to xdg-open makes the host
+// half recursively call the inner bridge instead of reaching the desktop.
+func hostBrowserCommand(rawURL string) *exec.Cmd {
+	cmd := exec.Command("xdg-open", rawURL)
+	cmd.Env = environmentWithout(os.Environ(), "BROWSER", "BROWSER_SOCKET_PATH")
+	return cmd
+}
+
+func environmentWithout(environment []string, names ...string) []string {
+	blocked := make(map[string]bool, len(names))
+	for _, name := range names {
+		blocked[name] = true
+	}
+	filtered := make([]string, 0, len(environment))
+	for _, item := range environment {
+		name, _, _ := strings.Cut(item, "=")
+		if !blocked[name] {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
 }
 
 // browserCallbackPorts extracts unique localhost ports from both the browser

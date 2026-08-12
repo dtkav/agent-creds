@@ -15,5 +15,8 @@ if [ ! -S "$sock" ]; then
     exit 1
 fi
 
-# Use -G --data-urlencode so curl properly encodes the URL parameter
-curl -sf -G --data-urlencode "url=$url" --unix-socket "$sock" "http://localhost/open" >/dev/null 2>&1 &
+# Keep this synchronous so a denied target, dead host opener, or unavailable
+# OAuth callback is reported to the agent instead of looking like success.
+exec curl --fail --silent --show-error --max-time 15 \
+    -G --data-urlencode "url=$url" \
+    --unix-socket "$sock" "http://localhost/open"

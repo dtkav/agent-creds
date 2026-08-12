@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -16,6 +18,26 @@ func TestBrowserCallbackPorts(t *testing.T) {
 	}
 	if got := browserCallbackPorts("https://example.com/?redirect_uri=https%3A%2F%2Fremote.example%3A4444%2Fcallback"); len(got) != 0 {
 		t.Fatalf("remote callback ports = %v, want none", got)
+	}
+}
+
+func TestHostBrowserCommandDoesNotReenterSandboxBridge(t *testing.T) {
+	t.Setenv("BROWSER", "/run/adev-tools/open-browser")
+	t.Setenv("BROWSER_SOCKET_PATH", "/run/adev-forward/browser.sock")
+	t.Setenv("DISPLAY", ":99")
+
+	cmd := hostBrowserCommand("https://claude.ai/oauth/authorize?test=1")
+	if cmd.Path != "xdg-open" && !strings.HasSuffix(cmd.Path, "/xdg-open") {
+		t.Fatalf("browser command = %q, want xdg-open", cmd.Path)
+	}
+	for _, item := range cmd.Env {
+		if strings.HasPrefix(item, "BROWSER=") ||
+			strings.HasPrefix(item, "BROWSER_SOCKET_PATH=") {
+			t.Fatalf("host browser inherited sandbox bridge: %q", item)
+		}
+	}
+	if !slices.Contains(cmd.Env, "DISPLAY="+os.Getenv("DISPLAY")) {
+		t.Fatalf("host browser lost desktop environment: %q", cmd.Env)
 	}
 }
 

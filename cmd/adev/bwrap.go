@@ -812,7 +812,7 @@ func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig, att
 		}
 	}
 	if cfg.TapEnabled {
-		if err := registerTapSource(scriptDir, slug, cfg.Sandbox.Agent); err != nil {
+		if err := registerTapSource(scriptDir, workDir, slug); err != nil {
 			spinner.Stop()
 			fmt.Fprintf(os.Stderr, "Error attaching traffic tap: %v\n", err)
 			cleanup()

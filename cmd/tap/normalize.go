@@ -27,6 +27,7 @@ const (
 
 type traceState struct {
 	source         string
+	agentName      string
 	traceID        string
 	started        time.Time
 	lastSeen       time.Time
@@ -66,7 +67,7 @@ func NewNormalizer(store *Store, hub *Hub) *Normalizer {
 }
 
 func (n *Normalizer) Consume(
-	sourceID, agent string, captureID uint64, envelope json.RawMessage,
+	sourceID, agentID, agentName string, captureID uint64, envelope json.RawMessage,
 ) {
 	segment, err := streamedSegment(envelope)
 	if err != nil {
@@ -86,7 +87,8 @@ func (n *Normalizer) Consume(
 	state := n.traces[key]
 	if state == nil {
 		state = &traceState{
-			source: agent, traceID: traceID, started: now, lastSeen: now,
+			source: agentID, agentName: agentName, traceID: traceID,
+			started: now, lastSeen: now,
 		}
 		n.traces[key] = state
 	}
@@ -290,7 +292,8 @@ func (s *traceState) normalized(force bool, n *Normalizer) (*Operation, bool) {
 		outcome = "overflow"
 	}
 	return &Operation{
-		Source: s.source, Provider: s.provider, Operation: s.operation,
+		Source: s.source, AgentID: s.source, AgentName: s.agentName,
+		Provider: s.provider, Operation: s.operation,
 		Model: s.model, StartedAt: startedAt, EndedAt: endedAt,
 		DurationMS: durationMS, StatusCode: s.statusCode, Outcome: outcome,
 		InputTokens: usage.input, OutputTokens: usage.output,

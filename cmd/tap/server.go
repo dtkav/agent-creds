@@ -133,6 +133,8 @@ func (s *Server) exportJSONL(w http.ResponseWriter, _ *http.Request) {
 			"name":      "gen_ai.client.operation",
 			"attributes": map[string]any{
 				"agent_creds.source":             op.Source,
+				"agent_creds.agent_id":           op.AgentID,
+				"agent_creds.agent_name":         op.AgentName,
 				"gen_ai.operation.name":          op.Operation,
 				"gen_ai.provider.name":           op.Provider,
 				"gen_ai.request.model":           op.Model,
@@ -184,7 +186,8 @@ func (s *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintln(w, "# HELP agent_creds_tap_operation_duration_seconds Total duration of normalized operations.")
 	fmt.Fprintln(w, "# TYPE agent_creds_tap_operation_duration_seconds counter")
 	for _, row := range rows {
-		labels := fmt.Sprintf("provider=%q,model=%q,outcome=%q",
+		labels := fmt.Sprintf("agent_id=%q,agent_name=%q,provider=%q,model=%q,outcome=%q",
+			metricLabel(row.AgentID), metricLabel(row.AgentName),
 			metricLabel(row.Provider), metricLabel(row.Model), metricLabel(row.Outcome))
 		fmt.Fprintf(w, "agent_creds_tap_operations_total{%s} %d\n", labels, row.Operations)
 		for direction, value := range map[string]int64{
@@ -248,7 +251,8 @@ h1{font:600 20px system-ui;margin:0}.status{color:#8f98a8}.ok{color:#53d18b}.bad
 <script>
 const root=document.getElementById("ops"),statusEl=document.getElementById("status");
 function add(op){const row=document.createElement("div");row.className="op";
-const cells=[[new Date(op.ended_at).toLocaleTimeString(),"dim"],[op.source,""],[op.provider+" · "+op.operation,""],[op.model,"dim"],[op.duration_ms+" ms","dim"],[op.input_tokens+" / "+op.output_tokens,"tokens"]];
+const identity=op.agent_name?op.agent_name+" · "+op.agent_id:op.agent_id||op.source;
+const cells=[[new Date(op.ended_at).toLocaleTimeString(),"dim"],[identity,""],[op.provider+" · "+op.operation,""],[op.model,"dim"],[op.duration_ms+" ms","dim"],[op.input_tokens+" / "+op.output_tokens,"tokens"]];
 for(const [value,cls] of cells){const span=document.createElement("span");span.className=cls;span.textContent=value;span.title=value;row.appendChild(span)}
 root.insertBefore(row,root.children[1]);while(root.children.length>501)root.lastChild.remove()}
 fetch("/api/operations").then(r=>r.json()).then(ops=>ops.reverse().forEach(add));

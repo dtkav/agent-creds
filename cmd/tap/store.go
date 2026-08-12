@@ -11,6 +11,8 @@ import (
 type Operation struct {
 	ID               int64  `json:"id"`
 	Source           string `json:"source"`
+	AgentID          string `json:"agent_id"`
+	AgentName        string `json:"agent_name"`
 	Provider         string `json:"provider"`
 	Operation        string `json:"operation"`
 	Model            string `json:"model"`
@@ -71,26 +73,56 @@ CREATE TABLE IF NOT EXISTS operations (
 	cache_write_tokens INTEGER NOT NULL,
 	reasoning_tokens INTEGER NOT NULL,
 	request_bytes INTEGER NOT NULL,
-	response_bytes INTEGER NOT NULL
+	response_bytes INTEGER NOT NULL,
+	agent_name TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS operations_ended_at ON operations(ended_at DESC);
 CREATE INDEX IF NOT EXISTS operations_source ON operations(source, ended_at DESC);
 `)
+	if err != nil {
+		return err
+	}
+	rows, err := s.db.Query(`PRAGMA table_info(operations)`)
+	if err != nil {
+		return err
+	}
+	hasAgentName := false
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, dataType string
+		var defaultValue any
+		if err := rows.Scan(
+			&cid, &name, &dataType, &notNull, &defaultValue, &primaryKey,
+		); err != nil {
+			rows.Close()
+			return err
+		}
+		hasAgentName = hasAgentName || name == "agent_name"
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if !hasAgentName {
+		_, err = s.db.Exec(`ALTER TABLE operations ADD COLUMN agent_name TEXT NOT NULL DEFAULT ''`)
+	}
 	return err
 }
 
 func (s *Store) Insert(op *Operation) error {
+	if op.AgentID == "" {
+		op.AgentID = op.Source
+	}
 	result, err := s.db.Exec(`
 INSERT INTO operations (
 	source, provider, operation_name, model, started_at, ended_at,
 	duration_ms, status_code, outcome, input_tokens, output_tokens,
 	cache_read_tokens, cache_write_tokens, reasoning_tokens,
-	request_bytes, response_bytes
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	request_bytes, response_bytes, agent_name
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		op.Source, op.Provider, op.Operation, op.Model, op.StartedAt, op.EndedAt,
 		op.DurationMS, op.StatusCode, op.Outcome, op.InputTokens, op.OutputTokens,
 		op.CacheReadTokens, op.CacheWriteTokens, op.ReasoningTokens,
-		op.RequestBytes, op.ResponseBytes)
+		op.RequestBytes, op.ResponseBytes, op.AgentName)
 	if err != nil {
 		return err
 	}
@@ -106,7 +138,7 @@ func (s *Store) Recent(limit int) ([]Operation, error) {
 SELECT id, source, provider, operation_name, model, started_at, ended_at,
 	duration_ms, status_code, outcome, input_tokens, output_tokens,
 	cache_read_tokens, cache_write_tokens, reasoning_tokens,
-	request_bytes, response_bytes
+	request_bytes, response_bytes, agent_name
 FROM operations
 WHERE NOT (input_tokens = 0 AND output_tokens = 0 AND duration_ms >= 300000)
 ORDER BY id DESC LIMIT ?`, limit)
@@ -122,16 +154,19 @@ ORDER BY id DESC LIMIT ?`, limit)
 			&op.StartedAt, &op.EndedAt, &op.DurationMS, &op.StatusCode,
 			&op.Outcome, &op.InputTokens, &op.OutputTokens,
 			&op.CacheReadTokens, &op.CacheWriteTokens, &op.ReasoningTokens,
-			&op.RequestBytes, &op.ResponseBytes,
+			&op.RequestBytes, &op.ResponseBytes, &op.AgentName,
 		); err != nil {
 			return nil, err
 		}
+		op.AgentID = op.Source
 		operations = append(operations, op)
 	}
 	return operations, rows.Err()
 }
 
 type MetricRow struct {
+	AgentID          string
+	AgentName        string
 	Provider         string
 	Model            string
 	Outcome          string
@@ -146,12 +181,12 @@ type MetricRow struct {
 
 func (s *Store) Metrics() ([]MetricRow, error) {
 	rows, err := s.db.Query(`
-SELECT provider, model, outcome, COUNT(*),
+SELECT source, agent_name, provider, model, outcome, COUNT(*),
 	SUM(input_tokens), SUM(output_tokens), SUM(cache_read_tokens),
 	SUM(cache_write_tokens), SUM(reasoning_tokens), SUM(duration_ms)
 FROM operations
 WHERE NOT (input_tokens = 0 AND output_tokens = 0 AND duration_ms >= 300000)
-GROUP BY provider, model, outcome`)
+GROUP BY source, agent_name, provider, model, outcome`)
 	if err != nil {
 		return nil, err
 	}
@@ -160,6 +195,7 @@ GROUP BY provider, model, outcome`)
 	for rows.Next() {
 		var row MetricRow
 		if err := rows.Scan(
+			&row.AgentID, &row.AgentName,
 			&row.Provider, &row.Model, &row.Outcome, &row.Operations,
 			&row.InputTokens, &row.OutputTokens, &row.CacheReadTokens,
 			&row.CacheWriteTokens, &row.ReasoningTokens, &row.DurationMS,

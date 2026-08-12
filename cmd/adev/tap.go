@@ -136,10 +136,11 @@ func buildTapImage(scriptDir string, spinner *Spinner) error {
 }
 
 type tapSource struct {
-	ID       string `json:"id"`
-	Agent    string `json:"agent,omitempty"`
-	AdminURL string `json:"admin_url"`
-	ConfigID string `json:"config_id"`
+	ID        string `json:"id"`
+	AgentID   string `json:"agent_id,omitempty"`
+	AgentName string `json:"agent_name,omitempty"`
+	AdminURL  string `json:"admin_url"`
+	ConfigID  string `json:"config_id"`
 }
 
 func prepareGlobalTapDirectories(scriptDir string) error {
@@ -175,11 +176,14 @@ func writeTapSourcesConfig(scriptDir string) error {
 		if err := json.Unmarshal(data, &source); err != nil {
 			return fmt.Errorf("reading tap source %s: %w", entry.Name(), err)
 		}
-		// Registrations created before agent attribution was added can be
-		// upgraded from the already-generated instance config. This keeps the
-		// global service automatic and avoids adding project-local tap config.
-		if source.Agent == "" {
-			source.Agent = tapSourceAgent(scriptDir, source.ID)
+		// Registrations created before agent attribution was added are upgraded
+		// from the instance slug. This keeps attribution automatic and avoids
+		// adding project-local tap configuration.
+		if source.AgentID == "" {
+			source.AgentID = tapSourceAgentID(source.ID)
+		}
+		if source.AgentName == "" {
+			source.AgentName = resolveTapAgentName("", source.AgentID)
 		}
 		sources = append(sources, source)
 	}
@@ -212,22 +216,24 @@ func prepareTapSourceRuntime(scriptDir, slug string) error {
 	return nil
 }
 
-func registerTapSource(scriptDir, slug, agent string) error {
+func registerTapSource(scriptDir, workDir, slug string) error {
 	if err := waitForTapAdminSocket(scriptDir, slug); err != nil {
 		return err
 	}
-	return writeTapSourceRegistration(scriptDir, slug, agent)
+	return writeTapSourceRegistration(scriptDir, workDir, slug)
 }
 
-func writeTapSourceRegistration(scriptDir, slug, agent string) error {
+func writeTapSourceRegistration(scriptDir, workDir, slug string) error {
 	if err := prepareGlobalTapDirectories(scriptDir); err != nil {
 		return err
 	}
+	agentID := tapSourceAgentID(slug)
 	source := tapSource{
-		ID:       slug,
-		Agent:    strings.TrimSpace(agent),
-		AdminURL: "unix:///run/adev-tap/" + slug + "/admin.sock",
-		ConfigID: tapConfigID,
+		ID:        slug,
+		AgentID:   agentID,
+		AgentName: resolveTapAgentName(workDir, agentID),
+		AdminURL:  "unix:///run/adev-tap/" + slug + "/admin.sock",
+		ConfigID:  tapConfigID,
 	}
 	data, err := json.MarshalIndent(source, "", "  ")
 	if err != nil {
@@ -239,17 +245,74 @@ func writeTapSourceRegistration(scriptDir, slug, agent string) error {
 	return writeTapSourcesConfig(scriptDir)
 }
 
-func tapSourceAgent(scriptDir, slug string) string {
-	var config struct {
-		Sandbox struct {
-			Agent string `toml:"agent"`
-		} `toml:"sandbox"`
+func tapSourceAgentID(slug string) string {
+	if rest, ok := strings.CutPrefix(slug, "mq-"); ok {
+		if agentID, _, ok := strings.Cut(rest, "-"); ok && agentID != "" {
+			return agentID
+		}
 	}
-	path := filepath.Join(scriptDir, "generated", "instances", slug, "merged-config.toml")
-	if _, err := toml.DecodeFile(path, &config); err != nil {
+	return slug
+}
+
+func resolveTapAgentName(workDir, agentID string) string {
+	for _, manifest := range tapAgentManifests(workDir, agentID) {
+		if name := tapAgentNameFromManifest(manifest, agentID); name != "" {
+			return name
+		}
+	}
+	return ""
+}
+
+func tapAgentManifests(workDir, agentID string) []string {
+	var paths []string
+	if workDir != "" {
+		paths = append(paths, filepath.Join(workDir, "sandbox-manifest.json"))
+	}
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		return paths
+	}
+	watchDir := filepath.Join(cacheDir, "merge-queue", "watchd")
+	engines, err := os.ReadDir(watchDir)
+	if err != nil {
+		return paths
+	}
+	for _, engine := range engines {
+		if engine.IsDir() {
+			paths = append(paths, filepath.Join(
+				watchDir, engine.Name(), agentID, "sandbox-manifest.json"))
+		}
+	}
+	return paths
+}
+
+func tapAgentNameFromManifest(path, agentID string) string {
+	var manifest struct {
+		Mounts []struct {
+			Source string `json:"source"`
+		} `json:"mounts"`
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || json.Unmarshal(data, &manifest) != nil {
 		return ""
 	}
-	return strings.TrimSpace(config.Sandbox.Agent)
+	for _, mount := range manifest.Mounts {
+		root := strings.TrimSpace(mount.Source)
+		if root == "" {
+			continue
+		}
+		var identities map[string]struct {
+			Name string `json:"name"`
+		}
+		data, err := os.ReadFile(filepath.Join(root, ".claude", "identities.json"))
+		if err != nil || json.Unmarshal(data, &identities) != nil {
+			continue
+		}
+		if identity, ok := identities[agentID]; ok {
+			return strings.TrimSpace(identity.Name)
+		}
+	}
+	return ""
 }
 
 func waitForTapAdminSocket(scriptDir, slug string) error {

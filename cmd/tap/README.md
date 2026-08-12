@@ -13,10 +13,10 @@ codings (`gzip`, `deflate`, `br`, and `zstd`), recognizes terminal provider
 usage events, and then discards the transport material. Partial traces are
 discarded when an Envoy source disconnects; they are never carried into a new
 tap session or represented as completed operations.
-SQLite has an allowlisted `operations` schema containing source, provider,
-operation, model, timing, status, byte counts, and provider-reported token
-counts. It has no columns for headers, URLs, request/response bodies, or generic
-JSON.
+SQLite has an allowlisted `operations` schema containing agent ID, resolved
+agent name, provider, operation, model, timing, status, byte counts, and
+provider-reported token counts. It has no columns for headers, URLs,
+request/response bodies, or generic JSON.
 
 The UI is at `/`, the Server-Sent Events endpoint is at
 `/api/operations/stream`, normalized operations are at `/api/operations`,

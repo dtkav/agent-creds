@@ -45,7 +45,7 @@ func TestSourceManagerReconcileAddsAndRemovesSources(t *testing.T) {
 	}
 }
 
-func TestLoadConfigDefaultsMissingAgentWithoutExposingInstanceID(t *testing.T) {
+func TestLoadConfigDefaultsMissingAgentIDToSourceID(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sources.json")
 	data := []byte(`{"sources":[{"id":"mq-private-session","admin_url":"unix:///tmp/admin.sock"}]}`)
 	if err := os.WriteFile(path, data, 0600); err != nil {
@@ -55,8 +55,8 @@ func TestLoadConfigDefaultsMissingAgentWithoutExposingInstanceID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := config.Sources[0].Agent; got != "unknown" {
-		t.Fatalf("legacy source agent = %q, want unknown", got)
+	if got := config.Sources[0].AgentID; got != "mq-private-session" {
+		t.Fatalf("legacy source agent ID = %q, want source ID", got)
 	}
 }
 

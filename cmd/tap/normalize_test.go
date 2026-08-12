@@ -39,7 +39,7 @@ func TestNormalizerPersistsOnlyAllowlistedOperationData(t *testing.T) {
 		envelope, _ := json.Marshal(map[string]any{
 			"http_streamed_trace_segment": mergeTraceID(segment),
 		})
-		normalizer.Consume("instance-a", "codex", 1, envelope)
+		normalizer.Consume("instance-a", "0m62fua8t3xk2sl", "Dispatch", 1, envelope)
 	}
 	operations, err := store.Recent(10)
 	if err != nil {
@@ -50,7 +50,8 @@ func TestNormalizerPersistsOnlyAllowlistedOperationData(t *testing.T) {
 	}
 	op := operations[0]
 	if op.Provider != "openai" || op.Model != "gpt-test" ||
-		op.Source != "codex" ||
+		op.Source != "0m62fua8t3xk2sl" || op.AgentID != "0m62fua8t3xk2sl" ||
+		op.AgentName != "Dispatch" ||
 		op.InputTokens != 17 || op.OutputTokens != 5 ||
 		op.CacheReadTokens != 2 || op.ReasoningTokens != 1 {
 		t.Fatalf("unexpected normalized operation: %+v", op)
@@ -226,5 +227,5 @@ func consumeTestSegment(
 	if err != nil {
 		t.Fatal(err)
 	}
-	normalizer.Consume(source, source, captureID, envelope)
+	normalizer.Consume(source, source, "", captureID, envelope)
 }

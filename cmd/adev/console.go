@@ -141,14 +141,14 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	spinner.Start()
 
 	cleanup := func() {
+		if cfg.TapEnabled {
+			_ = unregisterTapSource(scriptDir, slug)
+		}
 		run("docker", "rm", "-f", sandboxName)
 		run("docker", "rm", "-f", containerName)
 		run("docker", "rm", "-f", legacyTapName)
 		run("docker", "rm", "-f", envoyName)
 		run("docker", "network", "rm", networkName)
-		if cfg.TapEnabled {
-			_ = unregisterTapSource(scriptDir, slug)
-		}
 	}
 
 	// Handle cleanup on interrupt
@@ -175,7 +175,7 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		os.Exit(1)
 	}
 	if cfg.TapEnabled {
-		if err := registerTapSource(scriptDir, slug); err != nil {
+		if err := prepareTapSourceRuntime(scriptDir, slug); err != nil {
 			spinner.Stop()
 			fmt.Fprintf(os.Stderr, "Error preparing traffic tap: %v\n", err)
 			os.Exit(1)
@@ -438,6 +438,14 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		if err := run("docker", "network", "connect", network, envoyName); err != nil {
 			spinner.Stop()
 			fmt.Fprintf(os.Stderr, "Error connecting envoy to upstream network %s: %v\n", network, err)
+			cleanup()
+			os.Exit(1)
+		}
+	}
+	if cfg.TapEnabled {
+		if err := registerTapSource(scriptDir, slug); err != nil {
+			spinner.Stop()
+			fmt.Fprintf(os.Stderr, "Error attaching traffic tap: %v\n", err)
 			cleanup()
 			os.Exit(1)
 		}

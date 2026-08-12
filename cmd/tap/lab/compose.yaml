@@ -2,6 +2,7 @@ services:
   tap:
     build:
       context: ..
+    user: "0:0"
     environment:
       AGENT_CREDS_TAP_CONFIG: /etc/agent-creds-tap/sources.json
       AGENT_CREDS_TAP_DATA_DIR: /data
@@ -9,6 +10,8 @@ services:
     volumes:
       - ./sources.json:/etc/agent-creds-tap/sources.json:ro
       - tap-data:/data
+      - ${TAP_LAB_RUNTIME}/openai:/run/adev-tap/openai:ro
+      - ${TAP_LAB_RUNTIME}/anthropic:/run/adev-tap/anthropic:ro
     depends_on:
       - envoy-openai
       - envoy-anthropic
@@ -24,6 +27,7 @@ services:
     image: envoyproxy/envoy:v1.28-latest
     volumes:
       - ./envoy.yaml:/etc/envoy/envoy.yaml:ro
+      - ${TAP_LAB_RUNTIME}/openai:/run/adev-tap
     depends_on: [mock-provider]
     networks: [tap-lab]
 
@@ -31,6 +35,7 @@ services:
     image: envoyproxy/envoy:v1.28-latest
     volumes:
       - ./envoy.yaml:/etc/envoy/envoy.yaml:ro
+      - ${TAP_LAB_RUNTIME}/anthropic:/run/adev-tap
     depends_on: [mock-provider]
     networks: [tap-lab]
 

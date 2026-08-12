@@ -6,9 +6,13 @@ started instance registers automatically; there is no project-level opt-in. It
 is not in the agent's request path and has no Vault mount, so collector failure
 cannot affect agent networking or credential exchange.
 
-The service attaches to each explicitly configured Envoy admin tap endpoint and
-reassembles streamed bodies in bounded memory only. It recognizes OpenAI
-Responses and Anthropic Messages events, then discards the transport material.
+The service attaches to each explicitly configured Envoy admin tap endpoint
+over HTTP/2 and captures only OpenAI Responses and Anthropic Messages paths. It
+reassembles streamed bodies in bounded memory, reverses standard HTTP content
+codings (`gzip`, `deflate`, `br`, and `zstd`), recognizes terminal provider
+usage events, and then discards the transport material. Partial traces are
+discarded when an Envoy source disconnects; they are never carried into a new
+tap session or represented as completed operations.
 SQLite has an allowlisted `operations` schema containing source, provider,
 operation, model, timing, status, byte counts, and provider-reported token
 counts. It has no columns for headers, URLs, request/response bodies, or generic
@@ -35,8 +39,9 @@ Configuration is JSON:
 }
 ```
 
-`adev` generates and reloads this fan-in configuration as instances start and
-stop. The hardened global container receives read-only access to the
+`adev` registers an instance only after its Envoy admin socket is ready, then
+generates and reloads this fan-in configuration as instances start and stop.
+The hardened global container receives read-only access to the
 shared tree of private Envoy admin sockets and writes one persistent database.
 Its UI is published on host loopback only over a dedicated, non-masqueraded
 Docker network. It receives no Vault configuration, macaroons, provider

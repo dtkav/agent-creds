@@ -2,15 +2,22 @@ package main
 
 import (
 	"bytes"
+	"compress/flate"
+	"compress/gzip"
+	"compress/zlib"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/andybalholm/brotli"
+	"github.com/klauspost/compress/zstd"
 )
 
 const (
@@ -19,19 +26,27 @@ const (
 )
 
 type traceState struct {
-	source        string
-	traceID       string
-	started       time.Time
-	lastSeen      time.Time
-	provider      string
-	operation     string
-	model         string
-	statusCode    int
-	requestBytes  int64
-	responseBytes int64
-	requestBody   bytes.Buffer
-	responseBody  bytes.Buffer
-	overflowed    bool
+	source         string
+	traceID        string
+	started        time.Time
+	lastSeen       time.Time
+	provider       string
+	operation      string
+	model          string
+	statusCode     int
+	requestCoding  string
+	responseCoding string
+	requestBytes   int64
+	responseBytes  int64
+	requestBody    bytes.Buffer
+	responseBody   bytes.Buffer
+	overflowed     bool
+}
+
+type traceKey struct {
+	source    string
+	captureID uint64
+	traceID   string
 }
 
 type Normalizer struct {
@@ -39,17 +54,18 @@ type Normalizer struct {
 	hub   *Hub
 
 	mu     sync.Mutex
-	traces map[string]*traceState
+	traces map[traceKey]*traceState
 
 	invalidSegments atomic.Uint64
 	overflowed      atomic.Uint64
+	discarded       atomic.Uint64
 }
 
 func NewNormalizer(store *Store, hub *Hub) *Normalizer {
-	return &Normalizer{store: store, hub: hub, traces: make(map[string]*traceState)}
+	return &Normalizer{store: store, hub: hub, traces: make(map[traceKey]*traceState)}
 }
 
-func (n *Normalizer) Consume(source string, envelope json.RawMessage) {
+func (n *Normalizer) Consume(source string, captureID uint64, envelope json.RawMessage) {
 	segment, err := streamedSegment(envelope)
 	if err != nil {
 		n.invalidSegments.Add(1)
@@ -60,7 +76,7 @@ func (n *Normalizer) Consume(source string, envelope json.RawMessage) {
 		n.invalidSegments.Add(1)
 		return
 	}
-	key := source + "\x00" + traceID
+	key := traceKey{source: source, captureID: captureID, traceID: traceID}
 
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -78,27 +94,33 @@ func (n *Normalizer) Consume(source string, envelope json.RawMessage) {
 	case first(segment, "request_headers", "requestHeaders") != nil:
 		state.applyRequestHeaders(first(segment, "request_headers", "requestHeaders"))
 	case first(segment, "request_body_chunk", "requestBodyChunk") != nil:
-		chunk := bodyBytes(first(segment, "request_body_chunk", "requestBodyChunk"))
+		chunk, truncated := bodyBytes(first(segment, "request_body_chunk", "requestBodyChunk"))
 		state.requestBytes += int64(len(chunk))
 		state.appendBounded(&state.requestBody, chunk, n)
-		state.parseRequestModel()
+		if truncated {
+			state.markOverflowed(n)
+		}
+		state.parseRequestModel(n)
 	case first(segment, "response_headers", "responseHeaders") != nil:
 		state.applyResponseHeaders(first(segment, "response_headers", "responseHeaders"))
 	case first(segment, "response_body_chunk", "responseBodyChunk") != nil:
-		chunk := bodyBytes(first(segment, "response_body_chunk", "responseBodyChunk"))
+		chunk, truncated := bodyBytes(first(segment, "response_body_chunk", "responseBodyChunk"))
 		state.responseBytes += int64(len(chunk))
 		state.appendBounded(&state.responseBody, chunk, n)
-		if op, complete := state.normalized(false); complete {
+		if truncated {
+			state.markOverflowed(n)
+		}
+		if op, complete := state.normalized(false, n); complete {
 			n.finish(key, op)
 		}
 	case first(segment, "response_trailers", "responseTrailers") != nil:
-		if op, _ := state.normalized(true); op != nil {
+		if op, _ := state.normalized(true, n); op != nil {
 			n.finish(key, op)
 		}
 	}
 }
 
-func (n *Normalizer) finish(key string, op *Operation) {
+func (n *Normalizer) finish(key traceKey, op *Operation) {
 	delete(n.traces, key)
 	if op == nil || op.validate() != nil {
 		return
@@ -111,13 +133,28 @@ func (n *Normalizer) finish(key string, op *Operation) {
 	n.hub.Publish(*op)
 }
 
+// DiscardCapture removes partial traces when an Envoy admin stream ends. Trace
+// IDs are only scoped to an originating Envoy and may repeat after a new tap
+// session, so transport fragments must never cross capture generations.
+func (n *Normalizer) DiscardCapture(source string, captureID uint64) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for key := range n.traces {
+		if key.source == source && key.captureID == captureID {
+			delete(n.traces, key)
+			n.discarded.Add(1)
+		}
+	}
+}
+
 func (n *Normalizer) Reap() {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	cutoff := time.Now().Add(-traceMaxAge)
 	for key, state := range n.traces {
 		if state.lastSeen.Before(cutoff) {
-			if op, _ := state.normalized(true); op != nil {
+			op, _ := state.normalized(true, n)
+			if meaningfulIncomplete(op) {
 				if op.Outcome == "success" {
 					op.Outcome = "incomplete"
 				}
@@ -125,9 +162,19 @@ func (n *Normalizer) Reap() {
 					n.hub.Publish(*op)
 				}
 			}
+			if !meaningfulIncomplete(op) {
+				n.discarded.Add(1)
+			}
 			delete(n.traces, key)
 		}
 	}
+}
+
+func meaningfulIncomplete(op *Operation) bool {
+	if op == nil {
+		return false
+	}
+	return op.StatusCode >= 400 || op.InputTokens > 0 || op.OutputTokens > 0
 }
 
 func (s *traceState) appendBounded(dst *bytes.Buffer, chunk []byte, n *Normalizer) {
@@ -135,17 +182,25 @@ func (s *traceState) appendBounded(dst *bytes.Buffer, chunk []byte, n *Normalize
 		return
 	}
 	if dst.Len()+len(chunk) > maxTraceBodyBytes {
-		s.overflowed = true
-		s.requestBody.Reset()
-		s.responseBody.Reset()
-		n.overflowed.Add(1)
+		s.markOverflowed(n)
 		return
 	}
 	dst.Write(chunk)
 }
 
+func (s *traceState) markOverflowed(n *Normalizer) {
+	if s.overflowed {
+		return
+	}
+	s.overflowed = true
+	s.requestBody.Reset()
+	s.responseBody.Reset()
+	n.overflowed.Add(1)
+}
+
 func (s *traceState) applyRequestHeaders(value any) {
 	headers := headerMap(value)
+	s.requestCoding = headers["content-encoding"]
 	authority := headers[":authority"]
 	path := headers[":path"]
 	if parsed, err := url.Parse(path); err == nil {
@@ -164,35 +219,50 @@ func (s *traceState) applyRequestHeaders(value any) {
 }
 
 func (s *traceState) applyResponseHeaders(value any) {
-	status, _ := strconv.Atoi(headerMap(value)[":status"])
+	headers := headerMap(value)
+	status, _ := strconv.Atoi(headers[":status"])
 	s.statusCode = status
+	s.responseCoding = headers["content-encoding"]
 }
 
-func (s *traceState) parseRequestModel() {
+func (s *traceState) parseRequestModel(n *Normalizer) {
 	if s.model != "" || s.overflowed {
+		return
+	}
+	decoded, overflow := decodeContent(s.requestBody.Bytes(), s.requestCoding)
+	if overflow {
+		s.markOverflowed(n)
 		return
 	}
 	var body struct {
 		Model string `json:"model"`
 	}
-	if json.Unmarshal(s.requestBody.Bytes(), &body) == nil {
+	if json.Unmarshal(decoded, &body) == nil {
 		s.model = body.Model
 	}
 }
 
-func (s *traceState) normalized(force bool) (*Operation, bool) {
+func (s *traceState) normalized(force bool, n *Normalizer) (*Operation, bool) {
 	if s.provider == "" {
 		s.provider, s.operation = "unknown", "generate"
+	}
+	if s.provider == "unknown" {
+		return nil, force
+	}
+	body, decodedOverflow := decodeContent(s.responseBody.Bytes(), s.responseCoding)
+	if decodedOverflow {
+		s.markOverflowed(n)
 	}
 	var usage tokenUsage
 	var complete bool
 	switch s.provider {
 	case "openai":
-		usage, complete = parseOpenAI(s.responseBody.Bytes())
+		usage, complete = parseOpenAI(body)
 	case "anthropic":
-		usage, complete = parseAnthropic(s.responseBody.Bytes())
-	default:
-		complete = force
+		usage, complete = parseAnthropic(body)
+	}
+	if s.statusCode >= 400 && json.Valid(body) {
+		complete = true
 	}
 	if s.overflowed {
 		complete = force
@@ -209,7 +279,7 @@ func (s *traceState) normalized(force bool) (*Operation, bool) {
 	if s.model == "" {
 		s.model = "unknown"
 	}
-	startedAt, endedAt, durationMS := operationTimes(s.started)
+	startedAt, endedAt, durationMS := operationTimes(s.started, s.lastSeen)
 	outcome := "success"
 	if s.statusCode >= 400 {
 		outcome = "error"
@@ -373,14 +443,82 @@ func headerMap(value any) map[string]string {
 	return headers
 }
 
-func bodyBytes(value any) []byte {
+func bodyBytes(value any) ([]byte, bool) {
 	object, _ := value.(map[string]any)
 	if nested, ok := object["data"].(map[string]any); ok {
 		object = nested
 	}
 	encoded := scalarString(first(object, "as_bytes", "asBytes"))
 	decoded, _ := base64.StdEncoding.DecodeString(encoded)
-	return decoded
+	truncated, _ := object["truncated"].(bool)
+	return decoded, truncated
+}
+
+// decodeContent reverses HTTP content codings while strictly bounding the
+// decoded representation. Providers commonly compress JSON and SSE responses;
+// Envoy's tap observes those bytes before an SDK decompresses them.
+func decodeContent(body []byte, contentEncoding string) ([]byte, bool) {
+	if len(body) == 0 {
+		return body, false
+	}
+	encodings := strings.Split(strings.ToLower(contentEncoding), ",")
+	decoded := body
+	for i := len(encodings) - 1; i >= 0; i-- {
+		encoding := strings.TrimSpace(encodings[i])
+		if encoding == "" || encoding == "identity" {
+			continue
+		}
+		var reader io.ReadCloser
+		switch encoding {
+		case "gzip", "x-gzip":
+			gzipReader, err := gzip.NewReader(bytes.NewReader(decoded))
+			if err != nil {
+				return nil, false
+			}
+			reader = gzipReader
+		case "deflate":
+			zlibReader, err := zlib.NewReader(bytes.NewReader(decoded))
+			if err == nil {
+				reader = zlibReader
+			} else {
+				reader = flate.NewReader(bytes.NewReader(decoded))
+			}
+		case "br":
+			reader = io.NopCloser(brotli.NewReader(bytes.NewReader(decoded)))
+		case "zstd":
+			zstdReader, err := zstd.NewReader(bytes.NewReader(decoded))
+			if err != nil {
+				return nil, false
+			}
+			reader = zstdReader.IOReadCloser()
+		default:
+			return nil, false
+		}
+		var overflow bool
+		decoded, overflow = readBounded(reader)
+		_ = reader.Close()
+		if overflow {
+			return nil, true
+		}
+		if decoded == nil {
+			return nil, false
+		}
+	}
+	return decoded, false
+}
+
+func readBounded(reader io.Reader) ([]byte, bool) {
+	decoded, err := io.ReadAll(io.LimitReader(reader, maxTraceBodyBytes+1))
+	if len(decoded) > maxTraceBodyBytes {
+		return nil, true
+	}
+	// Streaming compression readers can return useful partial output with
+	// io.ErrUnexpectedEOF. The provider parser still requires a terminal usage
+	// event, so accepting partial decoded bytes cannot finish a trace early.
+	if err != nil && len(decoded) == 0 {
+		return nil, false
+	}
+	return decoded, false
 }
 
 func scalarString(value any) string {

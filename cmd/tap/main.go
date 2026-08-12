@@ -1,6 +1,7 @@
 package main
 
 import (
+	"compress/gzip"
 	"context"
 	"errors"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -108,13 +110,28 @@ func runMockProvider() {
 	mux.HandleFunc("POST /v1/responses", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, maxTraceBodyBytes+1))
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-lab\",\"usage\":{\"input_tokens\":23,\"output_tokens\":7,\"input_tokens_details\":{\"cached_tokens\":5},\"output_tokens_details\":{\"reasoning_tokens\":2}}}}\n\ndata: [DONE]\n\n")
+		writeMockResponse(w, r, "data: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-lab\",\"usage\":{\"input_tokens\":23,\"output_tokens\":7,\"input_tokens_details\":{\"cached_tokens\":5},\"output_tokens_details\":{\"reasoning_tokens\":2}}}}\n\ndata: [DONE]\n\n")
 	})
 	mux.HandleFunc("POST /v1/messages", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, maxTraceBodyBytes+1))
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-lab\",\"usage\":{\"input_tokens\":11,\"output_tokens\":1,\"cache_creation_input_tokens\":3,\"cache_read_input_tokens\":4}}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+		writeMockResponse(w, r, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-lab\",\"usage\":{\"input_tokens\":11,\"output_tokens\":1,\"cache_creation_input_tokens\":3,\"cache_read_input_tokens\":4}}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	})
+	mux.HandleFunc("POST /telemetry", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusNoContent)
 	})
 	log.Printf("mock provider listening on %s", listen)
 	log.Fatal(http.ListenAndServe(listen, mux))
+}
+
+func writeMockResponse(w http.ResponseWriter, r *http.Request, body string) {
+	if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+		w.Header().Set("Content-Encoding", "gzip")
+		writer := gzip.NewWriter(w)
+		_, _ = io.WriteString(writer, body)
+		_ = writer.Close()
+		return
+	}
+	_, _ = io.WriteString(w, body)
 }

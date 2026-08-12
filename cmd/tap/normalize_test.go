@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/base64"
 	"encoding/json"
 	"os"
@@ -37,7 +39,7 @@ func TestNormalizerPersistsOnlyAllowlistedOperationData(t *testing.T) {
 		envelope, _ := json.Marshal(map[string]any{
 			"http_streamed_trace_segment": mergeTraceID(segment),
 		})
-		normalizer.Consume("engineer-a", envelope)
+		normalizer.Consume("engineer-a", 1, envelope)
 	}
 	operations, err := store.Recent(10)
 	if err != nil {
@@ -64,6 +66,125 @@ func TestNormalizerPersistsOnlyAllowlistedOperationData(t *testing.T) {
 	}
 }
 
+func TestNormalizerDecodesCompressedStreamingUsage(t *testing.T) {
+	path := t.TempDir() + "/operations.db"
+	store, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	normalizer := NewNormalizer(store, NewHub())
+	response := []byte(`data: {"type":"response.completed","response":{"model":"gpt-compressed","usage":{"input_tokens":1234,"output_tokens":56}}}` + "\n\n")
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	if _, err := writer.Write(response); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	segments := []map[string]any{
+		{"request_headers": map[string]any{"headers": []any{
+			map[string]any{"key": ":authority", "value": "chatgpt.com"},
+			map[string]any{"key": ":path", "value": "/backend-api/codex/responses"},
+		}}},
+		{"request_body_chunk": bodyChunk(`{"model":"gpt-compressed","input":"` + strings.Repeat("x", 4096) + `"}`)},
+		{"response_headers": map[string]any{"headers": []any{
+			map[string]any{"key": ":status", "value": "200"},
+			map[string]any{"key": "content-encoding", "value": "gzip"},
+		}}},
+	}
+	for _, segment := range segments {
+		consumeTestSegment(t, normalizer, "engineer-b", 7, segment)
+	}
+	payload := compressed.Bytes()
+	middle := len(payload) / 2
+	consumeTestSegment(t, normalizer, "engineer-b", 7,
+		map[string]any{"response_body_chunk": encodedBodyChunk(payload[:middle])})
+	consumeTestSegment(t, normalizer, "engineer-b", 7,
+		map[string]any{"response_body_chunk": encodedBodyChunk(payload[middle:])})
+
+	operations, err := store.Recent(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(operations) != 1 {
+		t.Fatalf("operations = %d, want 1", len(operations))
+	}
+	op := operations[0]
+	if op.Model != "gpt-compressed" || op.InputTokens != 1234 ||
+		op.OutputTokens != 56 || op.RequestBytes <= 4096 || op.Outcome != "success" {
+		t.Fatalf("unexpected compressed operation: %+v", op)
+	}
+}
+
+func TestNormalizerDiscardsCaptureFragmentsAcrossReconnects(t *testing.T) {
+	path := t.TempDir() + "/operations.db"
+	store, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	normalizer := NewNormalizer(store, NewHub())
+	requestHeaders := map[string]any{"request_headers": map[string]any{"headers": []any{
+		map[string]any{"key": ":authority", "value": "api.openai.com"},
+		map[string]any{"key": ":path", "value": "/v1/responses"},
+	}}}
+	consumeTestSegment(t, normalizer, "flapping-source", 1, requestHeaders)
+	consumeTestSegment(t, normalizer, "flapping-source", 1,
+		map[string]any{"request_body_chunk": bodyChunk(`{"model":"stale"}`)})
+	normalizer.DiscardCapture("flapping-source", 1)
+
+	consumeTestSegment(t, normalizer, "flapping-source", 2, requestHeaders)
+	consumeTestSegment(t, normalizer, "flapping-source", 2,
+		map[string]any{"request_body_chunk": bodyChunk(`{"model":"fresh"}`)})
+	consumeTestSegment(t, normalizer, "flapping-source", 2,
+		map[string]any{"response_headers": map[string]any{"headers": []any{
+			map[string]any{"key": ":status", "value": "200"},
+		}}})
+	consumeTestSegment(t, normalizer, "flapping-source", 2,
+		map[string]any{"response_body_chunk": bodyChunk(
+			`data: {"type":"response.completed","response":{"usage":{"input_tokens":8,"output_tokens":3}}}` + "\n\n")})
+
+	operations, err := store.Recent(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(operations) != 1 || operations[0].Model != "fresh" {
+		t.Fatalf("reconnected capture was contaminated: %+v", operations)
+	}
+}
+
+func TestNormalizerCompletesJSONProviderErrorsWithoutUsage(t *testing.T) {
+	store, err := OpenStore(t.TempDir() + "/operations.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	normalizer := NewNormalizer(store, NewHub())
+	consumeTestSegment(t, normalizer, "error-source", 1,
+		map[string]any{"request_headers": map[string]any{"headers": []any{
+			map[string]any{"key": ":authority", "value": "api.anthropic.com"},
+			map[string]any{"key": ":path", "value": "/v1/messages"},
+		}}})
+	consumeTestSegment(t, normalizer, "error-source", 1,
+		map[string]any{"response_headers": map[string]any{"headers": []any{
+			map[string]any{"key": ":status", "value": "429"},
+		}}})
+	consumeTestSegment(t, normalizer, "error-source", 1,
+		map[string]any{"response_body_chunk": bodyChunk(`{"type":"error"}`)})
+
+	operations, err := store.Recent(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(operations) != 1 || operations[0].Outcome != "error" ||
+		operations[0].StatusCode != 429 || operations[0].DurationMS >= 300000 {
+		t.Fatalf("provider error did not complete promptly: %+v", operations)
+	}
+}
+
 func TestAnthropicSSEUsage(t *testing.T) {
 	body := []byte("event: message_start\n" +
 		`data: {"type":"message_start","message":{"model":"claude-test","usage":{"input_tokens":11,"output_tokens":1,"cache_creation_input_tokens":3,"cache_read_input_tokens":4}}}` +
@@ -79,7 +200,11 @@ func TestAnthropicSSEUsage(t *testing.T) {
 }
 
 func bodyChunk(body string) map[string]any {
-	return map[string]any{"as_bytes": base64.StdEncoding.EncodeToString([]byte(body))}
+	return encodedBodyChunk([]byte(body))
+}
+
+func encodedBodyChunk(body []byte) map[string]any {
+	return map[string]any{"as_bytes": base64.StdEncoding.EncodeToString(body)}
 }
 
 func mergeTraceID(segment map[string]any) map[string]any {
@@ -88,4 +213,17 @@ func mergeTraceID(segment map[string]any) map[string]any {
 		result[key] = value
 	}
 	return result
+}
+
+func consumeTestSegment(
+	t *testing.T, normalizer *Normalizer, source string, captureID uint64, segment map[string]any,
+) {
+	t.Helper()
+	envelope, err := json.Marshal(map[string]any{
+		"http_streamed_trace_segment": mergeTraceID(segment),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	normalizer.Consume(source, captureID, envelope)
 }

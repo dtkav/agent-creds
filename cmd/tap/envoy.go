@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/net/http2"
 )
 
 type Source struct {
@@ -31,6 +34,7 @@ type Config struct {
 type sourceState struct {
 	connected  atomic.Bool
 	reconnects atomic.Uint64
+	captures   atomic.Uint64
 }
 
 type managedSource struct {
@@ -136,6 +140,16 @@ func (m *SourceManager) Status() map[string]bool {
 	return result
 }
 
+func (m *SourceManager) Reconnects() map[string]uint64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	result := make(map[string]uint64, len(m.sources))
+	for id, source := range m.sources {
+		result[id] = source.state.reconnects.Load()
+	}
+	return result
+}
+
 func (m *SourceManager) capture(ctx context.Context, source Source, state *sourceState) {
 	client, endpoint, err := sourceClient(source.AdminURL)
 	if err != nil {
@@ -146,9 +160,10 @@ func (m *SourceManager) capture(ctx context.Context, source Source, state *sourc
 		if ctx.Err() != nil {
 			return
 		}
-		err := m.captureOnce(ctx, client, endpoint, source, state)
+		captureID := state.captures.Add(1)
+		err := m.captureOnce(ctx, client, endpoint, source, state, captureID)
 		state.connected.Store(false)
-		if err != nil && !errors.Is(err, context.Canceled) {
+		if err != nil && ctx.Err() == nil && !errors.Is(err, context.Canceled) {
 			// The error is deliberately source-level only. Response bodies from
 			// Envoy admin are never logged.
 			log.Printf("tap source %q disconnected: %v", source.ID, err)
@@ -164,21 +179,15 @@ func (m *SourceManager) capture(ctx context.Context, source Source, state *sourc
 
 func (m *SourceManager) captureOnce(
 	ctx context.Context, client *http.Client, endpoint string,
-	source Source, state *sourceState,
+	source Source, state *sourceState, captureID uint64,
 ) error {
-	payload, _ := json.Marshal(map[string]any{
-		"config_id": source.ConfigID,
-		"tap_config": map[string]any{
-			"match": map[string]any{"any_match": true},
-			"output_config": map[string]any{
-				"streaming": true,
-				"sinks": []map[string]any{{
-					"format":          "JSON_BODY_AS_BYTES",
-					"streaming_admin": map[string]any{},
-				}},
-			},
-		},
-	})
+	payload, err := tapRequestPayload(source)
+	if err != nil {
+		return err
+	}
+	if m.normalizer != nil {
+		defer m.normalizer.DiscardCapture(source.ID, captureID)
+	}
 	request, err := http.NewRequestWithContext(
 		ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
@@ -201,8 +210,45 @@ func (m *SourceManager) captureOnce(
 		if err := decoder.Decode(&envelope); err != nil {
 			return err
 		}
-		m.normalizer.Consume(source.ID, envelope)
+		if m.normalizer != nil {
+			m.normalizer.Consume(source.ID, captureID, envelope)
+		}
 	}
+}
+
+func tapRequestPayload(source Source) ([]byte, error) {
+	return json.Marshal(map[string]any{
+		"config_id": source.ConfigID,
+		"tap_config": map[string]any{
+			"match": genAIRequestMatcher(),
+			"output_config": map[string]any{
+				"streaming":             true,
+				"max_buffered_rx_bytes": maxTraceBodyBytes,
+				"max_buffered_tx_bytes": maxTraceBodyBytes,
+				"sinks": []map[string]any{{
+					"format":          "JSON_BODY_AS_BYTES",
+					"streaming_admin": map[string]any{},
+				}},
+			},
+		},
+	})
+}
+
+func genAIRequestMatcher() map[string]any {
+	pathRule := func(regex string) map[string]any {
+		return map[string]any{"http_request_headers_match": map[string]any{
+			"headers": []map[string]any{{
+				"name": ":path",
+				"string_match": map[string]any{
+					"safe_regex": map[string]any{"regex": regex},
+				},
+			}},
+		}}
+	}
+	return map[string]any{"or_match": map[string]any{"rules": []map[string]any{
+		pathRule(`^.*/responses(\?.*)?$`),
+		pathRule(`^.*/messages(\?.*)?$`),
+	}}}
 }
 
 func sourceClient(adminURL string) (*http.Client, string, error) {
@@ -215,11 +261,13 @@ func sourceClient(adminURL string) (*http.Client, string, error) {
 		if socket == "." || !filepath.IsAbs(socket) {
 			return nil, "", fmt.Errorf("unix admin_url must contain an absolute socket path")
 		}
-		transport := &http.Transport{
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		// Envoy explicitly recommends HTTP/2 or TCP for long-lived /tap admin
+		// streams. HTTP/1.1 over UDS cannot reliably detect early client closes.
+		transport := &http2.Transport{
+			AllowHTTP: true,
+			DialTLSContext: func(ctx context.Context, _, _ string, _ *tls.Config) (net.Conn, error) {
 				return (&net.Dialer{Timeout: 2 * time.Second}).DialContext(ctx, "unix", socket)
 			},
-			DisableCompression: true,
 		}
 		return &http.Client{Transport: transport}, "http://envoy/tap", nil
 	}

@@ -563,12 +563,12 @@ func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig, att
 	cleanup := func() {
 		stopBwrapBrowserForward(instanceGenDir)
 		stopBwrapCDPProxy(instanceGenDir)
-		run("docker", "rm", "-f", legacyTapName)
-		run("docker", "rm", "-f", envoyName)
-		run("docker", "network", "rm", networkName)
 		if cfg.TapEnabled {
 			_ = unregisterTapSource(scriptDir, slug)
 		}
+		run("docker", "rm", "-f", legacyTapName)
+		run("docker", "rm", "-f", envoyName)
+		run("docker", "network", "rm", networkName)
 	}
 
 	sigChan := make(chan os.Signal, 1)
@@ -611,7 +611,7 @@ func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig, att
 		os.Exit(1)
 	}
 	if cfg.TapEnabled {
-		if err := registerTapSource(scriptDir, slug); err != nil {
+		if err := prepareTapSourceRuntime(scriptDir, slug); err != nil {
 			spinner.Stop()
 			fmt.Fprintf(os.Stderr, "Error preparing traffic tap: %v\n", err)
 			cleanup()
@@ -807,6 +807,14 @@ func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig, att
 		if err := run("docker", "network", "connect", network, envoyName); err != nil {
 			spinner.Stop()
 			fmt.Fprintf(os.Stderr, "Error connecting envoy to upstream network %s: %v\n", network, err)
+			cleanup()
+			os.Exit(1)
+		}
+	}
+	if cfg.TapEnabled {
+		if err := registerTapSource(scriptDir, slug); err != nil {
+			spinner.Stop()
+			fmt.Fprintf(os.Stderr, "Error attaching traffic tap: %v\n", err)
 			cleanup()
 			os.Exit(1)
 		}

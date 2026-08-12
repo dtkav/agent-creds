@@ -2,12 +2,12 @@
   "sources": [
     {
       "id": "lab-openai-envoy",
-      "admin_url": "http://envoy-openai:9901",
+      "admin_url": "unix:///run/adev-tap/openai/admin.sock",
       "config_id": "agent_creds_global_tap"
     },
     {
       "id": "lab-anthropic-envoy",
-      "admin_url": "http://envoy-anthropic:9901",
+      "admin_url": "unix:///run/adev-tap/anthropic/admin.sock",
       "config_id": "agent_creds_global_tap"
     }
   ]

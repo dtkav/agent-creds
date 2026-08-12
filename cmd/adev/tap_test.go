@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -16,6 +17,34 @@ func TestGlobalTapUIPort(t *testing.T) {
 	}
 	if got := (GlobalTapConfig{UIPort: 54321}).Port(); got != 54321 {
 		t.Fatalf("configured global tap port = %d", got)
+	}
+}
+
+func TestRegisterTapSourceWaitsForReadyAdminSocket(t *testing.T) {
+	scriptDir, err := os.MkdirTemp("/tmp", "tap-source-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(scriptDir) })
+	const slug = "ready-agent"
+	if err := prepareTapSourceRuntime(scriptDir, slug); err != nil {
+		t.Fatal(err)
+	}
+	socket := filepath.Join(tapSourceRuntimeDir(scriptDir, slug), "admin.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	if err := registerTapSource(scriptDir, slug); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(tapCollectorConfigDir(scriptDir), "sources.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), slug) {
+		t.Fatalf("ready source was not registered: %s", data)
 	}
 }
 
@@ -72,10 +101,16 @@ func TestTapAddsPrivateEnvoyAdminSocket(t *testing.T) {
 
 func TestRegisterTapSourcesWritesGlobalFanInConfig(t *testing.T) {
 	scriptDir := t.TempDir()
-	if err := registerTapSource(scriptDir, "staging-agent"); err != nil {
+	if err := prepareTapSourceRuntime(scriptDir, "staging-agent"); err != nil {
 		t.Fatal(err)
 	}
-	if err := registerTapSource(scriptDir, "review-agent"); err != nil {
+	if err := writeTapSourceRegistration(scriptDir, "staging-agent"); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareTapSourceRuntime(scriptDir, "review-agent"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTapSourceRegistration(scriptDir, "review-agent"); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(tapCollectorConfigDir(scriptDir), "sources.json"))

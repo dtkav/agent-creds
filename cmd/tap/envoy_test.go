@@ -2,7 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"net"
+	"net/http"
+	"path/filepath"
 	"testing"
+
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 )
 
 func TestSourceManagerReconcileAddsAndRemovesSources(t *testing.T) {
@@ -34,5 +41,63 @@ func TestSourceManagerReconcileAddsAndRemovesSources(t *testing.T) {
 	}
 	if _, ok := status["gamma"]; !ok {
 		t.Fatal("new source gamma was not registered")
+	}
+}
+
+func TestTapRequestUsesBoundedFullBodyStreamingForGenAIOnly(t *testing.T) {
+	payload, err := tapRequestPayload(Source{ConfigID: "test-config"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request map[string]any
+	if err := json.Unmarshal(payload, &request); err != nil {
+		t.Fatal(err)
+	}
+	tapConfig := request["tap_config"].(map[string]any)
+	output := tapConfig["output_config"].(map[string]any)
+	if output["max_buffered_rx_bytes"] != float64(maxTraceBodyBytes) ||
+		output["max_buffered_tx_bytes"] != float64(maxTraceBodyBytes) {
+		t.Fatalf("tap body limits are not %d bytes: %#v", maxTraceBodyBytes, output)
+	}
+	match := tapConfig["match"].(map[string]any)
+	if _, broad := match["any_match"]; broad {
+		t.Fatalf("tap still captures every HTTP request: %#v", match)
+	}
+	if _, ok := match["or_match"]; !ok {
+		t.Fatalf("tap has no GenAI endpoint matcher: %#v", match)
+	}
+}
+
+func TestUnixSourceClientUsesHTTP2(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "admin.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: h2c.NewHandler(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/tap" {
+				t.Errorf("request path = %q", r.URL.Path)
+			}
+			w.WriteHeader(http.StatusOK)
+		}), &http2.Server{})}
+	go func() { _ = server.Serve(listener) }()
+	defer server.Shutdown(context.Background())
+
+	client, endpoint, err := sourceClient("unix://" + socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodPost, endpoint, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.ProtoMajor != 2 {
+		t.Fatalf("Unix tap protocol = %s, want HTTP/2", response.Proto)
 	}
 }

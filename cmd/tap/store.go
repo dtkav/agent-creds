@@ -107,7 +107,9 @@ SELECT id, source, provider, operation_name, model, started_at, ended_at,
 	duration_ms, status_code, outcome, input_tokens, output_tokens,
 	cache_read_tokens, cache_write_tokens, reasoning_tokens,
 	request_bytes, response_bytes
-FROM operations ORDER BY id DESC LIMIT ?`, limit)
+FROM operations
+WHERE NOT (input_tokens = 0 AND output_tokens = 0 AND duration_ms >= 300000)
+ORDER BY id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -147,7 +149,9 @@ func (s *Store) Metrics() ([]MetricRow, error) {
 SELECT provider, model, outcome, COUNT(*),
 	SUM(input_tokens), SUM(output_tokens), SUM(cache_read_tokens),
 	SUM(cache_write_tokens), SUM(reasoning_tokens), SUM(duration_ms)
-FROM operations GROUP BY provider, model, outcome`)
+FROM operations
+WHERE NOT (input_tokens = 0 AND output_tokens = 0 AND duration_ms >= 300000)
+GROUP BY provider, model, outcome`)
 	if err != nil {
 		return nil, err
 	}
@@ -167,8 +171,10 @@ FROM operations GROUP BY provider, model, outcome`)
 	return metrics, rows.Err()
 }
 
-func operationTimes(start time.Time) (string, string, int64) {
-	end := time.Now().UTC()
+func operationTimes(start, end time.Time) (string, string, int64) {
+	if end.Before(start) {
+		end = start
+	}
 	return start.UTC().Format(time.RFC3339Nano), end.Format(time.RFC3339Nano),
 		end.Sub(start).Milliseconds()
 }

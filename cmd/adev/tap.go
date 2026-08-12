@@ -186,7 +186,7 @@ func writeTapSourcesConfig(scriptDir string) error {
 	)
 }
 
-func registerTapSource(scriptDir, slug string) error {
+func prepareTapSourceRuntime(scriptDir, slug string) error {
 	if err := prepareGlobalTapDirectories(scriptDir); err != nil {
 		return err
 	}
@@ -202,6 +202,20 @@ func registerTapSource(scriptDir, slug string) error {
 	if err := os.Remove(filepath.Join(runtimeDir, "admin.sock")); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("removing stale tap socket: %w", err)
 	}
+	return nil
+}
+
+func registerTapSource(scriptDir, slug string) error {
+	if err := waitForTapAdminSocket(scriptDir, slug); err != nil {
+		return err
+	}
+	return writeTapSourceRegistration(scriptDir, slug)
+}
+
+func writeTapSourceRegistration(scriptDir, slug string) error {
+	if err := prepareGlobalTapDirectories(scriptDir); err != nil {
+		return err
+	}
 	source := tapSource{
 		ID:       slug,
 		AdminURL: "unix:///run/adev-tap/" + slug + "/admin.sock",
@@ -215,6 +229,18 @@ func registerTapSource(scriptDir, slug string) error {
 		return err
 	}
 	return writeTapSourcesConfig(scriptDir)
+}
+
+func waitForTapAdminSocket(scriptDir, slug string) error {
+	path := filepath.Join(tapSourceRuntimeDir(scriptDir, slug), "admin.sock")
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if info, err := os.Stat(path); err == nil && info.Mode()&os.ModeSocket != 0 {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("Envoy tap admin socket for %s did not become ready within 15s", slug)
 }
 
 func unregisterTapSource(scriptDir, slug string) error {

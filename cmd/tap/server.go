@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Hub struct {
@@ -99,10 +100,15 @@ func (s *Server) stream(w http.ResponseWriter, request *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	fmt.Fprint(w, "event: ready\ndata: {}\n\n")
 	flusher.Flush()
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
 	for {
 		select {
 		case <-request.Context().Done():
 			return
+		case <-heartbeat.C:
+			fmt.Fprint(w, ": keepalive\n\n")
+			flusher.Flush()
 		case operation := <-events:
 			data, _ := json.Marshal(operation)
 			fmt.Fprintf(w, "data: %s\n\n", data)
@@ -165,6 +171,12 @@ func (s *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 		}
 		fmt.Fprintf(w, "agent_creds_tap_source_connected{source=%q} %d\n", metricLabel(source), value)
 	}
+	fmt.Fprintln(w, "# HELP agent_creds_tap_source_reconnects_total Envoy tap stream reconnect attempts.")
+	fmt.Fprintln(w, "# TYPE agent_creds_tap_source_reconnects_total counter")
+	for source, reconnects := range s.sources.Reconnects() {
+		fmt.Fprintf(w, "agent_creds_tap_source_reconnects_total{source=%q} %d\n",
+			metricLabel(source), reconnects)
+	}
 	fmt.Fprintln(w, "# HELP agent_creds_tap_operations_total Completed normalized GenAI operations.")
 	fmt.Fprintln(w, "# TYPE agent_creds_tap_operations_total counter")
 	fmt.Fprintln(w, "# HELP agent_creds_tap_tokens_total Provider-reported tokens.")
@@ -192,6 +204,9 @@ func (s *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintln(w, "# HELP agent_creds_tap_overflowed_traces_total Traces whose bounded in-memory body buffer overflowed.")
 	fmt.Fprintln(w, "# TYPE agent_creds_tap_overflowed_traces_total counter")
 	fmt.Fprintf(w, "agent_creds_tap_overflowed_traces_total %d\n", s.normalizer.overflowed.Load())
+	fmt.Fprintln(w, "# HELP agent_creds_tap_discarded_traces_total Partial GenAI traces discarded without persistence.")
+	fmt.Fprintln(w, "# TYPE agent_creds_tap_discarded_traces_total counter")
+	fmt.Fprintf(w, "agent_creds_tap_discarded_traces_total %d\n", s.normalizer.discarded.Load())
 }
 
 func metricLabel(value string) string {
@@ -222,10 +237,10 @@ const uiHTML = `<!doctype html>
 <title>agent-creds token operations</title>
 <style>
 :root{color-scheme:dark;background:#0b0d10;color:#e7e9ee;font:14px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace}
-body{margin:0 auto;max-width:1100px;padding:24px}header{display:flex;gap:18px;align-items:baseline;margin-bottom:20px}
+body{margin:0 auto;max-width:1500px;padding:24px}header{display:flex;gap:18px;align-items:baseline;margin-bottom:20px}
 h1{font:600 20px system-ui;margin:0}.status{color:#8f98a8}.ok{color:#53d18b}.bad{color:#ff7b72}
-.op{display:grid;grid-template-columns:150px 120px 160px 1fr 110px 150px;gap:12px;padding:10px 12px;border-bottom:1px solid #29303a}
-.head{color:#8f98a8}.tokens{color:#79c0ff}.dim{color:#8f98a8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.op{display:grid;grid-template-columns:150px minmax(240px,2fr) minmax(160px,1fr) minmax(190px,1fr) 120px 150px;gap:16px;padding:10px 12px;border-bottom:1px solid #29303a}
+.op>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.head{color:#8f98a8}.tokens{color:#79c0ff}.dim{color:#8f98a8}
 @media(max-width:760px){.op{grid-template-columns:1fr 1fr}.head{display:none}}
 </style></head><body>
 <header><h1>GenAI operations</h1><span id="status" class="status">connecting…</span></header>
@@ -234,7 +249,7 @@ h1{font:600 20px system-ui;margin:0}.status{color:#8f98a8}.ok{color:#53d18b}.bad
 const root=document.getElementById("ops"),statusEl=document.getElementById("status");
 function add(op){const row=document.createElement("div");row.className="op";
 const cells=[[new Date(op.ended_at).toLocaleTimeString(),"dim"],[op.source,""],[op.provider+" · "+op.operation,""],[op.model,"dim"],[op.duration_ms+" ms","dim"],[op.input_tokens+" / "+op.output_tokens,"tokens"]];
-for(const [value,cls] of cells){const span=document.createElement("span");span.className=cls;span.textContent=value;row.appendChild(span)}
+for(const [value,cls] of cells){const span=document.createElement("span");span.className=cls;span.textContent=value;span.title=value;row.appendChild(span)}
 root.insertBefore(row,root.children[1]);while(root.children.length>501)root.lastChild.remove()}
 fetch("/api/operations").then(r=>r.json()).then(ops=>ops.reverse().forEach(add));
 const stream=new EventSource("/api/operations/stream");

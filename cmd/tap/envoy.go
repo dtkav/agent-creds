@@ -23,6 +23,7 @@ import (
 
 type Source struct {
 	ID       string `json:"id"`
+	Agent    string `json:"agent"`
 	AdminURL string `json:"admin_url"`
 	ConfigID string `json:"config_id"`
 }
@@ -69,7 +70,11 @@ func LoadConfig(path string) (Config, error) {
 	for i := range config.Sources {
 		source := &config.Sources[i]
 		source.ID = strings.TrimSpace(source.ID)
+		source.Agent = strings.TrimSpace(source.Agent)
 		source.AdminURL = strings.TrimSpace(source.AdminURL)
+		if source.Agent == "" {
+			source.Agent = "unknown"
+		}
 		if source.ConfigID == "" {
 			source.ConfigID = "agent_creds_global_tap"
 		}
@@ -211,7 +216,7 @@ func (m *SourceManager) captureOnce(
 			return err
 		}
 		if m.normalizer != nil {
-			m.normalizer.Consume(source.ID, captureID, envelope)
+			m.normalizer.Consume(source.ID, source.Agent, captureID, envelope)
 		}
 	}
 }

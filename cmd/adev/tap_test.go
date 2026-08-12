@@ -36,14 +36,14 @@ func TestRegisterTapSourceWaitsForReadyAdminSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	if err := registerTapSource(scriptDir, slug); err != nil {
+	if err := registerTapSource(scriptDir, slug, "codex"); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(tapCollectorConfigDir(scriptDir), "sources.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), slug) {
+	if !strings.Contains(string(data), slug) || !strings.Contains(string(data), `"agent": "codex"`) {
 		t.Fatalf("ready source was not registered: %s", data)
 	}
 }
@@ -104,13 +104,13 @@ func TestRegisterTapSourcesWritesGlobalFanInConfig(t *testing.T) {
 	if err := prepareTapSourceRuntime(scriptDir, "staging-agent"); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeTapSourceRegistration(scriptDir, "staging-agent"); err != nil {
+	if err := writeTapSourceRegistration(scriptDir, "staging-agent", "codex"); err != nil {
 		t.Fatal(err)
 	}
 	if err := prepareTapSourceRuntime(scriptDir, "review-agent"); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeTapSourceRegistration(scriptDir, "review-agent"); err != nil {
+	if err := writeTapSourceRegistration(scriptDir, "review-agent", "claude"); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(tapCollectorConfigDir(scriptDir), "sources.json"))
@@ -119,6 +119,7 @@ func TestRegisterTapSourcesWritesGlobalFanInConfig(t *testing.T) {
 	}
 	for _, want := range []string{
 		`"id": "staging-agent"`, `"id": "review-agent"`,
+		`"agent": "codex"`, `"agent": "claude"`,
 		"unix:///run/adev-tap/staging-agent/admin.sock",
 		"unix:///run/adev-tap/review-agent/admin.sock",
 	} {
@@ -145,6 +146,44 @@ func TestRegisterTapSourcesWritesGlobalFanInConfig(t *testing.T) {
 	}
 	if strings.Contains(string(data), "review-agent") || !strings.Contains(string(data), "staging-agent") {
 		t.Fatalf("source unregister damaged fan-in config: %s", data)
+	}
+}
+
+func TestTapSourceConfigBackfillsAgentFromGeneratedInstance(t *testing.T) {
+	scriptDir := t.TempDir()
+	if err := prepareGlobalTapDirectories(scriptDir); err != nil {
+		t.Fatal(err)
+	}
+	const slug = "legacy-source"
+	instanceDir := filepath.Join(scriptDir, "generated", "instances", slug)
+	if err := os.MkdirAll(instanceDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(instanceDir, "merged-config.toml"),
+		[]byte("[sandbox]\nagent = \"pi\"\n"), 0600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	legacy := tapSource{
+		ID: slug, AdminURL: "unix:///run/adev-tap/legacy-source/admin.sock", ConfigID: tapConfigID,
+	}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tapSourcesDir(scriptDir), slug+".json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTapSourcesConfig(scriptDir); err != nil {
+		t.Fatal(err)
+	}
+	data, err = os.ReadFile(filepath.Join(tapCollectorConfigDir(scriptDir), "sources.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"agent": "pi"`) {
+		t.Fatalf("legacy source agent was not backfilled: %s", data)
 	}
 }
 

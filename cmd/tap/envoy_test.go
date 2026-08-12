@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -41,6 +42,21 @@ func TestSourceManagerReconcileAddsAndRemovesSources(t *testing.T) {
 	}
 	if _, ok := status["gamma"]; !ok {
 		t.Fatal("new source gamma was not registered")
+	}
+}
+
+func TestLoadConfigDefaultsMissingAgentWithoutExposingInstanceID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sources.json")
+	data := []byte(`{"sources":[{"id":"mq-private-session","admin_url":"unix:///tmp/admin.sock"}]}`)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	config, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := config.Sources[0].Agent; got != "unknown" {
+		t.Fatalf("legacy source agent = %q, want unknown", got)
 	}
 }
 

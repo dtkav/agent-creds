@@ -244,7 +244,7 @@ h1{font:600 20px system-ui;margin:0}.status{color:#8f98a8}.ok{color:#53d18b}.bad
 @media(max-width:760px){.op{grid-template-columns:1fr 1fr}.head{display:none}}
 </style></head><body>
 <header><h1>GenAI operations</h1><span id="status" class="status">connecting…</span></header>
-<main id="ops"><div class="op head"><span>time</span><span>source</span><span>provider</span><span>model</span><span>latency</span><span>tokens in / out</span></div></main>
+<main id="ops"><div class="op head"><span>time</span><span>agent</span><span>provider</span><span>model</span><span>latency</span><span>tokens in / out</span></div></main>
 <script>
 const root=document.getElementById("ops"),statusEl=document.getElementById("status");
 function add(op){const row=document.createElement("div");row.className="op";

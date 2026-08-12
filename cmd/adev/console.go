@@ -443,7 +443,7 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		}
 	}
 	if cfg.TapEnabled {
-		if err := registerTapSource(scriptDir, slug); err != nil {
+		if err := registerTapSource(scriptDir, slug, cfg.Sandbox.Agent); err != nil {
 			spinner.Stop()
 			fmt.Fprintf(os.Stderr, "Error attaching traffic tap: %v\n", err)
 			cleanup()

@@ -44,7 +44,7 @@ type traceState struct {
 }
 
 type traceKey struct {
-	source    string
+	sourceID  string
 	captureID uint64
 	traceID   string
 }
@@ -65,7 +65,9 @@ func NewNormalizer(store *Store, hub *Hub) *Normalizer {
 	return &Normalizer{store: store, hub: hub, traces: make(map[traceKey]*traceState)}
 }
 
-func (n *Normalizer) Consume(source string, captureID uint64, envelope json.RawMessage) {
+func (n *Normalizer) Consume(
+	sourceID, agent string, captureID uint64, envelope json.RawMessage,
+) {
 	segment, err := streamedSegment(envelope)
 	if err != nil {
 		n.invalidSegments.Add(1)
@@ -76,7 +78,7 @@ func (n *Normalizer) Consume(source string, captureID uint64, envelope json.RawM
 		n.invalidSegments.Add(1)
 		return
 	}
-	key := traceKey{source: source, captureID: captureID, traceID: traceID}
+	key := traceKey{sourceID: sourceID, captureID: captureID, traceID: traceID}
 
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -84,7 +86,7 @@ func (n *Normalizer) Consume(source string, captureID uint64, envelope json.RawM
 	state := n.traces[key]
 	if state == nil {
 		state = &traceState{
-			source: source, traceID: traceID, started: now, lastSeen: now,
+			source: agent, traceID: traceID, started: now, lastSeen: now,
 		}
 		n.traces[key] = state
 	}
@@ -136,11 +138,11 @@ func (n *Normalizer) finish(key traceKey, op *Operation) {
 // DiscardCapture removes partial traces when an Envoy admin stream ends. Trace
 // IDs are only scoped to an originating Envoy and may repeat after a new tap
 // session, so transport fragments must never cross capture generations.
-func (n *Normalizer) DiscardCapture(source string, captureID uint64) {
+func (n *Normalizer) DiscardCapture(sourceID string, captureID uint64) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	for key := range n.traces {
-		if key.source == source && key.captureID == captureID {
+		if key.sourceID == sourceID && key.captureID == captureID {
 			delete(n.traces, key)
 			n.discarded.Add(1)
 		}

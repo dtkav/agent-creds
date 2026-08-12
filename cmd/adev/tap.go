@@ -137,6 +137,7 @@ func buildTapImage(scriptDir string, spinner *Spinner) error {
 
 type tapSource struct {
 	ID       string `json:"id"`
+	Agent    string `json:"agent,omitempty"`
 	AdminURL string `json:"admin_url"`
 	ConfigID string `json:"config_id"`
 }
@@ -174,6 +175,12 @@ func writeTapSourcesConfig(scriptDir string) error {
 		if err := json.Unmarshal(data, &source); err != nil {
 			return fmt.Errorf("reading tap source %s: %w", entry.Name(), err)
 		}
+		// Registrations created before agent attribution was added can be
+		// upgraded from the already-generated instance config. This keeps the
+		// global service automatic and avoids adding project-local tap config.
+		if source.Agent == "" {
+			source.Agent = tapSourceAgent(scriptDir, source.ID)
+		}
 		sources = append(sources, source)
 	}
 	sort.Slice(sources, func(i, j int) bool { return sources[i].ID < sources[j].ID })
@@ -205,19 +212,20 @@ func prepareTapSourceRuntime(scriptDir, slug string) error {
 	return nil
 }
 
-func registerTapSource(scriptDir, slug string) error {
+func registerTapSource(scriptDir, slug, agent string) error {
 	if err := waitForTapAdminSocket(scriptDir, slug); err != nil {
 		return err
 	}
-	return writeTapSourceRegistration(scriptDir, slug)
+	return writeTapSourceRegistration(scriptDir, slug, agent)
 }
 
-func writeTapSourceRegistration(scriptDir, slug string) error {
+func writeTapSourceRegistration(scriptDir, slug, agent string) error {
 	if err := prepareGlobalTapDirectories(scriptDir); err != nil {
 		return err
 	}
 	source := tapSource{
 		ID:       slug,
+		Agent:    strings.TrimSpace(agent),
 		AdminURL: "unix:///run/adev-tap/" + slug + "/admin.sock",
 		ConfigID: tapConfigID,
 	}
@@ -229,6 +237,19 @@ func writeTapSourceRegistration(scriptDir, slug string) error {
 		return err
 	}
 	return writeTapSourcesConfig(scriptDir)
+}
+
+func tapSourceAgent(scriptDir, slug string) string {
+	var config struct {
+		Sandbox struct {
+			Agent string `toml:"agent"`
+		} `toml:"sandbox"`
+	}
+	path := filepath.Join(scriptDir, "generated", "instances", slug, "merged-config.toml")
+	if _, err := toml.DecodeFile(path, &config); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(config.Sandbox.Agent)
 }
 
 func waitForTapAdminSocket(scriptDir, slug string) error {

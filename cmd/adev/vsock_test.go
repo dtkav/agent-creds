@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"io"
 	"net"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -18,6 +17,14 @@ func TestBrowserCallbackPorts(t *testing.T) {
 	}
 	if got := browserCallbackPorts("https://example.com/?redirect_uri=https%3A%2F%2Fremote.example%3A4444%2Fcallback"); len(got) != 0 {
 		t.Fatalf("remote callback ports = %v, want none", got)
+	}
+}
+
+func TestBrowserTargetForLogRedactsOAuthParameters(t *testing.T) {
+	got := browserTargetForLog(
+		"https://claude.ai/oauth/authorize?state=secret&code_challenge=also-secret#fragment")
+	if want := "https://claude.ai/oauth/authorize"; got != want {
+		t.Fatalf("browserTargetForLog() = %q, want %q", got, want)
 	}
 }
 
@@ -36,8 +43,40 @@ func TestHostBrowserCommandDoesNotReenterSandboxBridge(t *testing.T) {
 			t.Fatalf("host browser inherited sandbox bridge: %q", item)
 		}
 	}
-	if !slices.Contains(cmd.Env, "DISPLAY="+os.Getenv("DISPLAY")) {
-		t.Fatalf("host browser lost desktop environment: %q", cmd.Env)
+	if environmentValue(cmd.Env, "DISPLAY") == "" {
+		t.Fatalf("host browser lost its desktop environment: %q", cmd.Env)
+	}
+}
+
+func TestOverlayDesktopEnvironmentUsesOnlyGraphicalSessionValues(t *testing.T) {
+	inherited := []string{
+		"DISPLAY=:stale",
+		"PATH=/sandbox/bin",
+		"BROWSER=/run/adev-tools/open-browser",
+	}
+	manager := []string{
+		"DISPLAY=:fresh",
+		"WAYLAND_DISPLAY=wayland-1",
+		"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus",
+		"BROWSER=host-browser",
+		"PATH=/host/bin",
+	}
+
+	got := overlayDesktopEnvironment(
+		environmentWithout(inherited, "BROWSER", "BROWSER_SOCKET_PATH"),
+		manager,
+	)
+	if value := environmentValue(got, "DISPLAY"); value != ":fresh" {
+		t.Fatalf("DISPLAY = %q, want :fresh", value)
+	}
+	if value := environmentValue(got, "WAYLAND_DISPLAY"); value != "wayland-1" {
+		t.Fatalf("WAYLAND_DISPLAY = %q, want wayland-1", value)
+	}
+	if value := environmentValue(got, "PATH"); value != "/sandbox/bin" {
+		t.Fatalf("PATH = %q, want inherited sandbox path", value)
+	}
+	if value := environmentValue(got, "BROWSER"); value != "" {
+		t.Fatalf("BROWSER = %q, want removed", value)
 	}
 }
 

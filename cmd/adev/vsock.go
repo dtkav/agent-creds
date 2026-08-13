@@ -61,6 +61,8 @@ func startBrowserForwardTCP(bindIP string, port int, targets []BrowserTargetConf
 			}
 		}
 		if !allowed {
+			fmt.Fprintf(os.Stderr, "[browser-fwd] denied target: %s\n",
+				browserTargetForLog(rawURL))
 			http.Error(w, "url not allowed", http.StatusForbidden)
 			return
 		}
@@ -90,6 +92,8 @@ func startBrowserForwardTCP(bindIP string, port int, targets []BrowserTargetConf
 			http.Error(w, detail, http.StatusInternalServerError)
 			return
 		}
+		fmt.Fprintf(os.Stderr, "[browser-fwd] opened target: %s\n",
+			browserTargetForLog(rawURL))
 
 		w.Header().Set("Connection", "close")
 		w.WriteHeader(http.StatusOK)
@@ -99,14 +103,99 @@ func startBrowserForwardTCP(bindIP string, port int, targets []BrowserTargetConf
 	return &ForwardState{Listener: listener}, nil
 }
 
+func browserTargetForLog(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "<invalid URL>"
+	}
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	parsed.User = nil
+	return parsed.String()
+}
+
 // hostBrowserCommand must not inherit the sandbox's browser bridge. adev is
 // commonly launched from another adev identity, whose BROWSER points back to
 // /run/adev-tools/open-browser. Passing that value to xdg-open makes the host
 // half recursively call the inner bridge instead of reaching the desktop.
 func hostBrowserCommand(rawURL string) *exec.Cmd {
 	cmd := exec.Command("xdg-open", rawURL)
-	cmd.Env = environmentWithout(os.Environ(), "BROWSER", "BROWSER_SOCKET_PATH")
+	cmd.Env = hostBrowserEnvironment(os.Environ())
 	return cmd
+}
+
+var desktopEnvironmentNames = map[string]bool{
+	"DBUS_SESSION_BUS_ADDRESS": true,
+	"DISPLAY":                  true,
+	"WAYLAND_DISPLAY":          true,
+	"XAUTHORITY":               true,
+	"XDG_CURRENT_DESKTOP":      true,
+	"XDG_RUNTIME_DIR":          true,
+	"XDG_SESSION_TYPE":         true,
+}
+
+// hostBrowserEnvironment refreshes the graphical-session variables from the
+// host user's long-lived systemd manager. A browser forwarder can outlive the
+// terminal (or sandbox) that launched it, so its inherited DISPLAY/Wayland and
+// D-Bus values are not a durable way to reach the desktop.
+func hostBrowserEnvironment(inherited []string) []string {
+	environment := environmentWithout(
+		inherited, "BROWSER", "BROWSER_SOCKET_PATH")
+	environment = ensureUserBusEnvironment(environment)
+	cmd := exec.Command("systemctl", "--user", "show-environment")
+	cmd.Env = environment
+	output, err := cmd.Output()
+	if err != nil {
+		return environment
+	}
+	return overlayDesktopEnvironment(environment, strings.Split(string(output), "\n"))
+}
+
+func ensureUserBusEnvironment(environment []string) []string {
+	runtimeDir := environmentValue(environment, "XDG_RUNTIME_DIR")
+	if runtimeDir == "" {
+		candidate := fmt.Sprintf("/run/user/%d", os.Getuid())
+		if _, err := os.Stat(candidate + "/bus"); err == nil {
+			runtimeDir = candidate
+			environment = setEnvironment(
+				environment, "XDG_RUNTIME_DIR", runtimeDir)
+		}
+	}
+	if runtimeDir != "" && environmentValue(
+		environment, "DBUS_SESSION_BUS_ADDRESS") == "" {
+		if _, err := os.Stat(runtimeDir + "/bus"); err == nil {
+			environment = setEnvironment(
+				environment, "DBUS_SESSION_BUS_ADDRESS",
+				"unix:path="+runtimeDir+"/bus")
+		}
+	}
+	return environment
+}
+
+func overlayDesktopEnvironment(environment, manager []string) []string {
+	for _, item := range manager {
+		name, value, found := strings.Cut(item, "=")
+		if !found || !desktopEnvironmentNames[name] {
+			continue
+		}
+		environment = setEnvironment(environment, name, value)
+	}
+	return environment
+}
+
+func setEnvironment(environment []string, name, value string) []string {
+	environment = environmentWithout(environment, name)
+	return append(environment, name+"="+value)
+}
+
+func environmentValue(environment []string, name string) string {
+	for _, item := range environment {
+		key, value, found := strings.Cut(item, "=")
+		if found && key == name {
+			return value
+		}
+	}
+	return ""
 }
 
 func environmentWithout(environment []string, names ...string) []string {

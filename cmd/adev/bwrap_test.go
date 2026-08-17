@@ -283,7 +283,7 @@ func TestBwrapArgsProtectProjectConfigAfterWritableMounts(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	projectConfig := filepath.Join(workDir, "agent-creds.toml")
+	projectConfig := filepath.Join(workDir, projectConfigFilename)
 	if err := os.WriteFile(projectConfig, []byte("[sandbox]\n"), 0644); err != nil {
 		t.Fatal(err)
 	}

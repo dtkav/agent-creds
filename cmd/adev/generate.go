@@ -204,6 +204,7 @@ func (g *Generator) extAuthzFilter() map[string]interface{} {
 			"with_request_body": map[string]interface{}{
 				"max_request_bytes":     8192,
 				"allow_partial_message": true,
+				"pack_as_bytes":         true,
 			},
 		},
 	}

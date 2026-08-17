@@ -18,6 +18,8 @@ type Request struct {
 	Method         string
 	Path           string
 	Headers        map[string]string
+	Body           []byte
+	BodyPartial    bool
 }
 
 // Result contains the headers a provider wants Envoy to inject. ExpiresAt is

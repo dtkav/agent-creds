@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/superfly/macaroon"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 // ApplicationConstraint carries an application-owned restriction through the
@@ -27,6 +28,17 @@ func (c *ApplicationConstraint) Prohibits(macaroon.Access) error {
 	return ValidateApplicationConstraint(c.Namespace, c.Constraint)
 }
 
+// EncodeMsgpack keeps map ordering stable because caveat bytes are part of the
+// macaroon signature. It deliberately preserves the default two-element array
+// wire shape used before this custom encoder was introduced.
+func (c *ApplicationConstraint) EncodeMsgpack(encoder *msgpack.Encoder) error {
+	return encodeApplicationConstraint(encoder, c.Namespace, c.Constraint)
+}
+
+func (c *ApplicationConstraint) DecodeMsgpack(decoder *msgpack.Decoder) error {
+	return decodeApplicationConstraint(decoder, &c.Namespace, &c.Constraint)
+}
+
 func ValidateApplicationConstraint(namespace string, constraint map[string]any) error {
 	if namespace == "" {
 		return fmt.Errorf("application constraint namespace must not be empty")
@@ -45,4 +57,32 @@ func NewApplicationConstraint(namespace string, constraint map[string]any) (*App
 		return nil, err
 	}
 	return &ApplicationConstraint{Namespace: namespace, Constraint: constraint}, nil
+}
+
+func encodeApplicationConstraint(encoder *msgpack.Encoder, namespace string, constraint map[string]any) error {
+	// SetSortMapKeys applies recursively and is harmless for the rest of this
+	// caveat set. Without it, decoding and re-encoding a map-valued caveat can
+	// produce different bytes and therefore an invalid signature.
+	encoder.SetSortMapKeys(true)
+	if err := encoder.EncodeArrayLen(2); err != nil {
+		return err
+	}
+	if err := encoder.EncodeString(namespace); err != nil {
+		return err
+	}
+	return encoder.Encode(constraint)
+}
+
+func decodeApplicationConstraint(decoder *msgpack.Decoder, namespace *string, constraint *map[string]any) error {
+	length, err := decoder.DecodeArrayLen()
+	if err != nil {
+		return err
+	}
+	if length != 2 {
+		return fmt.Errorf("application constraint must contain two fields, got %d", length)
+	}
+	if *namespace, err = decoder.DecodeString(); err != nil {
+		return err
+	}
+	return decoder.Decode(constraint)
 }

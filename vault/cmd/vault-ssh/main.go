@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -96,9 +97,11 @@ func handleCommand(sess ssh.Session, userID []byte, fingerprint, status string, 
 	case "keys":
 		cmdKeys(sess, userID, cmdArgs)
 	case "discharge":
-		cmdDischarge(sess, status, cmdArgs)
+		cmdDischarge(sess, userID, status, cmdArgs)
 	case "info":
 		cmdInfo(sess, status, cmdArgs)
+	case "list":
+		cmdList(sess, status)
 	case "users":
 		cmdUsers(sess, status, cmdArgs)
 	default:
@@ -116,11 +119,15 @@ Commands:
   mint <host>       Mint a token for the given host
     --subject              Restrict to an opaque application subject
     --no-host              Omit host caveat (admin only; for isolated support sessions)
+    --credential           Include default caveats derived from a credential path
     --methods              Restrict HTTP methods (e.g., GET,POST)
     --paths                Restrict paths (e.g., /v1/*)
     --valid-for            Token validity (e.g., 1h, 24h)
     --require-attestation  Require SSH attestation for discharge
-  discharge <token> Discharge a token's SSH attestation caveat
+    --require-authorization Require a provider constraint in the discharge
+  discharge <token> [--constraint <base64url-json>]
+                    Discharge an SSH attestation or authorization caveat
+  list              List configured credential paths
   info <cred-path>  Show credential info (type, env vars, hosts)
   keys              List your SSH keys
   keys add          Add a new SSH key (paste pubkey)
@@ -145,7 +152,7 @@ func cmdMint(sess ssh.Session, userID []byte, status string, args []string) {
 	}
 
 	if len(args) == 0 {
-		fmt.Fprintln(sess, "Usage: mint <host> [--subject <subject>] [--no-host] [--methods GET,POST] [--paths /v1/*] [--constraint namespace=JSON] [--valid-for 1h]")
+		fmt.Fprintln(sess, "Usage: mint <host> [--credential /path] [--subject <subject>] [--no-host] [--methods GET,POST] [--paths /v1/*] [--constraint namespace=JSON] [--valid-for 1h]")
 		hosts := configuredCredentialHosts(vaultConfig)
 		if len(hosts) > 0 {
 			fmt.Fprintln(sess, "\nHosts declared by credential capabilities:")
@@ -160,18 +167,28 @@ func cmdMint(sess ssh.Session, userID []byte, status string, args []string) {
 	host := args[0]
 
 	// Parse optional flags
-	var methods, paths, constraints []string
+	var methods, paths, constraintSpecs []string
+	var configuredConstraints []credentialConstraintInfo
 	var subject string
+	var credentialPath string
 	validFor := 24 * time.Hour
 	requireAttestation := false
+	requireAuthorization := false
 	noHost := false
 
 	for i := 1; i < len(args); i++ {
 		switch args[i] {
 		case "--require-attestation":
 			requireAttestation = true
+		case "--require-authorization":
+			requireAuthorization = true
 		case "--no-host":
 			noHost = true
+		case "--credential":
+			if i+1 < len(args) {
+				credentialPath = args[i+1]
+				i++
+			}
 		case "--subject":
 			if i+1 < len(args) {
 				subject = args[i+1]
@@ -189,7 +206,7 @@ func cmdMint(sess ssh.Session, userID []byte, status string, args []string) {
 			}
 		case "--constraint":
 			if i+1 < len(args) {
-				constraints = append(constraints, args[i+1])
+				constraintSpecs = append(constraintSpecs, args[i+1])
 				i++
 			}
 		case "--valid-for":
@@ -208,11 +225,36 @@ func cmdMint(sess ssh.Session, userID []byte, status string, args []string) {
 		fmt.Fprintln(sess, "Error: --no-host requires admin status.")
 		return
 	}
+	if credentialPath != "" {
+		var err error
+		configuredConstraints, err = fetchCredentialConstraints(credentialPath)
+		if err != nil {
+			fmt.Fprintf(sess, "Error: reading credential macaroon constraints: %v\n", err)
+			return
+		}
+	}
 
-	// Check encryption key if attestation is required
-	if requireAttestation && len(keyStore.EncryptionKey) == 0 {
-		fmt.Fprintln(sess, "Error: --require-attestation requires MACAROON_ENCRYPTION_KEY to be configured")
+	if requireAttestation && requireAuthorization {
+		fmt.Fprintln(sess, "Error: --require-attestation and --require-authorization are mutually exclusive")
 		return
+	}
+	// Check encryption key if a third-party discharge is required.
+	if (requireAttestation || requireAuthorization) && len(keyStore.EncryptionKey) == 0 {
+		fmt.Fprintln(sess, "Error: third-party authorization requires MACAROON_ENCRYPTION_KEY to be configured")
+		return
+	}
+	var authorizationInfo *credentialAuthorizationInfo
+	if requireAuthorization {
+		if credentialPath == "" {
+			fmt.Fprintln(sess, "Error: --require-authorization requires --credential")
+			return
+		}
+		var err error
+		authorizationInfo, err = fetchCredentialAuthorizationInfo(credentialPath)
+		if err != nil {
+			fmt.Fprintf(sess, "Error: reading credential authorization schema: %v\n", err)
+			return
+		}
 	}
 
 	// Create token
@@ -222,7 +264,19 @@ func cmdMint(sess ssh.Session, userID []byte, status string, args []string) {
 		return
 	}
 
-	if requireAttestation {
+	if requireAuthorization {
+		if err := attestation.Add3PAuthorization(
+			m,
+			keyStore.EncryptionKey,
+			tfmac.SSHAuthorizationLocation,
+			credentialPath,
+			authorizationInfo.Namespace,
+			base64.RawURLEncoding.EncodeToString(userID),
+		); err != nil {
+			fmt.Fprintf(sess, "Error adding authorization caveat: %v\n", err)
+			return
+		}
+	} else if requireAttestation {
 		// Add 3P caveat at SSH attestation location instead of validity window
 		if err := attestation.Add3PCaveatWithLocation(m, keyStore.EncryptionKey, tfmac.SSHAttestationLocation); err != nil {
 			fmt.Fprintf(sess, "Error adding attestation caveat: %v\n", err)
@@ -273,7 +327,22 @@ func cmdMint(sess ssh.Session, userID []byte, status string, args []string) {
 		}
 	}
 
-	for _, spec := range constraints {
+	for _, configuredConstraint := range configuredConstraints {
+		constraint, err := tfmac.NewApplicationConstraint(
+			configuredConstraint.Namespace,
+			configuredConstraint.Constraint,
+		)
+		if err != nil {
+			fmt.Fprintf(sess, "Error: invalid credential macaroon constraint: %v\n", err)
+			return
+		}
+		if err := m.Add(constraint); err != nil {
+			fmt.Fprintf(sess, "Error adding credential macaroon constraint: %v\n", err)
+			return
+		}
+	}
+
+	for _, spec := range constraintSpecs {
 		namespace, body, ok := strings.Cut(spec, "=")
 		if !ok {
 			fmt.Fprintf(sess, "Error: constraint %q must use namespace=JSON\n", spec)
@@ -305,15 +374,30 @@ func cmdMint(sess ssh.Session, userID []byte, status string, args []string) {
 	fmt.Fprintln(sess, token)
 }
 
-func cmdDischarge(sess ssh.Session, status string, args []string) {
+func cmdDischarge(sess ssh.Session, userID []byte, status string, args []string) {
 	if status == UserStatusPending {
 		fmt.Fprintln(sess, "Error: Your account is pending approval.")
 		return
 	}
 
 	if len(args) == 0 {
-		fmt.Fprintln(sess, "Usage: discharge <token>")
+		fmt.Fprintln(sess, "Usage: discharge <token> [--constraint <base64url-json>]")
 		return
+	}
+	var encodedConstraint string
+	for i := 1; i < len(args); i++ {
+		switch args[i] {
+		case "--constraint":
+			if i+1 >= len(args) {
+				fmt.Fprintln(sess, "Error: --constraint requires base64url-encoded JSON")
+				return
+			}
+			encodedConstraint = args[i+1]
+			i++
+		default:
+			fmt.Fprintf(sess, "Error: unknown discharge option %q\n", args[i])
+			return
+		}
 	}
 
 	if len(keyStore.EncryptionKey) == 0 {
@@ -328,11 +412,20 @@ func cmdDischarge(sess ssh.Session, status string, args []string) {
 		return
 	}
 
-	// Find 3P caveat at SSHAttestationLocation
+	// Prefer a provider authorization caveat, falling back to the existing
+	// presence-only SSH attestation flow.
 	var found *macaroon.Caveat3P
 	for _, c := range m.UnsafeCaveats.Caveats {
 		if tp, ok := c.(*macaroon.Caveat3P); ok {
-			if tp.Location == tfmac.SSHAttestationLocation {
+			if tp.Location == tfmac.SSHAuthorizationLocation {
+				found = tp
+				break
+			}
+		}
+	}
+	if found == nil {
+		for _, c := range m.UnsafeCaveats.Caveats {
+			if tp, ok := c.(*macaroon.Caveat3P); ok && tp.Location == tfmac.SSHAttestationLocation {
 				found = tp
 				break
 			}
@@ -340,14 +433,73 @@ func cmdDischarge(sess ssh.Session, status string, args []string) {
 	}
 
 	if found == nil {
-		fmt.Fprintln(sess, "Error: Token has no third-party caveat at ssh-attestation location")
+		fmt.Fprintln(sess, "Error: token has no SSH authorization or attestation caveat")
 		return
 	}
 
 	// Create discharge macaroon
-	_, discharge, err := macaroon.DischargeTicket(keyStore.EncryptionKey, found.Location, found.Ticket)
+	ticketCaveats, discharge, err := macaroon.DischargeTicket(keyStore.EncryptionKey, found.Location, found.Ticket)
 	if err != nil {
 		fmt.Fprintf(sess, "Error creating discharge: %v\n", err)
+		return
+	}
+	if found.Location == tfmac.SSHAuthorizationLocation {
+		if encodedConstraint == "" {
+			fmt.Fprintln(sess, "Error: authorization discharge requires --constraint")
+			return
+		}
+		var request *tfmac.AuthorizationRequest
+		for _, caveat := range ticketCaveats {
+			if candidate, ok := caveat.(*tfmac.AuthorizationRequest); ok {
+				if request != nil {
+					fmt.Fprintln(sess, "Error: authorization ticket contains multiple requests")
+					return
+				}
+				request = candidate
+			}
+		}
+		if request == nil {
+			fmt.Fprintln(sess, "Error: authorization ticket contains no request")
+			return
+		}
+		if err := tfmac.ValidateAuthorizationRequest(request.Credential, request.Namespace, request.Authorizer); err != nil {
+			fmt.Fprintf(sess, "Error: invalid authorization ticket: %v\n", err)
+			return
+		}
+		if request.Authorizer != base64.RawURLEncoding.EncodeToString(userID) {
+			fmt.Fprintln(sess, "Error: authorization must be discharged by the identity that minted it")
+			return
+		}
+		constraintJSON, err := base64.RawURLEncoding.DecodeString(encodedConstraint)
+		if err != nil {
+			fmt.Fprintf(sess, "Error: decoding authorization constraint: %v\n", err)
+			return
+		}
+		var body map[string]any
+		if err := json.Unmarshal(constraintJSON, &body); err != nil {
+			fmt.Fprintf(sess, "Error: decoding authorization constraint JSON: %v\n", err)
+			return
+		}
+		validated, err := validateCredentialAuthorization(request.Credential, body)
+		if err != nil {
+			fmt.Fprintf(sess, "Error: %v\n", err)
+			return
+		}
+		if validated.Namespace != request.Namespace {
+			fmt.Fprintln(sess, "Error: credential authorization namespace changed after minting")
+			return
+		}
+		constraint, err := tfmac.NewAuthorizedApplicationConstraint(validated.Namespace, validated.Constraint)
+		if err != nil {
+			fmt.Fprintf(sess, "Error: invalid provider authorization: %v\n", err)
+			return
+		}
+		if err := discharge.Add(constraint); err != nil {
+			fmt.Fprintf(sess, "Error adding provider authorization: %v\n", err)
+			return
+		}
+	} else if encodedConstraint != "" {
+		fmt.Fprintln(sess, "Error: attestation discharge does not accept --constraint")
 		return
 	}
 
@@ -391,23 +543,143 @@ func cmdInfo(sess ssh.Session, status string, args []string) {
 	fmt.Fprintln(sess, string(out))
 }
 
+func cmdList(sess ssh.Session, status string) {
+	if status == UserStatusPending {
+		fmt.Fprintln(sess, "Error: Your account is pending approval.")
+		return
+	}
+	paths, err := fetchCredentialPaths()
+	if err != nil {
+		fmt.Fprintf(sess, "Error: %v\n", err)
+		return
+	}
+	for _, path := range paths {
+		fmt.Fprintln(sess, path)
+	}
+}
+
+func fetchCredentialPaths() ([]string, error) {
+	body, err := fetchControl("/v1/credentials", nil)
+	if err != nil {
+		return nil, err
+	}
+	var response struct {
+		Paths []string `json:"paths"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, fmt.Errorf("decoding live Vault credential list: %w", err)
+	}
+	return response.Paths, nil
+}
+
 func fetchCredentialInfo(credentialPath string) ([]byte, error) {
+	query := url.Values{}
+	query.Set("path", credentialPath)
+	body, err := fetchControl("/v1/credentials/info", query)
+	if err != nil {
+		return nil, err
+	}
+	var info map[string]any
+	if err := json.Unmarshal(body, &info); err != nil {
+		return nil, fmt.Errorf("decoding live Vault credential info: %w", err)
+	}
+	return json.Marshal(info)
+}
+
+type credentialConstraintInfo struct {
+	Namespace  string         `json:"namespace"`
+	Constraint map[string]any `json:"constraint"`
+}
+
+type credentialAuthorizationInfo struct {
+	Namespace string         `json:"namespace"`
+	Schema    map[string]any `json:"schema"`
+}
+
+func fetchCredentialConstraints(credentialPath string) ([]credentialConstraintInfo, error) {
+	body, err := fetchCredentialInfo(credentialPath)
+	if err != nil {
+		return nil, err
+	}
+	var info struct {
+		Constraints []credentialConstraintInfo `json:"constraints"`
+	}
+	if err := json.Unmarshal(body, &info); err != nil {
+		return nil, fmt.Errorf("decoding live Vault credential constraints: %w", err)
+	}
+	for _, constraint := range info.Constraints {
+		if err := tfmac.ValidateApplicationConstraint(constraint.Namespace, constraint.Constraint); err != nil {
+			return nil, fmt.Errorf("invalid live Vault credential constraint: %w", err)
+		}
+	}
+	return info.Constraints, nil
+}
+
+func fetchCredentialAuthorizationInfo(credentialPath string) (*credentialAuthorizationInfo, error) {
+	body, err := fetchCredentialInfo(credentialPath)
+	if err != nil {
+		return nil, err
+	}
+	var info struct {
+		Authorization *credentialAuthorizationInfo `json:"authorization"`
+	}
+	if err := json.Unmarshal(body, &info); err != nil {
+		return nil, fmt.Errorf("decoding live Vault credential authorization: %w", err)
+	}
+	if info.Authorization == nil || info.Authorization.Namespace == "" || info.Authorization.Schema == nil {
+		return nil, fmt.Errorf("credential %s does not declare an authorization schema", credentialPath)
+	}
+	return info.Authorization, nil
+}
+
+func validateCredentialAuthorization(credentialPath string, constraint map[string]any) (credentialConstraintInfo, error) {
+	payload, err := json.Marshal(map[string]any{
+		"credential": credentialPath,
+		"constraint": constraint,
+	})
+	if err != nil {
+		return credentialConstraintInfo{}, fmt.Errorf("encoding credential authorization: %w", err)
+	}
+	body, err := requestControl(http.MethodPost, "/v1/credentials/authorization", nil, payload)
+	if err != nil {
+		return credentialConstraintInfo{}, fmt.Errorf("validating credential authorization: %w", err)
+	}
+	var validated credentialConstraintInfo
+	if err := json.Unmarshal(body, &validated); err != nil {
+		return credentialConstraintInfo{}, fmt.Errorf("decoding validated credential authorization: %w", err)
+	}
+	if err := tfmac.ValidateApplicationConstraint(validated.Namespace, validated.Constraint); err != nil {
+		return credentialConstraintInfo{}, err
+	}
+	return validated, nil
+}
+
+func fetchControl(path string, query url.Values) ([]byte, error) {
+	return requestControl(http.MethodGet, path, query, nil)
+}
+
+func requestControl(method, path string, query url.Values, payload []byte) ([]byte, error) {
 	baseURL := strings.TrimRight(strings.TrimSpace(os.Getenv("VAULT_CONTROL_URL")), "/")
 	if baseURL == "" {
 		baseURL = "http://127.0.0.1:8034"
 	}
-	endpoint, err := url.Parse(baseURL + "/v1/credentials/info")
+	endpoint, err := url.Parse(baseURL + path)
 	if err != nil {
 		return nil, err
 	}
-	query := endpoint.Query()
-	query.Set("path", credentialPath)
 	endpoint.RawQuery = query.Encode()
 
 	client := &http.Client{Timeout: 2 * time.Second}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		response, requestErr := client.Get(endpoint.String())
+		request, requestErr := http.NewRequest(method, endpoint.String(), strings.NewReader(string(payload)))
+		if requestErr == nil && len(payload) > 0 {
+			request.Header.Set("Content-Type", "application/json")
+		}
+		var response *http.Response
+		if requestErr == nil {
+			response, requestErr = client.Do(request)
+		}
 		if requestErr != nil {
 			if time.Now().Before(deadline) {
 				time.Sleep(100 * time.Millisecond)
@@ -429,11 +701,7 @@ func fetchCredentialInfo(credentialPath string) ([]byte, error) {
 			}
 			return nil, fmt.Errorf("live Vault config returned %s", response.Status)
 		}
-		var info map[string]any
-		if err := json.Unmarshal(body, &info); err != nil {
-			return nil, fmt.Errorf("decoding live Vault credential info: %w", err)
-		}
-		return json.Marshal(info)
+		return body, nil
 	}
 }
 

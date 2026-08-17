@@ -2,14 +2,35 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"vault/policy"
 	vaultcfg "vault/vault"
 )
+
+type testConstraintCredentialMacaroon struct {
+	testCredentialMacaroon
+}
+
+func (testConstraintCredentialMacaroon) ConstraintSchema(context.Context) (map[string]any, error) {
+	return map[string]any{
+		"type":     "object",
+		"required": []any{"branches"},
+	}, nil
+}
+
+func (testConstraintCredentialMacaroon) ValidateConstraint(_ context.Context, body map[string]any) error {
+	if _, ok := body["branches"]; !ok {
+		return fmt.Errorf("branches is required")
+	}
+	return nil
+}
 
 func testRuntimeConfig(name, token string) *vaultcfg.Config {
 	return &vaultcfg.Config{
@@ -143,6 +164,15 @@ credentials:
 	if len(info.Endpoints) != 1 || info.Endpoints[0].Description != "Read example records." {
 		t.Fatalf("unexpected endpoint info: %#v", info.Endpoints)
 	}
+	listRequest := httptest.NewRequest(http.MethodGet, controlCredentialsPath, nil)
+	listResponse := httptest.NewRecorder()
+	handler.ServeHTTP(listResponse, listRequest)
+	if listResponse.Code != http.StatusOK {
+		t.Fatalf("list status = %d, body = %s", listResponse.Code, listResponse.Body.String())
+	}
+	if got := listResponse.Body.String(); !strings.Contains(got, `"/service/new"`) || strings.Contains(got, `"/service/old"`) {
+		t.Fatalf("credential list did not use reloaded snapshot: %s", got)
+	}
 
 	beforeInvalid := store.Load()
 	invalidRequest := httptest.NewRequest(http.MethodPost, controlReloadPath, strings.NewReader("not: [valid"))
@@ -153,5 +183,82 @@ credentials:
 	}
 	if got := store.Load(); got != beforeInvalid {
 		t.Fatal("invalid control reload replaced the active snapshot")
+	}
+}
+
+func TestCredentialInfoIncludesPluginDerivedMacaroonConstraint(t *testing.T) {
+	store := newTestRuntimeStore(t, testRuntimeConfig("service/scoped", "secret-token"))
+	snapshot := store.Load()
+	credential := snapshot.credentials["service/scoped"]
+	credential.macaroon = testCredentialMacaroon{
+		namespace: "example",
+		constraint: &policy.Constraint{
+			Namespace: "example",
+			Body:      map[string]any{"branches": []any{"agent/work"}},
+		},
+	}
+	snapshot.credentials["service/scoped"] = credential
+
+	response := httptest.NewRecorder()
+	newControlHandler(store).ServeHTTP(response, httptest.NewRequest(
+		http.MethodGet,
+		controlCredentialInfoPath+"?path=/service/scoped",
+		nil,
+	))
+	if response.Code != http.StatusOK {
+		t.Fatalf("info status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if bytes.Contains(response.Body.Bytes(), []byte("secret-token")) {
+		t.Fatal("credential info exposed the provider secret")
+	}
+	var info credentialInfoResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &info); err != nil {
+		t.Fatal(err)
+	}
+	if len(info.Constraints) != 1 || info.Constraints[0].Namespace != "example" {
+		t.Fatalf("constraints = %#v", info.Constraints)
+	}
+}
+
+func TestControlValidatesCredentialAuthorization(t *testing.T) {
+	store := newTestRuntimeStore(t, testRuntimeConfig("service/scoped", "secret-token"))
+	snapshot := store.Load()
+	credential := snapshot.credentials["service/scoped"]
+	credential.macaroon = testConstraintCredentialMacaroon{
+		testCredentialMacaroon: testCredentialMacaroon{
+			namespace: "example",
+			authorize: func(context.Context, policy.Request) (policy.Decision, error) {
+				return policy.Allow(), nil
+			},
+		},
+	}
+	snapshot.credentials["service/scoped"] = credential
+	handler := newControlHandler(store)
+
+	info := httptest.NewRecorder()
+	handler.ServeHTTP(info, httptest.NewRequest(
+		http.MethodGet, controlCredentialInfoPath+"?path=/service/scoped", nil))
+	if info.Code != http.StatusOK || !strings.Contains(info.Body.String(), `"namespace":"example"`) {
+		t.Fatalf("credential info = %d %s", info.Code, info.Body.String())
+	}
+
+	valid := httptest.NewRecorder()
+	handler.ServeHTTP(valid, httptest.NewRequest(
+		http.MethodPost,
+		controlAuthorizationPath,
+		strings.NewReader(`{"credential":"/service/scoped","constraint":{"branches":["work"]}}`),
+	))
+	if valid.Code != http.StatusOK || !strings.Contains(valid.Body.String(), `"namespace":"example"`) {
+		t.Fatalf("valid authorization = %d %s", valid.Code, valid.Body.String())
+	}
+
+	invalid := httptest.NewRecorder()
+	handler.ServeHTTP(invalid, httptest.NewRequest(
+		http.MethodPost,
+		controlAuthorizationPath,
+		strings.NewReader(`{"credential":"/service/scoped","constraint":{}}`),
+	))
+	if invalid.Code != http.StatusBadRequest || !strings.Contains(invalid.Body.String(), "branches is required") {
+		t.Fatalf("invalid authorization = %d %s", invalid.Code, invalid.Body.String())
 	}
 }

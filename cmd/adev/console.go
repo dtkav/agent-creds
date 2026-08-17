@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -528,9 +529,9 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	currentHosts := sortedUpstreamKeys(cfg.Upstream)
 	currentUpstreams := copyUpstreamMap(cfg.Upstream)
 
-	// Watch config file for changes
-	configPath := filepath.Join(workDir, "agent-creds.toml")
-	if fileExists(configPath) {
+	// Watch the selected project policy for changes.
+	configPath, configExists, _ := projectConfigPath(workDir)
+	if configExists {
 		watcher, err := fsnotify.NewWatcher()
 		if err == nil {
 			watcher.Add(configPath)
@@ -704,16 +705,16 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	args = append(args, credsMounts...)
 	args = append(args, gitConfigMounts...)
 	// Mount merged config for aenv display (includes agent + plugin upstreams),
-	// and raw project config in workspace for user reference.
+	// and the raw project policy in the workspace under its source name.
 	mergedConfigToml := filepath.Join(instanceGenDir, "merged-config.toml")
-	agentCredsToml := filepath.Join(workDir, "agent-creds.toml")
+	projectConfig, projectConfigExists, _ := projectConfigPath(workDir)
 	if fileExists(mergedConfigToml) {
 		args = append(args, "-v", mergedConfigToml+":/etc/aenv/agent-creds.toml:ro")
-	} else if fileExists(agentCredsToml) {
-		args = append(args, "-v", agentCredsToml+":/etc/aenv/agent-creds.toml:ro")
+	} else if projectConfigExists {
+		args = append(args, "-v", projectConfig+":/etc/aenv/agent-creds.toml:ro")
 	}
-	if fileExists(agentCredsToml) {
-		args = append(args, "-v", agentCredsToml+":/workspace/agent-creds.toml:ro")
+	if projectConfigExists {
+		args = append(args, "-v", projectConfig+":/workspace/"+filepath.Base(projectConfig)+":ro")
 	}
 
 	// Plugin mounts
@@ -915,6 +916,9 @@ func mintTokens(cfg ProjectConfig, instanceGenDir string, spinner *Spinner) ([]T
 			return nil, nil, fmt.Errorf("reading credential metadata for %s: %w", host, err)
 		}
 		infos[host] = info
+		if upstream.Authorization != "" && info.Authorization == nil {
+			return nil, nil, fmt.Errorf("authorization.%s: credential %s does not publish a provider authorization schema", upstream.Authorization, upstream.Credential)
+		}
 
 		// Determine primary env var name
 		envVar := upstreamTokenEnv(upstream, info)
@@ -931,7 +935,7 @@ func mintTokens(cfg ProjectConfig, instanceGenDir string, spinner *Spinner) ([]T
 
 		// Step 3: Mint if no cache
 		if authzToken == "" {
-			authzToken, err = vaultSSHMint(cfg.Vault, host, upstream.Methods, upstream.Paths)
+			authzToken, err = vaultSSHMint(cfg.Vault, upstream.Credential, host, upstream.Methods, upstream.Paths, upstream.Authorization != "")
 			if err != nil {
 				return nil, nil, fmt.Errorf("minting %s: %w", host, err)
 			}
@@ -942,18 +946,18 @@ func mintTokens(cfg ProjectConfig, instanceGenDir string, spinner *Spinner) ([]T
 		}
 
 		// Step 5: Get discharge (retry with fresh token if cached token fails)
-		discharge, err := vaultSSHDischarge(cfg.Vault, authzToken)
+		discharge, err := vaultSSHDischarge(cfg.Vault, authzToken, upstream.AuthorizationConstraint)
 		if err != nil && fileExists(cachePath) {
 			// Cached token may be stale (e.g., vault key rotated) — delete and re-mint
 			os.Remove(cachePath)
-			authzToken, err = vaultSSHMint(cfg.Vault, host, upstream.Methods, upstream.Paths)
+			authzToken, err = vaultSSHMint(cfg.Vault, upstream.Credential, host, upstream.Methods, upstream.Paths, upstream.Authorization != "")
 			if err != nil {
 				return nil, nil, fmt.Errorf("re-minting %s: %w", host, err)
 			}
 			if err := os.WriteFile(cachePath, []byte(authzToken+"\n"), 0600); err != nil {
 				return nil, nil, fmt.Errorf("caching refreshed token for %s: %w", host, err)
 			}
-			discharge, err = vaultSSHDischarge(cfg.Vault, authzToken)
+			discharge, err = vaultSSHDischarge(cfg.Vault, authzToken, upstream.AuthorizationConstraint)
 		}
 		if err != nil {
 			return nil, nil, fmt.Errorf("discharging %s: %w", host, err)
@@ -1017,7 +1021,7 @@ func startDischargeRefresh(ctx context.Context, cfg ProjectConfig, scriptDir, in
 				}
 				authzToken := strings.TrimSpace(string(data))
 
-				discharge, err := vaultSSHDischarge(cfg.Vault, authzToken)
+				discharge, err := vaultSSHDischarge(cfg.Vault, authzToken, upstream.AuthorizationConstraint)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: discharge refresh %s failed: %v (old tokens valid for ~15 more minutes)\n", host, err)
 					continue
@@ -1149,6 +1153,9 @@ func upstreamChanged(old, new UpstreamConfig) bool {
 	if old.Credential != new.Credential || old.Policy != new.Policy {
 		return true
 	}
+	if old.Authorization != new.Authorization || !reflect.DeepEqual(old.AuthorizationConstraint, new.AuthorizationConstraint) {
+		return true
+	}
 	if !slices.Equal(old.Methods, new.Methods) {
 		return true
 	}
@@ -1211,7 +1218,7 @@ func remintTokens(newCfg ProjectConfig, scriptDir, instanceGenDir string, oldUps
 		}
 
 		if authzToken == "" {
-			authzToken, err = vaultSSHMint(newCfg.Vault, host, upstream.Methods, upstream.Paths)
+			authzToken, err = vaultSSHMint(newCfg.Vault, upstream.Credential, host, upstream.Methods, upstream.Paths, upstream.Authorization != "")
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: re-mint %s failed: %v\n", host, err)
 				continue
@@ -1219,7 +1226,7 @@ func remintTokens(newCfg ProjectConfig, scriptDir, instanceGenDir string, oldUps
 			os.WriteFile(cachePath, []byte(authzToken+"\n"), 0600)
 		}
 
-		discharge, err := vaultSSHDischarge(newCfg.Vault, authzToken)
+		discharge, err := vaultSSHDischarge(newCfg.Vault, authzToken, upstream.AuthorizationConstraint)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: discharge %s failed: %v\n", host, err)
 			continue

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -37,7 +38,19 @@ type configuredCredential struct {
 	credentialType string
 	extractor      provider.CredentialExtractor
 	provider       provider.CredentialProvider
+	macaroon       credentialMacaroon
 	policy         string
+}
+
+type credentialMacaroon interface {
+	policy.Authorizer
+	Namespace() string
+	Constraint(context.Context) (*policy.Constraint, error)
+}
+
+type credentialConstraintValidator interface {
+	ConstraintSchema(context.Context) (map[string]any, error)
+	ValidateConstraint(context.Context, map[string]any) error
 }
 
 type authServer struct {
@@ -58,6 +71,7 @@ type authServer struct {
 func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*authv3.CheckResponse, error) {
 	httpReq := req.GetAttributes().GetRequest().GetHttp()
 	headers := httpReq.GetHeaders()
+	body, bodyPartial := bufferedRequestBody(httpReq)
 	contextExtensions := req.GetAttributes().GetContextExtensions()
 	routeMode := contextExtensions["agent_creds_mode"]
 	routePolicy := strings.TrimPrefix(contextExtensions["policy"], "/")
@@ -236,7 +250,7 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 				},
 			}, nil
 		}
-		decision, policyErr := s.authorizePoliciesWithRuntime(runtime, ctx, result, access, nil, false, routePolicy)
+		decision, policyErr := s.authorizePoliciesWithRuntime(runtime, ctx, result, access, body, bodyPartial, nil, false, routePolicy)
 		if policyErr != nil {
 			reason := fmt.Sprintf("upstream policy failed: %v", policyErr)
 			s.logAudit("deny", access.Method, host, access.Path, reason, tokenID)
@@ -282,7 +296,7 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 			},
 		}, nil
 	}
-	decision, policyErr := s.authorizePoliciesWithRuntime(runtime, ctx, result, access, &cred, true, routePolicy, cred.policy)
+	decision, policyErr := s.authorizePoliciesWithRuntime(runtime, ctx, result, access, body, bodyPartial, &cred, true, routePolicy, cred.policy)
 	if policyErr != nil {
 		reason := fmt.Sprintf("upstream policy failed: %v", policyErr)
 		log.Printf("%s", reason)
@@ -302,6 +316,8 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 		Method:         httpReq.GetMethod(),
 		Path:           httpReq.GetPath(),
 		Headers:        headers,
+		Body:           body,
+		BodyPartial:    bodyPartial,
 	})
 	if err != nil {
 		log.Printf("Credential resolution failed for %s: %v", host, err)
@@ -350,7 +366,7 @@ func (s *authServer) authorizePolicies(
 	requireForConstraints bool,
 	names ...string,
 ) (policy.Decision, error) {
-	return s.authorizePoliciesWithRuntime(s.currentRuntime(), ctx, verified, access, credential, requireForConstraints, names...)
+	return s.authorizePoliciesWithRuntime(s.currentRuntime(), ctx, verified, access, nil, false, credential, requireForConstraints, names...)
 }
 
 func (s *authServer) authorizePoliciesWithRuntime(
@@ -358,6 +374,8 @@ func (s *authServer) authorizePoliciesWithRuntime(
 	ctx context.Context,
 	verified *macaroon.VerifyResult,
 	access *macaroon.Access,
+	body []byte,
+	bodyPartial bool,
 	credential *configuredCredential,
 	requireForConstraints bool,
 	names ...string,
@@ -368,6 +386,39 @@ func (s *authServer) authorizePoliciesWithRuntime(
 			Namespace: caveat.Namespace,
 			Body:      caveat.Constraint,
 		})
+	}
+	remainingConstraints := constraints
+	request := policy.Request{
+		Host:        access.Host,
+		Method:      access.Method,
+		Path:        access.Path,
+		Body:        bytes.Clone(body),
+		BodyPartial: bodyPartial,
+		Subject:     verified.Subject,
+	}
+	if credential != nil {
+		request.Credential = credential.name
+		request.CredentialType = credential.credentialType
+		if credential.macaroon != nil {
+			namespace := credential.macaroon.Namespace()
+			claimed := make([]policy.Constraint, 0, len(constraints))
+			remainingConstraints = make([]policy.Constraint, 0, len(constraints))
+			for _, constraint := range constraints {
+				if constraint.Namespace == namespace {
+					claimed = append(claimed, constraint)
+				} else {
+					remainingConstraints = append(remainingConstraints, constraint)
+				}
+			}
+			request.Constraints = claimed
+			decision, err := credential.macaroon.Authorize(ctx, request)
+			if err != nil {
+				return policy.Decision{}, fmt.Errorf("credential %q macaroon authorizer: %w", credential.name, err)
+			}
+			if !decision.Allow {
+				return decision, nil
+			}
+		}
 	}
 
 	seen := make(map[string]bool)
@@ -380,23 +431,13 @@ func (s *authServer) authorizePoliciesWithRuntime(
 		}
 	}
 	if len(selected) == 0 {
-		if requireForConstraints && len(constraints) > 0 {
+		if requireForConstraints && len(remainingConstraints) > 0 {
 			return policy.Deny("application-scoped token requires an upstream policy"), nil
 		}
 		return policy.Allow(), nil
 	}
 
-	request := policy.Request{
-		Host:        access.Host,
-		Method:      access.Method,
-		Path:        access.Path,
-		Subject:     verified.Subject,
-		Constraints: constraints,
-	}
-	if credential != nil {
-		request.Credential = credential.name
-		request.CredentialType = credential.credentialType
-	}
+	request.Constraints = remainingConstraints
 	for _, name := range selected {
 		authorizer := runtime.policies[name]
 		if authorizer == nil {
@@ -412,6 +453,18 @@ func (s *authServer) authorizePoliciesWithRuntime(
 		}
 	}
 	return policy.Allow(), nil
+}
+
+func bufferedRequestBody(request *authv3.AttributeContext_HttpRequest) ([]byte, bool) {
+	body := request.GetRawBody()
+	if len(body) == 0 && request.GetBody() != "" {
+		body = []byte(request.GetBody())
+	}
+	partial := strings.EqualFold(
+		strings.TrimSpace(request.GetHeaders()["x-envoy-auth-partial-body"]),
+		"true",
+	)
+	return bytes.Clone(body), partial
 }
 
 func policyDeniedResponse(reason string) *authv3.CheckResponse {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -99,6 +100,12 @@ type UpstreamConfig struct {
 	ForwardToken bool     `toml:"forward_token,omitempty"` // caller supplies macaroon; do not mint/expose env token
 	Methods      []string `toml:"methods"`                 // allowed HTTP methods (empty = all)
 	Paths        []string `toml:"paths"`                   // allowed path patterns with glob support (empty = all)
+
+	// Authorization is populated after named [authorization.<name>] sections
+	// are bound to their upstreams. These fields are runtime policy, not part
+	// of the legacy [upstream] TOML shape.
+	Authorization           string         `toml:"-"`
+	AuthorizationConstraint map[string]any `toml:"-"`
 }
 
 func (u UpstreamConfig) MintsToken() bool {
@@ -213,18 +220,40 @@ type AgentConfig struct {
 }
 
 type ProjectConfig struct {
-	Sandbox        SandboxConfig             `toml:"sandbox"`
-	Vault          VaultConfig               `toml:"vault"`
-	TapEnabled     bool                      `toml:"-"` // derived from the global tap config
-	Entrypoint     string                    // set by agent
-	NixExprs       []string                  // inline nix expressions from plugins/agents
-	NixPkgFields                             // embedded Nix package set fields
-	Upstream       map[string]UpstreamConfig `toml:"upstream"`
-	CDPTargets     []CDPTargetConfig         `toml:"cdp_target"`
-	BrowserTargets []BrowserTargetConfig     `toml:"browser_target"`
-	Mounts         []MountConfig             `toml:"mount"`
-	Env            []EnvConfig               `toml:"-"`
-	StaticEnv      map[string]interface{}    `toml:"-"`
+	Sandbox        SandboxConfig                  `toml:"sandbox"`
+	Vault          VaultConfig                    `toml:"vault"`
+	TapEnabled     bool                           `toml:"-"` // derived from the global tap config
+	Entrypoint     string                         // set by agent
+	NixExprs       []string                       // inline nix expressions from plugins/agents
+	NixPkgFields                                  // embedded Nix package set fields
+	Upstream       map[string]UpstreamConfig      `toml:"upstream"`
+	Authorization  map[string]AuthorizationConfig `toml:"-"`
+	CDPTargets     []CDPTargetConfig              `toml:"cdp_target"`
+	BrowserTargets []BrowserTargetConfig          `toml:"browser_target"`
+	Mounts         []MountConfig                  `toml:"mount"`
+	Env            []EnvConfig                    `toml:"-"`
+	StaticEnv      map[string]interface{}         `toml:"-"`
+}
+
+// AuthorizationConfig is a named credential-use policy. The common fields
+// are interpreted by adev; Constraint contains the remaining provider-owned
+// fields and is validated by Vault against the selected credential type's
+// registered authorization schema before a discharge is issued.
+type AuthorizationConfig struct {
+	Upstreams  []string
+	Credential string
+	Env        string
+	Methods    []string
+	Paths      []string
+	Constraint map[string]any
+}
+
+type authorizationCommonFields struct {
+	Upstreams  []string `toml:"upstreams"`
+	Credential string   `toml:"credential"`
+	Env        string   `toml:"env"`
+	Methods    []string `toml:"methods"`
+	Paths      []string `toml:"paths"`
 }
 
 // NixPkgFields holds Nix package set fields shared by PluginConfig, AgentConfig, and ProjectConfig.
@@ -360,15 +389,141 @@ func ValidateUpstreams(upstreams map[string]UpstreamConfig) error {
 	return nil
 }
 
-// LoadProjectConfig reads agent-creds.toml from dir if it exists.
-// Returns a zero-value config (not an error) if the file is absent.
+func decodeAuthorizations(md toml.MetaData, encoded map[string]toml.Primitive) (map[string]AuthorizationConfig, error) {
+	if len(encoded) == 0 {
+		return nil, nil
+	}
+	result := make(map[string]AuthorizationConfig, len(encoded))
+	for name, primitive := range encoded {
+		if strings.TrimSpace(name) == "" || strings.TrimSpace(name) != name {
+			return nil, fmt.Errorf("authorization name %q must be non-empty without surrounding whitespace", name)
+		}
+		var common authorizationCommonFields
+		if err := md.PrimitiveDecode(primitive, &common); err != nil {
+			return nil, fmt.Errorf("decoding authorization.%s: %w", name, err)
+		}
+		var raw map[string]any
+		if err := md.PrimitiveDecode(primitive, &raw); err != nil {
+			return nil, fmt.Errorf("decoding authorization.%s provider fields: %w", name, err)
+		}
+		for _, key := range []string{"upstreams", "credential", "env", "methods", "paths"} {
+			delete(raw, key)
+		}
+		if _, err := json.Marshal(raw); err != nil {
+			return nil, fmt.Errorf("authorization.%s provider fields must be JSON-compatible: %w", name, err)
+		}
+		result[name] = AuthorizationConfig{
+			Upstreams:  common.Upstreams,
+			Credential: common.Credential,
+			Env:        common.Env,
+			Methods:    common.Methods,
+			Paths:      common.Paths,
+			Constraint: raw,
+		}
+	}
+	return result, nil
+}
+
+// BindAuthorizations attaches each named authorization to its declared route.
+// Plugin and agent profiles may provide the route, but only the project policy
+// may attach a credential and provider-owned authorization constraint.
+func BindAuthorizations(cfg *ProjectConfig) error {
+	if len(cfg.Authorization) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(cfg.Authorization))
+	for name := range cfg.Authorization {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		authorization := cfg.Authorization[name]
+		if len(authorization.Upstreams) == 0 {
+			return fmt.Errorf("authorization.%s: upstreams must be a non-empty array", name)
+		}
+		if !strings.HasPrefix(authorization.Credential, "/") || authorization.Credential == "/" {
+			return fmt.Errorf("authorization.%s: credential path %q must name an absolute Vault credential", name, authorization.Credential)
+		}
+		seen := make(map[string]struct{}, len(authorization.Upstreams))
+		for _, host := range authorization.Upstreams {
+			if strings.TrimSpace(host) == "" || strings.TrimSpace(host) != host {
+				return fmt.Errorf("authorization.%s: upstream %q must be non-empty without surrounding whitespace", name, host)
+			}
+			if _, duplicate := seen[host]; duplicate {
+				return fmt.Errorf("authorization.%s: upstream %q is listed more than once", name, host)
+			}
+			seen[host] = struct{}{}
+			upstream, exists := cfg.Upstream[host]
+			if !exists {
+				return fmt.Errorf("authorization.%s: upstream %q is not configured", name, host)
+			}
+			if upstream.Authorization != "" {
+				return fmt.Errorf("upstream %q is claimed by both authorization.%s and authorization.%s", host, upstream.Authorization, name)
+			}
+			if upstream.Credential != "" || upstream.ForwardToken || len(upstream.Methods) > 0 || len(upstream.Paths) > 0 || upstream.Env != "" {
+				return fmt.Errorf("authorization.%s: upstream %q also declares credential authorization fields; keep credential, env, methods, and paths in the authorization table", name, host)
+			}
+			upstream.Credential = authorization.Credential
+			upstream.Env = authorization.Env
+			upstream.Methods = append([]string(nil), authorization.Methods...)
+			upstream.Paths = append([]string(nil), authorization.Paths...)
+			upstream.Authorization = name
+			upstream.AuthorizationConstraint = cloneAnyMap(authorization.Constraint)
+			cfg.Upstream[host] = upstream
+		}
+	}
+	return nil
+}
+
+func cloneAnyMap(source map[string]any) map[string]any {
+	if source == nil {
+		return nil
+	}
+	encoded, _ := json.Marshal(source)
+	var cloned map[string]any
+	_ = json.Unmarshal(encoded, &cloned)
+	return cloned
+}
+
+const (
+	projectConfigFilename       = "sandbox.toml"
+	legacyProjectConfigFilename = "agent-creds.toml"
+)
+
+// projectConfigPath returns the configured project policy path. sandbox.toml
+// is the current name; agent-creds.toml remains a compatibility fallback.
+// Keeping both is rejected so a launch cannot silently read the wrong policy.
+func projectConfigPath(dir string) (string, bool, error) {
+	current := filepath.Join(dir, projectConfigFilename)
+	legacy := filepath.Join(dir, legacyProjectConfigFilename)
+	currentExists := fileExists(current)
+	legacyExists := fileExists(legacy)
+	if currentExists && legacyExists {
+		return "", false, fmt.Errorf(
+			"both %s and %s exist; keep only %s",
+			projectConfigFilename, legacyProjectConfigFilename, projectConfigFilename)
+	}
+	if currentExists {
+		return current, true, nil
+	}
+	if legacyExists {
+		return legacy, true, nil
+	}
+	return current, false, nil
+}
+
+// LoadProjectConfig reads sandbox.toml, falling back to agent-creds.toml for
+// existing projects. Returns a zero-value config if neither file exists.
 func LoadProjectConfig(dir string) (ProjectConfig, error) {
-	path := filepath.Join(dir, "agent-creds.toml")
+	path, exists, err := projectConfigPath(dir)
+	if err != nil {
+		return ProjectConfig{}, err
+	}
+	if !exists {
+		return ProjectConfig{}, nil
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return ProjectConfig{}, nil
-		}
 		return ProjectConfig{}, err
 	}
 
@@ -377,13 +532,18 @@ func LoadProjectConfig(dir string) (ProjectConfig, error) {
 	// two TOML shapes do not compete for the same struct tag.
 	var decoded struct {
 		ProjectConfig
-		Env toml.Primitive `toml:"env"`
+		Env           toml.Primitive            `toml:"env"`
+		Authorization map[string]toml.Primitive `toml:"authorization"`
 	}
 	md, err := toml.Decode(string(data), &decoded)
 	if err != nil {
 		return ProjectConfig{}, err
 	}
 	cfg := decoded.ProjectConfig
+	cfg.Authorization, err = decodeAuthorizations(md, decoded.Authorization)
+	if err != nil {
+		return cfg, err
+	}
 	switch md.Type("env") {
 	case "":
 	case "Hash":
@@ -407,7 +567,8 @@ func LoadProjectConfig(dir string) (ProjectConfig, error) {
 }
 
 // LoadProjectConfigWithPlugins loads the project config, agent, and plugins.
-// projectDir is where agent-creds.toml lives, scriptDir is the agent-creds installation.
+// projectDir contains sandbox.toml (or the legacy agent-creds.toml), while
+// scriptDir is the sandbox tooling installation.
 func LoadProjectConfigWithPlugins(projectDir, scriptDir string) (ProjectConfig, error) {
 	cfg, err := LoadProjectConfig(projectDir)
 	if err != nil {
@@ -472,6 +633,12 @@ func LoadProjectConfigWithPlugins(projectDir, scriptDir string) (ProjectConfig, 
 
 	// Merge enabled plugins
 	if err := MergePlugins(&cfg, discovered, enabled, projectDir); err != nil {
+		return cfg, err
+	}
+	if err := BindAuthorizations(&cfg); err != nil {
+		return cfg, err
+	}
+	if err := ValidateUpstreams(cfg.Upstream); err != nil {
 		return cfg, err
 	}
 

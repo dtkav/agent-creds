@@ -95,6 +95,69 @@ registerCredentialProvider({
 	}
 }
 
+func TestTrustedCallbacksReceiveBufferedRawRequestBody(t *testing.T) {
+	directory := t.TempDir()
+	writeScript(t, directory, "body.provider.js", `
+registerCredentialProvider({
+  name: "body-provider",
+  credentialType: "body-test",
+  resolve: function (request) {
+    var body = new Uint8Array(request.body);
+    return {
+      headers: {
+        "x-body": String(body.byteLength) + ":" + String(body[0]) + ":" + String(body[3]),
+        "x-body-partial": String(request.bodyPartial)
+      }
+    };
+  }
+});
+
+registerUpstreamPolicy({
+  name: "body-policy",
+  policyType: "body-test",
+  authorize: function (request) {
+    var body = new Uint8Array(request.body);
+    return {
+      allow: body.byteLength === 4 && body[0] === 0 && body[3] === 255 && !request.bodyPartial,
+      reason: "raw body was not preserved"
+    };
+  }
+});
+`)
+
+	manager, err := NewManagerWithPolicies(
+		[]string{directory},
+		1,
+		[]Spec{{Name: "configured", Type: "body-test"}},
+		[]PolicySpec{{Name: "body-policy", Type: "body-test"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte{0, 1, 2, 255}
+	result := resolveForTest(t, manager.Provider(Spec{
+		Name: "configured",
+		Type: "body-test",
+	}), provider.Request{Body: body, BodyPartial: true})
+	if got := result.Headers["x-body"]; got != "4:0:255" {
+		t.Fatalf("provider body = %q", got)
+	}
+	if got := result.Headers["x-body-partial"]; got != "true" {
+		t.Fatalf("provider bodyPartial = %q", got)
+	}
+
+	decision, err := manager.Policy(PolicySpec{
+		Name: "body-policy",
+		Type: "body-test",
+	}).Authorize(context.Background(), policy.Request{Body: body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !decision.Allow {
+		t.Fatalf("policy rejected raw body: %s", decision.Reason)
+	}
+}
+
 func TestReloadIsAtomicAndKeepsLastKnownGoodSet(t *testing.T) {
 	directory := t.TempDir()
 	scriptPath := writeScript(t, directory, "reload.provider.js", versionScript("one"))
@@ -390,6 +453,140 @@ registerCredentialType({
 	}
 }
 
+func TestCredentialTypeMacaroonDerivesAndAuthorizesConstraints(t *testing.T) {
+	directory := t.TempDir()
+	writeScript(t, directory, "macaroon.provider.js", `
+registerCredentialType({
+  credentialType: "macaroon-test",
+  configSchema: {
+    type: "object",
+    required: ["token", "scopes"],
+    properties: {
+      token: {type: "string"},
+      scopes: {type: "array", items: {type: "string"}}
+    }
+  },
+  macaroon: {
+    namespace: "example",
+    constraintSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["scopes"],
+      properties: {
+        scopes: {type: "array", minItems: 1, items: {type: "string"}}
+      }
+    },
+    constraint: function (config) {
+      return {scopes: config.scopes.slice()};
+    },
+    authorize: function (request, config) {
+      if (request.credential !== "service/prod") return false;
+      for (var i = 0; i < request.constraints.length; i++) {
+        if (request.constraints[i].body.scopes.indexOf("read") === -1) {
+          return {allow: false, reason: "read scope excluded"};
+        }
+      }
+      return config.scopes.indexOf("read") !== -1;
+    }
+  }
+});
+registerCredentialProvider({
+  name: "macaroon-provider",
+  credentialType: "macaroon-test",
+  resolve: function (_request, config) {
+    return {headers: {authorization: "Bearer " + config.token}};
+  }
+});
+`)
+	spec := Spec{
+		Name: "service/prod",
+		Type: "macaroon-test",
+		Config: map[string]any{
+			"token":  "secret-not-exported",
+			"scopes": []any{"read", "write"},
+		},
+	}
+	manager, err := NewManager([]string{directory}, 1, []Spec{spec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, ok := manager.Macaroon(spec)
+	if !ok || binding.Namespace() != "example" {
+		t.Fatalf("macaroon binding = %#v, ok = %v", binding, ok)
+	}
+	constraint, err := binding.Constraint(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if constraint == nil || constraint.Namespace != "example" || len(constraint.Body) != 1 {
+		t.Fatalf("derived constraint = %#v", constraint)
+	}
+	if _, leaked := constraint.Body["token"]; leaked {
+		t.Fatal("derived constraint exposed an unselected config secret")
+	}
+	schema, err := binding.ConstraintSchema(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if schema["type"] != "object" {
+		t.Fatalf("constraint schema = %#v", schema)
+	}
+	if err := binding.ValidateConstraint(context.Background(), map[string]any{
+		"scopes": []any{"read"},
+	}); err != nil {
+		t.Fatalf("validating constraint: %v", err)
+	}
+	if err := binding.ValidateConstraint(context.Background(), map[string]any{
+		"unknown": true,
+	}); err == nil {
+		t.Fatal("authorization schema accepted an unknown field")
+	}
+
+	request := policy.Request{Constraints: []policy.Constraint{*constraint}}
+	decision, err := binding.Authorize(context.Background(), request)
+	if err != nil || !decision.Allow {
+		t.Fatalf("valid constraint decision = %#v, err = %v", decision, err)
+	}
+	request.Constraints = append(request.Constraints, policy.Constraint{
+		Namespace: "example",
+		Body:      map[string]any{"scopes": []any{"write"}},
+	})
+	decision, err = binding.Authorize(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Allow || decision.Reason != "read scope excluded" {
+		t.Fatalf("attenuated constraint decision = %#v", decision)
+	}
+}
+
+func TestCredentialTypeMacaroonConstraintMustBeAnObject(t *testing.T) {
+	directory := t.TempDir()
+	writeScript(t, directory, "invalid-macaroon.provider.js", `
+registerCredentialType({
+  credentialType: "invalid-macaroon-test",
+  configSchema: {type: "object"},
+  macaroon: {
+    namespace: "example",
+    constraint: function () { return "not an object"; },
+    authorize: function () { return true; }
+  }
+});
+registerCredentialProvider({
+  name: "invalid-macaroon-provider",
+  credentialType: "invalid-macaroon-test",
+  resolve: function () { return {headers: {authorization: "unused"}}; }
+});
+`)
+	_, err := NewManager([]string{directory}, 1, []Spec{{
+		Name: "configured",
+		Type: "invalid-macaroon-test",
+	}})
+	if err == nil || !strings.Contains(err.Error(), "macaroon.constraint must return an object or null") {
+		t.Fatalf("invalid macaroon constraint error = %v", err)
+	}
+}
+
 func TestCredentialTypeSchemaReloadKeepsLastKnownGoodRuntime(t *testing.T) {
 	directory := t.TempDir()
 	scriptPath := writeScript(t, directory, "schema-reload.provider.js", schemaReloadScript("one", "token"))
@@ -432,6 +629,143 @@ func TestLocalProviderScriptsLoadWhenPresent(t *testing.T) {
 	}
 	if _, err := newScriptRuntime(files); err != nil {
 		t.Fatalf("loading local provider scripts: %v", err)
+	}
+}
+
+func TestLocalGitHubBranchMacaroonWhenPresent(t *testing.T) {
+	providerPath := filepath.Join("..", "..", "providers.d", "github.provider.js")
+	if _, err := os.Stat(providerPath); os.IsNotExist(err) {
+		t.Skip("no local GitHub provider script")
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	credentialSpec := Spec{
+		Name: "github/test",
+		Type: "github",
+		Config: map[string]any{
+			"token":    "upstream-token",
+			"branches": []any{"agent/work", "agent/release"},
+		},
+	}
+	manager, err := NewManager([]string{providerPath}, 1, []Spec{credentialSpec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorizer, ok := manager.Macaroon(credentialSpec)
+	if !ok {
+		t.Fatal("GitHub credential type did not register macaroon support")
+	}
+	defaultConstraint, err := authorizer.Constraint(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaultConstraint == nil || defaultConstraint.Namespace != "github" {
+		t.Fatalf("default constraint = %#v", defaultConstraint)
+	}
+	constraints := []policy.Constraint{*defaultConstraint, {
+		Namespace: "github",
+		Body: map[string]any{
+			"repositories": map[string]any{
+				"system3/agent-creds":         []any{"agent/work"},
+				"system3/agent-creds-private": []any{"agent/release"},
+			},
+		},
+	}}
+	if err := authorizer.ValidateConstraint(context.Background(), constraints[1].Body); err != nil {
+		t.Fatalf("validating GitHub authorization: %v", err)
+	}
+	if err := authorizer.ValidateConstraint(context.Background(), map[string]any{
+		"repository": "system3/agent-creds",
+		"branches":   []any{"refs/tags/release"},
+	}); err == nil {
+		t.Fatal("GitHub semantic validation accepted a tag authorization")
+	}
+
+	pushBody := func(refs ...string) []byte {
+		var body strings.Builder
+		zero := strings.Repeat("0", 40)
+		one := strings.Repeat("1", 40)
+		for i, ref := range refs {
+			payload := zero + " " + one + " " + ref + "\n"
+			if i == 0 {
+				payload = strings.TrimSuffix(payload, "\n") + "\x00report-status\n"
+			}
+			fmt.Fprintf(&body, "%04x%s", len(payload)+4, payload)
+		}
+		body.WriteString("0000PACK")
+		return []byte(body.String())
+	}
+	authorize := func(body []byte, partial bool) policy.Decision {
+		t.Helper()
+		decision, err := authorizer.Authorize(context.Background(), policy.Request{
+			Host:        "github.com",
+			Method:      "POST",
+			Path:        "/system3/agent-creds.git/git-receive-pack",
+			Body:        body,
+			BodyPartial: partial,
+			Constraints: constraints,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return decision
+	}
+
+	if decision := authorize(pushBody("refs/heads/agent/work"), true); !decision.Allow {
+		t.Fatalf("allowed branch denied: %s", decision.Reason)
+	}
+	decision, err := authorizer.Authorize(context.Background(), policy.Request{
+		Host:        "github.com",
+		Method:      "POST",
+		Path:        "/system3/other.git/git-receive-pack",
+		Body:        pushBody("refs/heads/agent/work"),
+		BodyPartial: true,
+		Constraints: constraints,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Allow {
+		t.Fatal("authorization was accepted for another repository")
+	}
+	decision, err = authorizer.Authorize(context.Background(), policy.Request{
+		Host:        "github.com",
+		Method:      "POST",
+		Path:        "/system3/agent-creds-private.git/git-receive-pack",
+		Body:        pushBody("refs/heads/agent/release"),
+		BodyPartial: true,
+		Constraints: constraints,
+	})
+	if err != nil || !decision.Allow {
+		t.Fatalf("paired repository branch denied: %#v, err = %v", decision, err)
+	}
+	for name, refs := range map[string][]string{
+		"other branch":       {"refs/heads/main"},
+		"offline attenuated": {"refs/heads/agent/release"},
+		"tag":                {"refs/tags/release"},
+		"mixed ref update":   {"refs/heads/agent/work", "refs/heads/main"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if decision := authorize(pushBody(refs...), true); decision.Allow {
+				t.Fatal("disallowed ref update was accepted")
+			}
+		})
+	}
+	if decision := authorize([]byte("006f"), true); decision.Allow {
+		t.Fatal("incomplete receive-pack prefix was accepted")
+	}
+
+	decision, err = authorizer.Authorize(context.Background(), policy.Request{
+		Host:        "api.github.com",
+		Method:      "POST",
+		Path:        "/graphql",
+		Constraints: constraints,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Allow {
+		t.Fatal("GitHub API mutation bypassed the branch policy")
 	}
 }
 

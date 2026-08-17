@@ -45,6 +45,10 @@ const AttestationLocation = "yubikey-local"
 // SSHAttestationLocation is the third-party location for SSH-based attestation
 const SSHAttestationLocation = "ssh-attestation"
 
+// SSHAuthorizationLocation identifies discharges that carry provider-owned
+// authorization constraints requested by an authenticated host-side client.
+const SSHAuthorizationLocation = "ssh-authorization"
+
 // NewVerifier creates a new token verifier
 func NewVerifier(ks *KeyStore) *Verifier {
 	v := &Verifier{
@@ -56,6 +60,7 @@ func NewVerifier(ks *KeyStore) *Verifier {
 	if len(ks.EncryptionKey) > 0 {
 		v.AddTrusted3P(AttestationLocation, ks.EncryptionKey)
 		v.AddTrusted3P(SSHAttestationLocation, ks.EncryptionKey)
+		v.AddTrusted3P(SSHAuthorizationLocation, ks.EncryptionKey)
 	}
 
 	return v
@@ -128,6 +133,27 @@ func (v *Verifier) VerifyRequest(authHeader string, access *Access) *VerifyResul
 		return &VerifyResult{Valid: false, Error: fmt.Sprintf("caveat validation failed: %v", err)}
 	}
 
+	applicationConstraints := macaroon.GetCaveats[*ApplicationConstraint](caveats)
+	authorizedConstraints := macaroon.GetCaveats[*AuthorizedApplicationConstraint](caveats)
+	for _, requirement := range macaroon.GetCaveats[*ApplicationConstraintRequirement](caveats) {
+		found := false
+		for _, constraint := range authorizedConstraints {
+			if constraint.Namespace == requirement.Namespace {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return &VerifyResult{Valid: false, Error: fmt.Sprintf("required application constraint %q is missing", requirement.Namespace)}
+		}
+	}
+	for _, constraint := range authorizedConstraints {
+		applicationConstraints = append(applicationConstraints, &ApplicationConstraint{
+			Namespace:  constraint.Namespace,
+			Constraint: constraint.Constraint,
+		})
+	}
+
 	var expiresAt *int64
 	for _, window := range macaroon.GetCaveats[*macaroon.ValidityWindow](caveats) {
 		if expiresAt == nil || window.NotAfter < *expiresAt {
@@ -143,7 +169,7 @@ func (v *Verifier) VerifyRequest(authHeader string, access *Access) *VerifyResul
 		KeyID:                  string(m.Nonce.KID),
 		Location:               m.Location,
 		ExpiresAt:              expiresAt,
-		ApplicationConstraints: macaroon.GetCaveats[*ApplicationConstraint](caveats),
+		ApplicationConstraints: applicationConstraints,
 	}
 }
 

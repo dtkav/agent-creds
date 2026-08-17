@@ -1136,9 +1136,9 @@ func buildBwrapArgs(
 
 	// The project is writable, but its policy is part of the trusted host
 	// control plane. Apply this overlay after every plugin mount so none of
-	// them can make agent-creds.toml writable again.
-	projectConfig := filepath.Join(workDir, "agent-creds.toml")
-	if fileExists(projectConfig) {
+	// them can make the policy writable again.
+	projectConfig, projectConfigExists, _ := projectConfigPath(workDir)
+	if projectConfigExists {
 		args = append(args, bwrapFileMountArgs(projectConfig, projectConfig)...)
 	}
 
@@ -1397,8 +1397,8 @@ exec unshare --map-current-user --net --keep-caps /bin/bash "$SETUP"
 // changes live: regenerate envoy config, restart the envoy container, and
 // re-mint changed tokens. Returns a stop function.
 func startBwrapConfigWatcher(workDir, scriptDir, instanceGenDir, envoyName string, cfg ProjectConfig) func() {
-	configPath := filepath.Join(workDir, "agent-creds.toml")
-	if !fileExists(configPath) {
+	configPath, exists, _ := projectConfigPath(workDir)
+	if !exists {
 		return func() {}
 	}
 	watcher, err := fsnotify.NewWatcher()

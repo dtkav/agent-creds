@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -26,8 +25,8 @@ const (
 
 // credential represents a vault credential available for selection.
 type credential struct {
-	Path    string
-	Info    *CredentialInfo
+	Path     string
+	Info     *CredentialInfo
 	Selected bool
 	// Per-credential endpoint config
 	Methods []string
@@ -798,7 +797,10 @@ func (m setupModel) generateTOML() string {
 }
 
 func (m setupModel) writeConfig() error {
-	path := filepath.Join(m.projectDir, "agent-creds.toml")
+	path, _, err := projectConfigPath(m.projectDir)
+	if err != nil {
+		return err
+	}
 
 	// Read existing config
 	cfg, err := LoadProjectConfig(m.projectDir)

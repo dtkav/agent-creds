@@ -422,6 +422,42 @@ offline but cannot remove existing ones. A policy must therefore understand
 the namespace, reject unknown namespaces, and evaluate every constraint
 conjunctively.
 
+Named authorizations separate a reachable route from permission to use an
+upstream credential:
+
+```toml
+[upstream."github.com"]
+
+[authorization.github]
+upstreams = ["github.com"]
+credential = "/github/example/project/git"
+env = "GIT_GITHUB_TOKEN"
+methods = ["GET", "POST"]
+paths = ["/Example/Project.git/**"]
+
+repository = "Example/Project"
+branches = ["queue/example"]
+```
+
+The name (`github` above) is organizational and has no authorization meaning.
+The selected credential type publishes the schema for the remaining fields.
+`adev` asks the authenticated discharge service to validate those fields and
+place them in a signed discharge macaroon. The primary macaroon requires that
+provider constraint, so the primary token alone—or an empty discharge—cannot
+use the credential. Route fields may still carry transport settings, but
+`credential`, `env`, `methods`, and `paths` belong in the named authorization
+when this form is used.
+
+GitHub also accepts a repository map when one workflow owns distinct branches
+in a product and a private overlay:
+
+```toml
+[authorization.github]
+upstreams = ["github.com"]
+credential = "/github/example/project/git"
+repositories = { "Example/Project" = ["queue/example"], "Example/project-private" = ["queue/example-private"] }
+```
+
 ### Authenticate an internal service
 
 An identity route verifies a subject-scoped macaroon without selecting or

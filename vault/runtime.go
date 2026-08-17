@@ -152,6 +152,7 @@ func buildRuntimeSnapshot(config *vaultcfg.Config, paths []string, poolSize int)
 	for name, credential := range config.Credentials {
 		var credentialProvider provider.CredentialProvider
 		var credentialExtractor provider.CredentialExtractor
+		var credentialMacaroon credentialMacaroon
 		if registry.Has(credential.Type) {
 			credentialProvider, err = registry.Build(credential.Type, credential.ProviderConfig())
 		} else if jsManager != nil {
@@ -162,6 +163,9 @@ func buildRuntimeSnapshot(config *vaultcfg.Config, paths []string, poolSize int)
 			}
 			credentialProvider = jsManager.Provider(spec)
 			credentialExtractor = jsManager.Extractor(spec)
+			if binding, ok := jsManager.Macaroon(spec); ok {
+				credentialMacaroon = binding
+			}
 		} else {
 			err = fmt.Errorf("credential provider %q is not registered", credential.Type)
 		}
@@ -173,6 +177,7 @@ func buildRuntimeSnapshot(config *vaultcfg.Config, paths []string, poolSize int)
 			credentialType: credential.Type,
 			extractor:      credentialExtractor,
 			provider:       credentialProvider,
+			macaroon:       credentialMacaroon,
 			policy:         strings.TrimPrefix(credential.Policy, "/"),
 		}
 	}

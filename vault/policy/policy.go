@@ -20,6 +20,8 @@ type Request struct {
 	Host           string
 	Method         string
 	Path           string
+	Body           []byte
+	BodyPartial    bool
 	Credential     string
 	CredentialType string
 	Subject        *string

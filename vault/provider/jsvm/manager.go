@@ -78,6 +78,7 @@ type runtimeSet struct {
 	pool          chan *scriptRuntime
 	extractorPool chan *extractorRuntime
 	plans         []registrationPlan
+	macaroons     map[string]string
 }
 
 type scriptRuntime struct {
@@ -96,7 +97,17 @@ type scriptRuntime struct {
 type credentialTypeRegistration struct {
 	configSchema *jsonschema.Schema
 	validate     goja.Callable
+	macaroon     *credentialMacaroonRegistration
 	source       string
+}
+
+type credentialMacaroonRegistration struct {
+	namespace                string
+	constraintSchema         *jsonschema.Schema
+	constraintSchemaDocument map[string]any
+	validateConstraint       goja.Callable
+	constraint               goja.Callable
+	authorize                goja.Callable
 }
 
 type rejectingSchemaLoader struct{}
@@ -222,6 +233,10 @@ func (m *Manager) reloadIfChanged() {
 		log.Printf("Extension reload failed; keeping last known-good set: %v", err)
 		return
 	}
+	if current != nil && !sameConfiguredMacaroonNamespaces(current.macaroons, next.macaroons, m.specs) {
+		log.Printf("Extension reload failed; keeping last known-good set: credential macaroon namespaces cannot change during provider hot reload")
+		return
+	}
 	m.current.Store(next)
 	log.Printf("Reloaded %d JavaScript extension runtime(s) from %d script(s)", m.poolSize, len(files))
 }
@@ -263,10 +278,64 @@ func (m *Manager) Policy(spec PolicySpec) policy.Authorizer {
 	}
 }
 
+// CredentialMacaroon binds one configured credential to the macaroon
+// namespace and callbacks declared by its JavaScript credential type.
+// Constraint returns public attenuation data suitable for embedding in a
+// minted capability; Authorize enforces both current config and verified
+// caveats at request time.
+type CredentialMacaroon struct {
+	manager   *Manager
+	spec      Spec
+	namespace string
+}
+
+func (m *Manager) Macaroon(spec Spec) (*CredentialMacaroon, bool) {
+	set := m.current.Load()
+	if set == nil {
+		return nil, false
+	}
+	namespace, ok := set.macaroons[spec.Type]
+	if !ok {
+		return nil, false
+	}
+	return &CredentialMacaroon{
+		manager: m,
+		spec: Spec{
+			Name:   spec.Name,
+			Type:   spec.Type,
+			Config: cloneMap(spec.Config),
+		},
+		namespace: namespace,
+	}, true
+}
+
+func (m *CredentialMacaroon) Namespace() string { return m.namespace }
+
+func (m *CredentialMacaroon) Constraint(ctx context.Context) (*policy.Constraint, error) {
+	return m.manager.credentialConstraint(ctx, m.spec, m.namespace)
+}
+
+func (m *CredentialMacaroon) ConstraintSchema(ctx context.Context) (map[string]any, error) {
+	return m.manager.credentialConstraintSchema(ctx, m.spec, m.namespace)
+}
+
+func (m *CredentialMacaroon) ValidateConstraint(ctx context.Context, body map[string]any) error {
+	return m.manager.validateCredentialConstraint(ctx, m.spec, m.namespace, body)
+}
+
+func (m *CredentialMacaroon) Authorize(ctx context.Context, request policy.Request) (policy.Decision, error) {
+	request.Policy = m.spec.Name
+	request.PolicyType = m.spec.Type
+	request.Credential = m.spec.Name
+	request.CredentialType = m.spec.Type
+	return m.manager.authorizeCredential(ctx, request, m.spec, m.namespace)
+}
+
 func (m *Manager) buildSet(files []scriptFile, fingerprint string, generation uint64) (*runtimeSet, error) {
 	pool := make(chan *scriptRuntime, m.poolSize)
 	extractorPool := make(chan *extractorRuntime, m.poolSize)
 	var plans []registrationPlan
+	var macaroons map[string]string
 	for i := 0; i < m.poolSize; i++ {
 		scriptVM, err := newScriptRuntime(files)
 		if err != nil {
@@ -280,6 +349,7 @@ func (m *Manager) buildSet(files []scriptFile, fingerprint string, generation ui
 				return nil, err
 			}
 			plans = scriptVM.registrationPlans()
+			macaroons = scriptVM.macaroonNamespaces()
 		}
 		pool <- scriptVM
 	}
@@ -296,6 +366,7 @@ func (m *Manager) buildSet(files []scriptFile, fingerprint string, generation ui
 		pool:          pool,
 		extractorPool: extractorPool,
 		plans:         plans,
+		macaroons:     macaroons,
 	}, nil
 }
 
@@ -356,6 +427,77 @@ func (m *Manager) authorize(ctx context.Context, request policy.Request, config 
 		set.pool <- scriptVM
 	}()
 	return scriptVM.authorizeRequest(ctx, request, config)
+}
+
+func (m *Manager) credentialConstraint(ctx context.Context, spec Spec, namespace string) (*policy.Constraint, error) {
+	set := m.current.Load()
+	if set == nil {
+		return nil, fmt.Errorf("JavaScript credential runtime is not loaded")
+	}
+
+	var scriptVM *scriptRuntime
+	select {
+	case scriptVM = <-set.pool:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	defer func() {
+		scriptVM.callContext = nil
+		set.pool <- scriptVM
+	}()
+	return scriptVM.credentialConstraint(ctx, spec, namespace)
+}
+
+func (m *Manager) credentialConstraintSchema(ctx context.Context, spec Spec, namespace string) (map[string]any, error) {
+	set := m.current.Load()
+	if set == nil {
+		return nil, fmt.Errorf("JavaScript credential runtime is not loaded")
+	}
+
+	var scriptVM *scriptRuntime
+	select {
+	case scriptVM = <-set.pool:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	defer func() { set.pool <- scriptVM }()
+	return scriptVM.credentialConstraintSchema(spec, namespace)
+}
+
+func (m *Manager) validateCredentialConstraint(ctx context.Context, spec Spec, namespace string, body map[string]any) error {
+	set := m.current.Load()
+	if set == nil {
+		return fmt.Errorf("JavaScript credential runtime is not loaded")
+	}
+
+	var scriptVM *scriptRuntime
+	select {
+	case scriptVM = <-set.pool:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { set.pool <- scriptVM }()
+	defer func() { scriptVM.callContext = nil }()
+	return scriptVM.validateCredentialConstraint(ctx, spec, namespace, body)
+}
+
+func (m *Manager) authorizeCredential(ctx context.Context, request policy.Request, spec Spec, namespace string) (policy.Decision, error) {
+	set := m.current.Load()
+	if set == nil {
+		return policy.Decision{}, fmt.Errorf("JavaScript credential runtime is not loaded")
+	}
+
+	var scriptVM *scriptRuntime
+	select {
+	case scriptVM = <-set.pool:
+	case <-ctx.Done():
+		return policy.Decision{}, ctx.Err()
+	}
+	defer func() {
+		scriptVM.callContext = nil
+		set.pool <- scriptVM
+	}()
+	return scriptVM.authorizeCredential(ctx, request, spec, namespace)
 }
 
 type jsUpstreamPolicy struct {
@@ -562,9 +704,52 @@ func (r *scriptRuntime) registerCredentialType(call goja.FunctionCall) goja.Valu
 		}
 	}
 
+	var macaroonRegistration *credentialMacaroonRegistration
+	if value := object.Get("macaroon"); !isNullish(value) {
+		macaroonObject := value.ToObject(r.vm)
+		namespace := requiredObjectString(r.vm, macaroonObject, "namespace")
+		var constraintSchema *jsonschema.Schema
+		var constraintSchemaDocument map[string]any
+		if schemaValue := macaroonObject.Get("constraintSchema"); !isNullish(schemaValue) {
+			constraintSchemaDocument, err = normalizeSchemaDocument(schemaValue.Export())
+			if err != nil {
+				panic(r.vm.NewTypeError("credential type %q has invalid macaroon.constraintSchema: %v", credentialType, err))
+			}
+			constraintSchema, err = compileCredentialConfigSchema(credentialType+"-authorization", constraintSchemaDocument)
+			if err != nil {
+				panic(r.vm.NewTypeError("credential type %q has invalid macaroon.constraintSchema: %v", credentialType, err))
+			}
+		}
+		var validateConstraint goja.Callable
+		if validateValue := macaroonObject.Get("validateConstraint"); !isNullish(validateValue) {
+			var valid bool
+			validateConstraint, valid = goja.AssertFunction(validateValue)
+			if !valid {
+				panic(r.vm.NewTypeError("credential type %q macaroon.validateConstraint must be a function", credentialType))
+			}
+		}
+		constraint, ok := goja.AssertFunction(macaroonObject.Get("constraint"))
+		if !ok {
+			panic(r.vm.NewTypeError("credential type %q macaroon.constraint must be a function", credentialType))
+		}
+		authorize, ok := goja.AssertFunction(macaroonObject.Get("authorize"))
+		if !ok {
+			panic(r.vm.NewTypeError("credential type %q macaroon.authorize must be a function", credentialType))
+		}
+		macaroonRegistration = &credentialMacaroonRegistration{
+			namespace:                namespace,
+			constraintSchema:         constraintSchema,
+			constraintSchemaDocument: constraintSchemaDocument,
+			validateConstraint:       validateConstraint,
+			constraint:               constraint,
+			authorize:                authorize,
+		}
+	}
+
 	r.credentialTypes[credentialType] = credentialTypeRegistration{
 		configSchema: compiledSchema,
 		validate:     validate,
+		macaroon:     macaroonRegistration,
 		source:       r.source,
 	}
 	return goja.Undefined()
@@ -700,6 +885,14 @@ func (r *scriptRuntime) validateSpecs(specs []Spec) error {
 					return fmt.Errorf("validating credential %q with type %q: %w", spec.Name, spec.Type, err)
 				}
 			}
+			if registeredType.macaroon != nil {
+				validationContext, cancel := context.WithTimeout(context.Background(), initializationTimeout)
+				_, err := r.credentialConstraint(validationContext, spec, registeredType.macaroon.namespace)
+				cancel()
+				if err != nil {
+					return fmt.Errorf("deriving macaroon constraint for credential %q with type %q: %w", spec.Name, spec.Type, err)
+				}
+			}
 		}
 
 		matched := false
@@ -757,6 +950,21 @@ func compileCredentialConfigSchema(credentialType string, exported any) (*jsonsc
 		return nil, fmt.Errorf("compiling Draft 2020-12 schema: %w", err)
 	}
 	return compiled, nil
+}
+
+func normalizeSchemaDocument(exported any) (map[string]any, error) {
+	encoded, err := json.Marshal(exported)
+	if err != nil {
+		return nil, fmt.Errorf("schema must be a JSON value: %w", err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(encoded, &document); err != nil {
+		return nil, fmt.Errorf("schema must be a JSON object: %w", err)
+	}
+	if document == nil {
+		return nil, fmt.Errorf("schema must be a JSON object")
+	}
+	return document, nil
 }
 
 func safeSchemaValidationError(err error) string {
@@ -856,6 +1064,16 @@ func (r *scriptRuntime) registrationPlans() []registrationPlan {
 	return plans
 }
 
+func (r *scriptRuntime) macaroonNamespaces() map[string]string {
+	result := make(map[string]string)
+	for credentialType, registration := range r.credentialTypes {
+		if registration.macaroon != nil {
+			result[credentialType] = registration.macaroon.namespace
+		}
+	}
+	return result
+}
+
 func (r *scriptRuntime) resolve(ctx context.Context, request provider.Request, config map[string]any) (provider.Result, error) {
 	providerContext, cancel := context.WithTimeout(ctx, providerExecutionTimeout)
 	defer cancel()
@@ -882,6 +1100,8 @@ func (r *scriptRuntime) resolveMatched(request provider.Request, config map[stri
 		"method":         request.Method,
 		"path":           request.Path,
 		"headers":        cloneStringMap(request.Headers),
+		"body":           r.vm.ToValue(r.vm.NewArrayBuffer(bytes.Clone(request.Body))),
+		"bodyPartial":    request.BodyPartial,
 	}
 
 	for _, registration := range r.registrations {
@@ -933,6 +1153,155 @@ func (r *scriptRuntime) resolveMatched(request provider.Request, config map[stri
 	return merged, nil
 }
 
+func (r *scriptRuntime) credentialConstraint(ctx context.Context, spec Spec, namespace string) (*policy.Constraint, error) {
+	credentialContext, cancel := context.WithTimeout(ctx, providerExecutionTimeout)
+	defer cancel()
+	r.callContext = credentialContext
+
+	var constraint *policy.Constraint
+	err := r.runWithContext(credentialContext, func() error {
+		registeredType, ok := r.credentialTypes[spec.Type]
+		if !ok || registeredType.macaroon == nil {
+			return fmt.Errorf("credential type %q has no macaroon registration", spec.Type)
+		}
+		if registeredType.macaroon.namespace != namespace {
+			return fmt.Errorf("credential type %q changed macaroon namespace from %q to %q", spec.Type, namespace, registeredType.macaroon.namespace)
+		}
+		value, callErr := registeredType.macaroon.constraint(
+			goja.Undefined(),
+			r.vm.ToValue(cloneMap(spec.Config)),
+		)
+		if callErr != nil {
+			return callErr
+		}
+		if isNullish(value) {
+			return nil
+		}
+		exported, ok := value.Export().(map[string]any)
+		if !ok {
+			return fmt.Errorf("macaroon.constraint must return an object or null")
+		}
+		encoded, err := json.Marshal(exported)
+		if err != nil {
+			return fmt.Errorf("macaroon.constraint returned a non-JSON value: %w", err)
+		}
+		var body map[string]any
+		if err := json.Unmarshal(encoded, &body); err != nil {
+			return fmt.Errorf("normalizing macaroon.constraint result: %w", err)
+		}
+		constraint = &policy.Constraint{Namespace: namespace, Body: body}
+		return nil
+	})
+	return constraint, err
+}
+
+func (r *scriptRuntime) credentialConstraintSchema(spec Spec, namespace string) (map[string]any, error) {
+	registeredType, ok := r.credentialTypes[spec.Type]
+	if !ok || registeredType.macaroon == nil {
+		return nil, fmt.Errorf("credential type %q has no macaroon registration", spec.Type)
+	}
+	if registeredType.macaroon.namespace != namespace {
+		return nil, fmt.Errorf("credential type %q changed macaroon namespace from %q to %q", spec.Type, namespace, registeredType.macaroon.namespace)
+	}
+	if registeredType.macaroon.constraintSchemaDocument == nil {
+		return nil, nil
+	}
+	return cloneMap(registeredType.macaroon.constraintSchemaDocument), nil
+}
+
+func (r *scriptRuntime) validateCredentialConstraint(ctx context.Context, spec Spec, namespace string, body map[string]any) error {
+	registeredType, ok := r.credentialTypes[spec.Type]
+	if !ok || registeredType.macaroon == nil {
+		return fmt.Errorf("credential type %q has no macaroon registration", spec.Type)
+	}
+	if registeredType.macaroon.namespace != namespace {
+		return fmt.Errorf("credential type %q changed macaroon namespace from %q to %q", spec.Type, namespace, registeredType.macaroon.namespace)
+	}
+	if registeredType.macaroon.constraintSchema == nil {
+		return fmt.Errorf("credential type %q does not declare macaroon.constraintSchema", spec.Type)
+	}
+	if err := registeredType.macaroon.constraintSchema.Validate(cloneMap(body)); err != nil {
+		return fmt.Errorf("validating authorization for credential %q with type %q: %s", spec.Name, spec.Type, safeSchemaValidationError(err))
+	}
+	if registeredType.macaroon.validateConstraint != nil {
+		validationContext, cancel := context.WithTimeout(ctx, providerExecutionTimeout)
+		defer cancel()
+		r.callContext = validationContext
+		if err := r.runWithContext(validationContext, func() error {
+			_, validateErr := registeredType.macaroon.validateConstraint(
+				goja.Undefined(),
+				r.vm.ToValue(cloneMap(body)),
+			)
+			return validateErr
+		}); err != nil {
+			return fmt.Errorf("validating authorization for credential %q with type %q: %w", spec.Name, spec.Type, err)
+		}
+	}
+	return nil
+}
+
+func (r *scriptRuntime) authorizeCredential(ctx context.Context, request policy.Request, spec Spec, namespace string) (policy.Decision, error) {
+	policyContext, cancel := context.WithTimeout(ctx, providerExecutionTimeout)
+	defer cancel()
+	r.callContext = policyContext
+
+	decision := policy.Decision{}
+	err := r.runWithContext(policyContext, func() error {
+		registeredType, ok := r.credentialTypes[spec.Type]
+		if !ok || registeredType.macaroon == nil {
+			return fmt.Errorf("credential type %q has no macaroon registration", spec.Type)
+		}
+		if registeredType.macaroon.namespace != namespace {
+			return fmt.Errorf("credential type %q changed macaroon namespace from %q to %q", spec.Type, namespace, registeredType.macaroon.namespace)
+		}
+		for _, constraint := range request.Constraints {
+			if constraint.Namespace != namespace {
+				decision = policy.Deny(fmt.Sprintf("credential type %s cannot consume macaroon constraint namespace %q", spec.Type, constraint.Namespace))
+				return nil
+			}
+		}
+		value, callErr := registeredType.macaroon.authorize(
+			goja.Undefined(),
+			r.vm.ToValue(r.policyRequestValue(request)),
+			r.vm.ToValue(cloneMap(spec.Config)),
+		)
+		if callErr != nil {
+			return callErr
+		}
+		var exportErr error
+		decision, exportErr = exportPolicyDecision(r.vm, "credential type "+spec.Type+" macaroon authorizer", value)
+		return exportErr
+	})
+	return decision, err
+}
+
+func (r *scriptRuntime) policyRequestValue(request policy.Request) map[string]any {
+	var subject any
+	if request.Subject != nil {
+		subject = *request.Subject
+	}
+	constraints := make([]map[string]any, 0, len(request.Constraints))
+	for _, constraint := range request.Constraints {
+		constraints = append(constraints, map[string]any{
+			"namespace": constraint.Namespace,
+			"body":      cloneMap(constraint.Body),
+		})
+	}
+	return map[string]any{
+		"policy":         request.Policy,
+		"policyType":     request.PolicyType,
+		"host":           request.Host,
+		"method":         request.Method,
+		"path":           request.Path,
+		"body":           r.vm.ToValue(r.vm.NewArrayBuffer(bytes.Clone(request.Body))),
+		"bodyPartial":    request.BodyPartial,
+		"credential":     request.Credential,
+		"credentialType": request.CredentialType,
+		"subject":        subject,
+		"constraints":    constraints,
+	}
+}
+
 func (r *scriptRuntime) authorizeRequest(ctx context.Context, request policy.Request, config map[string]any) (policy.Decision, error) {
 	policyContext, cancel := context.WithTimeout(ctx, providerExecutionTimeout)
 	defer cancel()
@@ -941,28 +1310,7 @@ func (r *scriptRuntime) authorizeRequest(ctx context.Context, request policy.Req
 	decision := policy.Decision{}
 	err := r.runWithContext(policyContext, func() error {
 		matched := false
-		var subject any
-		if request.Subject != nil {
-			subject = *request.Subject
-		}
-		constraints := make([]map[string]any, 0, len(request.Constraints))
-		for _, constraint := range request.Constraints {
-			constraints = append(constraints, map[string]any{
-				"namespace": constraint.Namespace,
-				"body":      cloneMap(constraint.Body),
-			})
-		}
-		requestValue := map[string]any{
-			"policy":         request.Policy,
-			"policyType":     request.PolicyType,
-			"host":           request.Host,
-			"method":         request.Method,
-			"path":           request.Path,
-			"credential":     request.Credential,
-			"credentialType": request.CredentialType,
-			"subject":        subject,
-			"constraints":    constraints,
-		}
+		requestValue := r.policyRequestValue(request)
 		for _, registration := range r.policies {
 			if !matchesCredentialType(registration.policyType, request.PolicyType) {
 				continue
@@ -1545,6 +1893,17 @@ func cloneSpecs(specs []Spec) []Spec {
 		result[i] = Spec{Name: spec.Name, Type: spec.Type, Config: cloneMap(spec.Config)}
 	}
 	return result
+}
+
+func sameConfiguredMacaroonNamespaces(left, right map[string]string, specs []Spec) bool {
+	for _, spec := range specs {
+		leftNamespace, leftOK := left[spec.Type]
+		rightNamespace, rightOK := right[spec.Type]
+		if leftOK != rightOK || leftNamespace != rightNamespace {
+			return false
+		}
+	}
+	return true
 }
 
 func clonePolicySpecs(specs []PolicySpec) []PolicySpec {

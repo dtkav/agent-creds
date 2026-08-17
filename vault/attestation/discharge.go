@@ -152,6 +152,27 @@ func Add3PCaveatWithLocation(m *macaroon.Macaroon, encryptionKey macaroon.Encryp
 	return nil
 }
 
+// Add3PAuthorization adds a third-party authorization caveat whose encrypted
+// ticket identifies the selected credential and provider namespace. The
+// primary macaroon separately requires a constraint in that namespace, so an
+// empty discharge fails closed.
+func Add3PAuthorization(m *macaroon.Macaroon, encryptionKey macaroon.EncryptionKey, location, credential, namespace, authorizer string) error {
+	if err := tfmac.ValidateAuthorizationRequest(credential, namespace, authorizer); err != nil {
+		return err
+	}
+	if err := m.Add3P(encryptionKey, location, &tfmac.AuthorizationRequest{
+		Credential: credential,
+		Namespace:  namespace,
+		Authorizer: authorizer,
+	}); err != nil {
+		return fmt.Errorf("failed to add third-party authorization caveat: %w", err)
+	}
+	if err := m.Add(&tfmac.ApplicationConstraintRequirement{Namespace: namespace}); err != nil {
+		return fmt.Errorf("failed to require application constraint: %w", err)
+	}
+	return nil
+}
+
 // Add3PCaveat adds a third-party attestation caveat to a macaroon.
 // This is used when creating .akey files. It delegates to Add3PCaveatWithLocation
 // with the default AttestationLocation.

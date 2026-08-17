@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -19,10 +20,16 @@ type EndpointInfo struct {
 
 // CredentialInfo holds metadata returned by vault-ssh info command.
 type CredentialInfo struct {
-	Type      string         `json:"type"`
-	EnvVars   []string       `json:"env_vars,omitempty"`
-	Hosts     []string       `json:"hosts,omitempty"`
-	Endpoints []EndpointInfo `json:"endpoints,omitempty"`
+	Type          string                       `json:"type"`
+	EnvVars       []string                     `json:"env_vars,omitempty"`
+	Hosts         []string                     `json:"hosts,omitempty"`
+	Endpoints     []EndpointInfo               `json:"endpoints,omitempty"`
+	Authorization *CredentialAuthorizationInfo `json:"authorization,omitempty"`
+}
+
+type CredentialAuthorizationInfo struct {
+	Namespace string         `json:"namespace"`
+	Schema    map[string]any `json:"schema"`
 }
 
 // vaultSSHAddr returns the SSH address for the vault.
@@ -94,9 +101,14 @@ func vaultSSHRun(cfg VaultConfig, args ...string) (string, error) {
 	return result, nil
 }
 
-// vaultSSHMint mints an authorization token for the given host with optional method/path caveats.
-func vaultSSHMint(cfg VaultConfig, host string, methods, paths []string) (string, error) {
-	args := []string{"mint", host, "--require-attestation"}
+// vaultSSHMint mints an authorization token for the given host and includes
+// any default macaroon constraints derived from the selected credential.
+func vaultSSHMint(cfg VaultConfig, credential, host string, methods, paths []string, requireAuthorization bool) (string, error) {
+	requirement := "--require-attestation"
+	if requireAuthorization {
+		requirement = "--require-authorization"
+	}
+	args := []string{"mint", host, requirement, "--credential", credential}
 	if len(methods) > 0 {
 		args = append(args, "--methods", strings.Join(methods, ","))
 	}
@@ -118,8 +130,16 @@ func vaultSSHMint(cfg VaultConfig, host string, methods, paths []string) (string
 }
 
 // vaultSSHDischarge gets a discharge token for an authorization token.
-func vaultSSHDischarge(cfg VaultConfig, authzToken string) (string, error) {
-	output, err := vaultSSHRun(cfg, "discharge", authzToken)
+func vaultSSHDischarge(cfg VaultConfig, authzToken string, constraint map[string]any) (string, error) {
+	args := []string{"discharge", authzToken}
+	if constraint != nil {
+		encoded, err := json.Marshal(constraint)
+		if err != nil {
+			return "", fmt.Errorf("encoding authorization constraint: %w", err)
+		}
+		args = append(args, "--constraint", base64.RawURLEncoding.EncodeToString(encoded))
+	}
+	output, err := vaultSSHRun(cfg, args...)
 	if err != nil {
 		return "", err
 	}

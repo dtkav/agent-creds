@@ -2,6 +2,19 @@ package main
 
 import "testing"
 
+func TestExtAuthzBuffersRawRequestPrefix(t *testing.T) {
+	g := &Generator{}
+	filter := g.extAuthzFilter()
+	typed := filter["typed_config"].(map[string]interface{})
+	body := typed["with_request_body"].(map[string]interface{})
+	if body["max_request_bytes"] != 8192 {
+		t.Fatalf("max request bytes = %#v", body["max_request_bytes"])
+	}
+	if body["allow_partial_message"] != true || body["pack_as_bytes"] != true {
+		t.Fatalf("request body buffering = %#v", body)
+	}
+}
+
 func TestUpstreamTransportDefaults(t *testing.T) {
 	https := UpstreamConfig{}
 	if https.SchemeValue() != "https" || https.PortValue() != 443 {

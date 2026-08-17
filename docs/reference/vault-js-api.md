@@ -71,13 +71,14 @@ registerCredentialType({
   configSchema: {
     $schema: "https://json-schema.org/draft/2020-12/schema",
     type: "object",
-    required: ["active", "identities"],
+    required: ["active", "identities", "scopes"],
     properties: {
       active: { type: "string", minLength: 1 },
       identities: {
         type: "object",
         additionalProperties: { $ref: "#/$defs/identity" },
       },
+      scopes: { type: "array", items: { type: "string" } },
     },
     $defs: {
       identity: {
@@ -92,6 +93,25 @@ registerCredentialType({
       throw new Error("active identity is not configured");
     }
   },
+  macaroon: {
+    namespace: "session",
+    constraintSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["scopes"],
+      properties: {
+        scopes: { type: "array", minItems: 1, items: { type: "string" } },
+      },
+    },
+    constraint(config) {
+      return { scopes: config.scopes };
+    },
+    authorize(request, config) {
+      return request.constraints.every((constraint) =>
+        constraint.body.scopes.includes("records:read")
+      );
+    },
+  },
 });
 ```
 
@@ -100,6 +120,7 @@ registerCredentialType({
 | `credentialType` | yes | Exact, non-empty configured credential type. A type can be registered only once. |
 | `configSchema` | yes | JSON Schema for provider-specific configuration. |
 | `validate(config)` | no | Additional semantic or cross-field validation. Throw to reject activation. |
+| `macaroon` | no | Credential-bound macaroon namespace, derivation, and authorization callbacks. |
 
 Vault compiles the schema while loading the extension. A schema without
 `$schema` uses JSON Schema Draft 2020-12. Document-local references are
@@ -113,6 +134,48 @@ are annotations only: validation does not add or modify configuration fields.
 Type validation runs before provider-level validation. Registering a type does
 not register a resolver; at least one `registerCredentialProvider` must also
 match each configured JavaScript credential.
+
+### Credential-bound macaroons
+
+The optional `macaroon` object lets a credential type own application caveats
+without requiring a separately configured upstream policy:
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `namespace` | yes | Non-empty application-constraint namespace owned by this credential type. |
+| `constraintSchema` | no | JSON Schema for provider fields accepted from named `[authorization.*]` policies. Required before the credential can use that configuration form. |
+| `validateConstraint(constraint)` | no | Additional semantic validation for a schema-valid authorization body. Throw to reject discharge issuance. |
+| `constraint(config)` | yes | Returns a JSON object to add to newly minted capabilities, or `null` for no default caveat. |
+| `authorize(request, config)` | yes | Authorizes every verified request using the credential. |
+
+`constraint` runs during configuration validation and when credential metadata
+is requested for minting. Its return value is intentionally exposed as public
+capability metadata, so it must select only authorization limits and must never
+copy secrets from `config`. `adev` identifies the selected credential when it
+mints, causing Vault to add this constraint to the macaroon automatically.
+
+`authorize` receives the same request shape documented for upstream policies,
+but `request.constraints` contains only verified caveats in the credential
+type's namespace. The callback runs even when that list is empty, so it must
+enforce the current credential configuration as the upper bound. Multiple
+same-namespace caveats are conjunctive; this allows a holder to append a
+narrower caveat offline. A default caveat also preserves the original scope if
+the credential configuration is later widened. Narrowing current credential
+config takes effect immediately; widening it requires minting a new capability
+because an existing macaroon cannot be broadened.
+
+Constraints in other namespaces remain unconsumed and require an explicitly
+selected upstream policy. Changing a configured credential type's macaroon
+namespace requires a Vault configuration reload; provider-only hot reloads
+that change it are rejected.
+
+`constraintSchema` is public provider metadata. Vault validates an
+authorization body against it immediately before issuing the third-party
+discharge, then embeds the validated body under `namespace`. It is independent
+of `configSchema`: the former describes authority supplied by an external
+authorizer, while the latter describes the stored credential itself. A primary
+macaroon minted for a named authorization also carries a requirement for the
+namespace, so a valid but constraint-free discharge fails verification.
 
 ## `registerCredentialProvider`
 
@@ -169,12 +232,21 @@ resolved. Selection metadata such as `type`, `env`, `policy`, and
   method: "GET",
   path: "/v1/records?limit=10",
   headers: { /* original request headers */ },
+  body: new ArrayBuffer(0),          // buffered raw request prefix
+  bodyPartial: false,
 }
 ```
 
 Header values and other request facts remain caller-controlled. Do not treat
 them as secrets or authorization decisions, and do not forward the incoming
 authorization header as an upstream credential.
+
+`body` is an `ArrayBuffer` containing at most the first 8 KiB of the request
+body. `bodyPartial` is true when Envoy stopped buffering at that limit. Parse
+binary protocols through a `Uint8Array`, and fail closed if the complete
+authorization-relevant prefix is not present. Request bodies are available
+only to verified provider and policy callbacks, not pre-verification
+extractors.
 
 ### Provider result
 
@@ -200,9 +272,9 @@ request declares the same cache scope and the combined result has an
 `expiresAt`. Vault refreshes a cached result when fewer than 30 seconds remain
 and clears caches when the runtime generation changes.
 
-The cache key does not include host, method, path, or headers. Use credential
-caching only when every request matched by the registrations can reuse the
-same result.
+The cache key does not include host, method, path, headers, or body. Use
+credential caching only when every request matched by the registrations can
+reuse the same result.
 
 ## `registerCredentialExtractor`
 
@@ -232,10 +304,11 @@ registerCredentialExtractor({
 | `match` | no | Host, method, and path restrictions. |
 | `extract(request)` | yes | Returns a token string or `null`/`undefined`. |
 
-The request has the same fields as a provider request but no configuration
-argument. Extractors run in priority order. The first non-empty returned string
-is trimmed and sent to the Go verifier. Empty and nullish results continue to
-the next extractor. Returned tokens are limited to 64 KiB.
+The request contains the provider request's credential, credential type, host,
+method, path, and headers, but no body or configuration argument. Extractors
+run in priority order. The first non-empty returned string is trimmed and sent
+to the Go verifier. Empty and nullish results continue to the next extractor.
+Returned tokens are limited to 64 KiB.
 
 The extractor VM has no `$http`, `$exec`, `$jwt`, resolved configuration, or
 provider-zone `$base64.encode` function.
@@ -282,6 +355,8 @@ excluding `type`. The request object is:
   host: "records.internal",
   method: "GET",
   path: "/v1/records",
+  body: new ArrayBuffer(0),          // same 8 KiB prefix as providers receive
+  bodyPartial: false,
   credential: "service/prod",        // may be empty on identity routes
   credentialType: "session",         // may be empty on identity routes
   subject: "verified-subject",       // string or null
@@ -291,12 +366,14 @@ excluding `type`. The request object is:
 }
 ```
 
-`subject` and `constraints` come from the verified macaroon. A policy must
-evaluate every constraint conjunctively and reject namespaces it does not
-understand. Policy registrations have no priority or request matcher; matching
-registrations run by source path and name until one denies. All registrations
-matching the selected policy type must allow the request. `false` uses a
-generic denial reason; an object can supply a specific reason.
+`subject` and `constraints` come from the verified macaroon. Credential-bound
+macaroon hooks consume their own namespace first, so an explicit policy
+receives the remaining constraints. A policy must evaluate every constraint it
+receives conjunctively and reject namespaces it does not understand. Policy
+registrations have no priority or request matcher; matching registrations run
+by source path and name until one denies. All registrations matching the
+selected policy type must allow the request. `false` uses a generic denial
+reason; an object can supply a specific reason.
 
 Credential type schemas do not apply to policy configuration. Use the policy
 registration's `validate(config)` callback for policy configuration checks.

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +27,7 @@ const (
 )
 
 type traceState struct {
+	activeID       uint64
 	source         string
 	agentName      string
 	traceID        string
@@ -60,6 +62,22 @@ type Normalizer struct {
 	invalidSegments atomic.Uint64
 	overflowed      atomic.Uint64
 	discarded       atomic.Uint64
+	nextActiveID    atomic.Uint64
+}
+
+type ActiveOperation struct {
+	ID            uint64 `json:"id"`
+	AgentID       string `json:"agent_id"`
+	AgentName     string `json:"agent_name"`
+	Provider      string `json:"provider"`
+	Operation     string `json:"operation"`
+	Model         string `json:"model"`
+	StartedAt     string `json:"started_at"`
+	LastSeenAt    string `json:"last_seen_at"`
+	ElapsedMS     int64  `json:"elapsed_ms"`
+	Phase         string `json:"phase"`
+	RequestBytes  int64  `json:"request_bytes"`
+	ResponseBytes int64  `json:"response_bytes"`
 }
 
 func NewNormalizer(store *Store, hub *Hub) *Normalizer {
@@ -87,7 +105,8 @@ func (n *Normalizer) Consume(
 	state := n.traces[key]
 	if state == nil {
 		state = &traceState{
-			source: agentID, agentName: agentName, traceID: traceID,
+			activeID: n.nextActiveID.Add(1),
+			source:   agentID, agentName: agentName, traceID: traceID,
 			started: now, lastSeen: now,
 		}
 		n.traces[key] = state
@@ -122,6 +141,43 @@ func (n *Normalizer) Consume(
 			n.finish(key, op)
 		}
 	}
+}
+
+func (n *Normalizer) Active() []ActiveOperation {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	now := time.Now().UTC()
+	active := make([]ActiveOperation, 0, len(n.traces))
+	for _, state := range n.traces {
+		provider := state.provider
+		operation := state.operation
+		model := state.model
+		if provider == "" {
+			provider = "detecting"
+		}
+		if operation == "" {
+			operation = "request"
+		}
+		if model == "" {
+			model = "detecting"
+		}
+		phase := "requesting"
+		if state.statusCode != 0 || state.responseBytes != 0 {
+			phase = "streaming"
+		}
+		active = append(active, ActiveOperation{
+			ID: state.activeID, AgentID: state.source, AgentName: state.agentName,
+			Provider: provider, Operation: operation, Model: model,
+			StartedAt:  state.started.Format(time.RFC3339Nano),
+			LastSeenAt: state.lastSeen.Format(time.RFC3339Nano),
+			ElapsedMS:  now.Sub(state.started).Milliseconds(), Phase: phase,
+			RequestBytes: state.requestBytes, ResponseBytes: state.responseBytes,
+		})
+	}
+	sort.Slice(active, func(i, j int) bool {
+		return active[i].StartedAt < active[j].StartedAt
+	})
+	return active
 }
 
 func (n *Normalizer) finish(key traceKey, op *Operation) {

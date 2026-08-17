@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"testing"
+	"time"
 )
 
 func TestStoreHidesLegacyEmptyIncompleteTraces(t *testing.T) {
@@ -104,5 +105,36 @@ CREATE TABLE operations (
 	if len(operations) != 1 || operations[0].AgentID != "0m62fua8t3xk2sl" ||
 		operations[0].AgentName != "Dispatch" {
 		t.Fatalf("resolved agent identity was not persisted: %+v", operations)
+	}
+}
+
+func TestStoreSinceReturnsTimelineWindow(t *testing.T) {
+	store, err := OpenStore(t.TempDir() + "/operations.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for _, endedAt := range []string{
+		"2026-01-01T00:00:10Z", "2026-01-01T02:00:10Z",
+	} {
+		op := &Operation{
+			Source: "agent", Provider: "openai", Operation: "responses",
+			Model: "gpt-test", StartedAt: endedAt, EndedAt: endedAt,
+			StatusCode: 200, Outcome: "success", InputTokens: 1,
+		}
+		if err := store.Insert(op); err != nil {
+			t.Fatal(err)
+		}
+	}
+	since, err := time.Parse(time.RFC3339, "2026-01-01T01:00:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	operations, err := store.Since(since, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(operations) != 1 || operations[0].EndedAt != "2026-01-01T02:00:10Z" {
+		t.Fatalf("timeline window returned unexpected operations: %+v", operations)
 	}
 }

@@ -134,7 +134,7 @@ func (s *Store) Recent(limit int) ([]Operation, error) {
 	if limit < 1 || limit > 1000 {
 		limit = 100
 	}
-	rows, err := s.db.Query(`
+	return s.queryOperations(`
 SELECT id, source, provider, operation_name, model, started_at, ended_at,
 	duration_ms, status_code, outcome, input_tokens, output_tokens,
 	cache_read_tokens, cache_write_tokens, reasoning_tokens,
@@ -142,6 +142,25 @@ SELECT id, source, provider, operation_name, model, started_at, ended_at,
 FROM operations
 WHERE NOT (input_tokens = 0 AND output_tokens = 0 AND duration_ms >= 300000)
 ORDER BY id DESC LIMIT ?`, limit)
+}
+
+func (s *Store) Since(since time.Time, limit int) ([]Operation, error) {
+	if limit < 1 || limit > 20000 {
+		limit = 20000
+	}
+	return s.queryOperations(`
+SELECT id, source, provider, operation_name, model, started_at, ended_at,
+	duration_ms, status_code, outcome, input_tokens, output_tokens,
+	cache_read_tokens, cache_write_tokens, reasoning_tokens,
+	request_bytes, response_bytes, agent_name
+FROM operations
+WHERE ended_at >= ?
+	AND NOT (input_tokens = 0 AND output_tokens = 0 AND duration_ms >= 300000)
+ORDER BY id DESC LIMIT ?`, since.UTC().Format(time.RFC3339Nano), limit)
+}
+
+func (s *Store) queryOperations(query string, arguments ...any) ([]Operation, error) {
+	rows, err := s.db.Query(query, arguments...)
 	if err != nil {
 		return nil, err
 	}

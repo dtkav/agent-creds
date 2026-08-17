@@ -68,6 +68,62 @@ func TestNormalizerPersistsOnlyAllowlistedOperationData(t *testing.T) {
 	}
 }
 
+func TestNormalizerReportsOnlySafeActiveOperationFields(t *testing.T) {
+	store, err := OpenStore(t.TempDir() + "/operations.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	normalizer := NewNormalizer(store, NewHub())
+	secret := "DO_NOT_EXPOSE_active_prompt"
+
+	consume := func(segment map[string]any) {
+		t.Helper()
+		envelope, err := json.Marshal(map[string]any{
+			"http_streamed_trace_segment": mergeTraceID(segment),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		normalizer.Consume("instance-a", "agent-a", "Dispatch", 1, envelope)
+	}
+	consume(map[string]any{"request_headers": map[string]any{"headers": []any{
+		map[string]any{"key": ":authority", "value": "api.openai.com"},
+		map[string]any{"key": ":path", "value": "/v1/responses"},
+	}}})
+	consume(map[string]any{"request_body_chunk": bodyChunk(
+		`{"model":"gpt-active","input":"` + secret + `"}`)})
+
+	active := normalizer.Active()
+	if len(active) != 1 {
+		t.Fatalf("active operations = %d, want 1", len(active))
+	}
+	if active[0].AgentID != "agent-a" || active[0].AgentName != "Dispatch" ||
+		active[0].Provider != "openai" || active[0].Model != "gpt-active" ||
+		active[0].Phase != "requesting" || active[0].ElapsedMS < 0 {
+		t.Fatalf("unexpected active operation: %+v", active[0])
+	}
+	encoded, err := json.Marshal(active)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), secret) {
+		t.Fatal("active operation snapshot exposed request content")
+	}
+
+	consume(map[string]any{"response_headers": map[string]any{"headers": []any{
+		map[string]any{"key": ":status", "value": "200"},
+	}}})
+	if phase := normalizer.Active()[0].Phase; phase != "streaming" {
+		t.Fatalf("active phase = %q, want streaming", phase)
+	}
+	consume(map[string]any{"response_body_chunk": bodyChunk(
+		`data: {"type":"response.completed","response":{"model":"gpt-active","usage":{"input_tokens":10,"output_tokens":2}}}` + "\n\n")})
+	if active := normalizer.Active(); len(active) != 0 {
+		t.Fatalf("completed operation remained active: %+v", active)
+	}
+}
+
 func TestNormalizerDecodesCompressedStreamingUsage(t *testing.T) {
 	path := t.TempDir() + "/operations.db"
 	store, err := OpenStore(path)

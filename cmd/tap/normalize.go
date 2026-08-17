@@ -149,12 +149,12 @@ func (n *Normalizer) Active() []ActiveOperation {
 	now := time.Now().UTC()
 	active := make([]ActiveOperation, 0, len(n.traces))
 	for _, state := range n.traces {
+		if state.provider != "openai" && state.provider != "anthropic" {
+			continue
+		}
 		provider := state.provider
 		operation := state.operation
 		model := state.model
-		if provider == "" {
-			provider = "detecting"
-		}
 		if operation == "" {
 			operation = "request"
 		}

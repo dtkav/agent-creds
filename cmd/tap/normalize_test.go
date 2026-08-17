@@ -110,6 +110,22 @@ func TestNormalizerReportsOnlySafeActiveOperationFields(t *testing.T) {
 	if strings.Contains(string(encoded), secret) {
 		t.Fatal("active operation snapshot exposed request content")
 	}
+	unknownEnvelope, err := json.Marshal(map[string]any{
+		"http_streamed_trace_segment": map[string]any{
+			"trace_id": 2,
+			"request_headers": map[string]any{"headers": []any{
+				map[string]any{"key": ":authority", "value": "telemetry.example"},
+				map[string]any{"key": ":path", "value": "/events"},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	normalizer.Consume("instance-a", "agent-a", "Dispatch", 1, unknownEnvelope)
+	if active := normalizer.Active(); len(active) != 1 {
+		t.Fatalf("non-GenAI request appeared as active usage: %+v", active)
+	}
 
 	consume(map[string]any{"response_headers": map[string]any{"headers": []any{
 		map[string]any{"key": ":status", "value": "200"},

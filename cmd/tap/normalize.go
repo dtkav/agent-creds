@@ -149,7 +149,8 @@ func (n *Normalizer) Active() []ActiveOperation {
 	now := time.Now().UTC()
 	active := make([]ActiveOperation, 0, len(n.traces))
 	for _, state := range n.traces {
-		if state.provider != "openai" && state.provider != "anthropic" {
+		if state.provider != "openai" && state.provider != "anthropic" &&
+			state.provider != "openrouter" {
 			continue
 		}
 		provider := state.provider
@@ -269,6 +270,14 @@ func (s *traceState) applyRequestHeaders(value any) {
 		path = before
 	}
 	switch {
+	case openRouterAuthority(authority) && strings.HasSuffix(path, "/chat/completions"):
+		s.provider, s.operation = "openrouter", "chat.completions"
+	case openRouterAuthority(authority) && strings.HasSuffix(path, "/responses"):
+		s.provider, s.operation = "openrouter", "responses"
+	case openRouterAuthority(authority) && strings.HasSuffix(path, "/completions"):
+		s.provider, s.operation = "openrouter", "completions"
+	case openRouterAuthority(authority):
+		// Do not classify unsupported OpenRouter routes by path alone.
 	case strings.EqualFold(authority, "api.openai.com") || strings.HasSuffix(path, "/responses"):
 		s.provider, s.operation = "openai", "responses"
 	case strings.EqualFold(authority, "api.anthropic.com") || strings.HasSuffix(path, "/messages"):
@@ -276,6 +285,11 @@ func (s *traceState) applyRequestHeaders(value any) {
 	default:
 		s.provider, s.operation = "unknown", "generate"
 	}
+}
+
+func openRouterAuthority(authority string) bool {
+	authority = strings.ToLower(strings.TrimSuffix(authority, ":443"))
+	return authority == "openrouter.ai" || strings.HasSuffix(authority, ".openrouter.ai")
 }
 
 func (s *traceState) applyResponseHeaders(value any) {
@@ -320,6 +334,8 @@ func (s *traceState) normalized(force bool, n *Normalizer) (*Operation, bool) {
 		usage, complete = parseOpenAI(body)
 	case "anthropic":
 		usage, complete = parseAnthropic(body)
+	case "openrouter":
+		usage, complete = parseOpenRouter(body)
 	}
 	if s.statusCode >= 400 && json.Valid(body) {
 		complete = true
@@ -354,7 +370,8 @@ func (s *traceState) normalized(force bool, n *Normalizer) (*Operation, bool) {
 		DurationMS: durationMS, StatusCode: s.statusCode, Outcome: outcome,
 		InputTokens: usage.input, OutputTokens: usage.output,
 		CacheReadTokens: usage.cacheRead, CacheWriteTokens: usage.cacheWrite,
-		ReasoningTokens: usage.reasoning, RequestBytes: s.requestBytes,
+		ReasoningTokens: usage.reasoning, CostCredits: usage.cost,
+		RequestBytes:  s.requestBytes,
 		ResponseBytes: s.responseBytes,
 	}, true
 }
@@ -366,6 +383,7 @@ type tokenUsage struct {
 	cacheRead  int64
 	cacheWrite int64
 	reasoning  int64
+	cost       float64
 }
 
 func parseOpenAI(body []byte) (tokenUsage, bool) {
@@ -468,6 +486,91 @@ func anthropicObject(root map[string]any) tokenUsage {
 		output:     intValue(usage["output_tokens"]),
 		cacheRead:  intValue(usage["cache_read_input_tokens"]),
 		cacheWrite: intValue(usage["cache_creation_input_tokens"]),
+	}
+}
+
+func parseOpenRouter(body []byte) (tokenUsage, bool) {
+	var root map[string]any
+	if json.Unmarshal(body, &root) == nil {
+		return openRouterObject(root), hasOpenRouterUsage(root)
+	}
+	var usage tokenUsage
+	var reported bool
+	var completed bool
+	for _, data := range sseData(body) {
+		if string(data) == "[DONE]" {
+			completed = true
+			continue
+		}
+		var event map[string]any
+		if json.Unmarshal(data, &event) != nil {
+			continue
+		}
+		current := openRouterObject(event)
+		if current.model != "" {
+			usage.model = current.model
+		}
+		if hasOpenRouterUsage(event) {
+			if current.model == "" {
+				current.model = usage.model
+			}
+			usage = current
+			reported = true
+			completed = true
+		}
+		eventType := scalarString(event["type"])
+		if eventType == "response.done" || eventType == "response.completed" {
+			completed = true
+		}
+	}
+	return usage, completed && reported
+}
+
+func hasOpenRouterUsage(root map[string]any) bool {
+	object := root
+	if nested, ok := root["response"].(map[string]any); ok {
+		object = nested
+	}
+	usage, _ := object["usage"].(map[string]any)
+	if usage == nil {
+		usage, _ = root["usage"].(map[string]any)
+	}
+	return usage != nil
+}
+
+func openRouterObject(root map[string]any) tokenUsage {
+	object := root
+	if nested, ok := root["response"].(map[string]any); ok {
+		object = nested
+	}
+	usage, _ := object["usage"].(map[string]any)
+	if usage == nil {
+		usage, _ = root["usage"].(map[string]any)
+	}
+	promptDetails, _ := usage["prompt_tokens_details"].(map[string]any)
+	if promptDetails == nil {
+		promptDetails, _ = usage["input_tokens_details"].(map[string]any)
+	}
+	completionDetails, _ := usage["completion_tokens_details"].(map[string]any)
+	if completionDetails == nil {
+		completionDetails, _ = usage["output_tokens_details"].(map[string]any)
+	}
+	input := intValue(usage["prompt_tokens"])
+	if input == 0 {
+		input = intValue(usage["input_tokens"])
+	}
+	output := intValue(usage["completion_tokens"])
+	if output == 0 {
+		output = intValue(usage["output_tokens"])
+	}
+	return tokenUsage{
+		model:      scalarString(object["model"]),
+		input:      input,
+		output:     output,
+		cacheRead:  intValue(promptDetails["cached_tokens"]),
+		cacheWrite: intValue(promptDetails["cache_write_tokens"]),
+		reasoning:  intValue(completionDetails["reasoning_tokens"]),
+		cost:       floatValue(usage["cost"]),
 	}
 }
 
@@ -604,6 +707,21 @@ func intValue(value any) int64 {
 		return result
 	case int64:
 		return value
+	default:
+		return 0
+	}
+}
+
+func floatValue(value any) float64 {
+	switch value := value.(type) {
+	case float64:
+		return value
+	case json.Number:
+		result, _ := value.Float64()
+		return result
+	case string:
+		result, _ := strconv.ParseFloat(value, 64)
+		return result
 	default:
 		return 0
 	}

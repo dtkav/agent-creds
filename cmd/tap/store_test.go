@@ -86,6 +86,7 @@ CREATE TABLE operations (
 		Provider: "openai", Operation: "responses", Model: "gpt-test",
 		StartedAt: "2026-01-01T00:00:00Z", EndedAt: "2026-01-01T00:00:01Z",
 		DurationMS: 1000, StatusCode: 200, Outcome: "success", InputTokens: 1,
+		CostCredits: 0.00125,
 	}
 	if err := store.Insert(op); err != nil {
 		t.Fatal(err)
@@ -103,8 +104,8 @@ CREATE TABLE operations (
 		t.Fatal(err)
 	}
 	if len(operations) != 1 || operations[0].AgentID != "0m62fua8t3xk2sl" ||
-		operations[0].AgentName != "Dispatch" {
-		t.Fatalf("resolved agent identity was not persisted: %+v", operations)
+		operations[0].AgentName != "Dispatch" || operations[0].CostCredits != 0.00125 {
+		t.Fatalf("migrated operation was not persisted: %+v", operations)
 	}
 }
 

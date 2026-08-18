@@ -75,6 +75,7 @@ type Activity struct {
 	CacheReadTokens  int64       `json:"cache_read_tokens"`
 	CacheWriteTokens int64       `json:"cache_write_tokens"`
 	ReasoningTokens  int64       `json:"reasoning_tokens"`
+	CostCredits      float64     `json:"cost_credits"`
 	Outcome          string      `json:"outcome"`
 	Operations       []Operation `json:"operations,omitempty"`
 
@@ -149,6 +150,7 @@ func groupOperations(operations []Operation, idleGap time.Duration) []Activity {
 		activity.CacheReadTokens += operation.CacheReadTokens
 		activity.CacheWriteTokens += operation.CacheWriteTokens
 		activity.ReasoningTokens += operation.ReasoningTokens
+		activity.CostCredits += operation.CostCredits
 		if operation.Outcome != "success" {
 			activity.Outcome = operation.Outcome
 		}
@@ -300,6 +302,7 @@ func (s *Server) exportJSONL(w http.ResponseWriter, _ *http.Request) {
 				"agent_creds.cache_read_tokens":  op.CacheReadTokens,
 				"agent_creds.cache_write_tokens": op.CacheWriteTokens,
 				"agent_creds.reasoning_tokens":   op.ReasoningTokens,
+				"agent_creds.cost_credits":       op.CostCredits,
 				"http.response.status_code":      op.StatusCode,
 				"error.type":                     errorType(op.Outcome),
 			},
@@ -342,6 +345,8 @@ func (s *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintln(w, "# TYPE agent_creds_tap_tokens_total counter")
 	fmt.Fprintln(w, "# HELP agent_creds_tap_operation_duration_seconds Total duration of normalized operations.")
 	fmt.Fprintln(w, "# TYPE agent_creds_tap_operation_duration_seconds counter")
+	fmt.Fprintln(w, "# HELP agent_creds_tap_cost_credits_total Provider-reported credits charged.")
+	fmt.Fprintln(w, "# TYPE agent_creds_tap_cost_credits_total counter")
 	for _, row := range rows {
 		labels := fmt.Sprintf("agent_id=%q,agent_name=%q,provider=%q,model=%q,outcome=%q",
 			metricLabel(row.AgentID), metricLabel(row.AgentName),
@@ -357,6 +362,8 @@ func (s *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 		}
 		fmt.Fprintf(w, "agent_creds_tap_operation_duration_seconds{%s} %.3f\n",
 			labels, float64(row.DurationMS)/1000)
+		fmt.Fprintf(w, "agent_creds_tap_cost_credits_total{%s} %.9f\n",
+			labels, row.CostCredits)
 	}
 	fmt.Fprintln(w, "# HELP agent_creds_tap_invalid_segments_total Envoy segments rejected without persistence.")
 	fmt.Fprintln(w, "# TYPE agent_creds_tap_invalid_segments_total counter")
@@ -425,7 +432,7 @@ function summarize(activity){
  activity.started_at=new Date(Math.min(...starts)).toISOString();activity.ended_at=new Date(Math.max(...ends)).toISOString();
  activity.duration_ms=Math.max(...ends)-Math.min(...starts);activity.request_count=ops.length;
  activity.providers=unique(ops,"provider");activity.models=unique(ops,"model");
- activity.input_tokens=total(ops,"input_tokens");activity.output_tokens=total(ops,"output_tokens");
+ activity.input_tokens=total(ops,"input_tokens");activity.output_tokens=total(ops,"output_tokens");activity.cost_credits=total(ops,"cost_credits");
  activity.outcome=ops.find(op=>op.outcome!=="success")?.outcome||"success";
  activity.id=activity.agent_id+":"+Math.min(...ops.map(op=>op.id));return activity
 }
@@ -440,6 +447,8 @@ function cell(value,cls){const span=document.createElement("span");span.classNam
 function row(values,className){const element=document.createElement("div");element.className="row "+className;for(const value of values)element.appendChild(cell(value[0],value[1]));return element}
 function duration(ms){if(ms<1000)return Math.max(0,ms)+" ms";if(ms<60000)return(ms/1000).toFixed(ms<10000?1:0)+" s";const minutes=Math.floor(ms/60000),seconds=Math.round(ms%60000/1000);return minutes+"m "+seconds+"s"}
 function tokens(value){return Number(value).toLocaleString()}
+function credits(value){if(!Number(value))return"";return Number(value).toLocaleString(undefined,{minimumFractionDigits:Number(value)<.01?6:2,maximumFractionDigits:6})+" cr"}
+function usage(value){const tokenText=tokens(value.input_tokens)+" / "+tokens(value.output_tokens);return value.cost_credits?tokenText+" · "+credits(value.cost_credits):tokenText}
 function models(activity){return activity.models.length<=2?activity.models.join(" + "):activity.models.length+" models"}
 function agentColor(id){let hash=0;for(let i=0;i<id.length;i++)hash=(hash*31+id.charCodeAt(i))|0;return"hsl("+Math.abs(hash%360)+" 64% 58%)"}
 function groupRunning(){
@@ -453,7 +462,7 @@ function renderRunning(){
   const title=document.createElement("div");title.className="running-title";const pulse=document.createElement("span");pulse.className="pulse";title.appendChild(pulse);title.appendChild(cell(identity(group)));card.appendChild(title);
   const earliest=Math.min(...group.operations.map(op=>Date.parse(op.started_at))),meta=document.createElement("div");meta.className="running-meta";meta.textContent=group.operations.length+" request"+(group.operations.length===1?"":"s")+" · running "+duration(Date.now()-earliest);card.appendChild(meta);
   const chips=document.createElement("div");chips.className="chips";for(const op of group.operations){const chip=document.createElement("span");chip.className="chip";chip.textContent=op.provider+" · "+op.model+" · "+op.phase;chips.appendChild(chip)}card.appendChild(chips);
-  const pending=document.createElement("div");pending.className="pending";pending.textContent="usage pending final provider packet";card.appendChild(pending);runningRoot.appendChild(card)
+  const pending=document.createElement("div");pending.className="pending";pending.textContent="tokens and credits pending final provider packet";card.appendChild(pending);runningRoot.appendChild(card)
  }
 }
 function timelineAgent(value){return{agent_id:agentID(value),agent_name:value.agent_name||""}}
@@ -466,15 +475,15 @@ function renderTimeline(){
  for(const percent of [0,25,50,75,100]){const tick=document.createElement("div");tick.className="tick";tick.style.left=percent+"%";const label=document.createElement("span");label.textContent=new Date(windowStart+timelineWindow*percent/100).toLocaleTimeString([], {hour:"numeric",minute:"2-digit"});tick.appendChild(label);axisTrack.appendChild(tick)}axis.appendChild(axisTrack);timelineRoot.appendChild(axis);
  if(!ordered.length){const empty=document.createElement("div");empty.className="empty";empty.textContent="No activity in this window";timelineRoot.appendChild(empty);return}
  for(const lane of ordered){const element=document.createElement("div");element.className="lane";const label=document.createElement("div");label.className="lane-label";const name=document.createElement("div");name.className="lane-name";name.textContent=lane.identity.agent_name||lane.identity.agent_id;const id=document.createElement("div");id.className="lane-id";id.textContent=lane.identity.agent_name?lane.identity.agent_id:"";label.appendChild(name);label.appendChild(id);element.appendChild(label);const track=document.createElement("div");track.className="track";const color=agentColor(lane.identity.agent_id);
-  for(const activity of lane.activities){const start=Math.max(windowStart,Date.parse(activity.started_at)),end=Math.min(now,Date.parse(activity.ended_at)),bar=document.createElement("div");bar.className="bar"+(activity.outcome==="success"?"":" error");bar.style.setProperty("--agent",color);bar.style.left=Math.max(0,(start-windowStart)/timelineWindow*100)+"%";bar.style.width=Math.max(.25,(end-start)/timelineWindow*100)+"%";bar.textContent=activity.request_count+" req · "+tokens(activity.input_tokens+activity.output_tokens)+" tok";bar.title=identity(activity)+"\n"+new Date(activity.started_at).toLocaleString()+" – "+new Date(activity.ended_at).toLocaleTimeString()+"\n"+activity.request_count+" requests · "+tokens(activity.input_tokens)+" in / "+tokens(activity.output_tokens)+" out";bar.addEventListener("click",()=>openActivity(activity.id));track.appendChild(bar)}
+  for(const activity of lane.activities){const start=Math.max(windowStart,Date.parse(activity.started_at)),end=Math.min(now,Date.parse(activity.ended_at)),bar=document.createElement("div");bar.className="bar"+(activity.outcome==="success"?"":" error");bar.style.setProperty("--agent",color);bar.style.left=Math.max(0,(start-windowStart)/timelineWindow*100)+"%";bar.style.width=Math.max(.25,(end-start)/timelineWindow*100)+"%";bar.textContent=activity.request_count+" req · "+(activity.cost_credits?credits(activity.cost_credits):tokens(activity.input_tokens+activity.output_tokens)+" tok");bar.title=identity(activity)+"\n"+new Date(activity.started_at).toLocaleString()+" – "+new Date(activity.ended_at).toLocaleTimeString()+"\n"+activity.request_count+" requests · "+usage(activity);bar.addEventListener("click",()=>openActivity(activity.id));track.appendChild(bar)}
   if(lane.running.length){const start=Math.max(windowStart,Math.min(...lane.running.map(op=>Date.parse(op.started_at)))),bar=document.createElement("div");bar.className="bar running";bar.style.setProperty("--agent",color);bar.style.left=Math.max(0,(start-windowStart)/timelineWindow*100)+"%";bar.style.width=Math.max(.35,(now-start)/timelineWindow*100)+"%";bar.textContent=lane.running.length+" live";bar.title=identity(lane.identity)+"\n"+lane.running.length+" request"+(lane.running.length===1?"":"s")+" in flight · usage pending";track.appendChild(bar)}
   const nowLine=document.createElement("div");nowLine.className="now-line";track.appendChild(nowLine);element.appendChild(track);timelineRoot.appendChild(element)
  }
 }
 function openActivity(id){const details=[...historyRoot.querySelectorAll("details")].find(node=>node.dataset.id===id);if(!details)return;details.open=true;details.scrollIntoView({behavior:"smooth",block:"center"})}
 function renderHistory(){
- const open=new Set([...historyRoot.querySelectorAll("details[open]")].map(node=>node.dataset.id));historyRoot.replaceChildren();historyRoot.appendChild(row([["time"],["agent"],["requests"],["models"],["elapsed"],["tokens in / out"]],"head"));
- for(const activity of activities){const details=document.createElement("details");details.className="activity";details.dataset.id=activity.id;details.open=open.has(activity.id);const summary=document.createElement("summary"),providers=activity.providers.join(" + ");summary.className="row activity-row";const requestSummary=activity.request_count+" request"+(activity.request_count===1?"":"s")+(providers?" · "+providers:"");for(const value of [[new Date(activity.ended_at).toLocaleTimeString(),"time dim"],[identity(activity),activity.outcome==="success"?"":"bad"],[requestSummary],[models(activity),"dim"],[duration(activity.duration_ms),"dim"],[tokens(activity.input_tokens)+" / "+tokens(activity.output_tokens),"tokens"]])summary.appendChild(cell(value[0],value[1]));details.appendChild(summary);const requests=document.createElement("div");requests.className="requests";for(const op of activity.operations)requests.appendChild(row([[new Date(op.ended_at).toLocaleTimeString(),"dim"],["request","request-label"],[op.provider+" · "+op.operation],[op.model,"dim"],[duration(op.duration_ms),"dim"],[tokens(op.input_tokens)+" / "+tokens(op.output_tokens),"tokens"]],"request"));details.appendChild(requests);historyRoot.appendChild(details)}
+ const open=new Set([...historyRoot.querySelectorAll("details[open]")].map(node=>node.dataset.id));historyRoot.replaceChildren();historyRoot.appendChild(row([["time"],["agent"],["requests"],["models"],["elapsed"],["tokens in / out · credits"]],"head"));
+ for(const activity of activities){const details=document.createElement("details");details.className="activity";details.dataset.id=activity.id;details.open=open.has(activity.id);const summary=document.createElement("summary"),providers=activity.providers.join(" + ");summary.className="row activity-row";const requestSummary=activity.request_count+" request"+(activity.request_count===1?"":"s")+(providers?" · "+providers:"");for(const value of [[new Date(activity.ended_at).toLocaleTimeString(),"time dim"],[identity(activity),activity.outcome==="success"?"":"bad"],[requestSummary],[models(activity),"dim"],[duration(activity.duration_ms),"dim"],[usage(activity),"tokens"]])summary.appendChild(cell(value[0],value[1]));details.appendChild(summary);const requests=document.createElement("div");requests.className="requests";for(const op of activity.operations)requests.appendChild(row([[new Date(op.ended_at).toLocaleTimeString(),"dim"],["request","request-label"],[op.provider+" · "+op.operation],[op.model,"dim"],[duration(op.duration_ms),"dim"],[usage(op),"tokens"]],"request"));details.appendChild(requests);historyRoot.appendChild(details)}
 }
 async function refreshRunning(){if(runningFetch)return;runningFetch=true;try{const response=await fetch("/api/running",{cache:"no-store"});if(!response.ok)throw new Error("running");running=await response.json();renderRunning();renderTimeline()}catch(error){runningCount.textContent="active status unavailable"}finally{runningFetch=false}}
 async function refreshTimeline(){if(timelineFetch)return;timelineFetch=true;try{const since=new Date(Date.now()-timelineWindow-GAP).toISOString(),response=await fetch("/api/activities?since="+encodeURIComponent(since)+"&details=false",{cache:"no-store"});if(!response.ok)throw new Error("timeline");timelineActivities=await response.json();renderTimeline()}finally{timelineFetch=false}}

@@ -273,6 +273,64 @@ func TestAnthropicSSEUsage(t *testing.T) {
 	}
 }
 
+func TestNormalizerCapturesOpenRouterUsageAndCredits(t *testing.T) {
+	store, err := OpenStore(t.TempDir() + "/operations.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	normalizer := NewNormalizer(store, NewHub())
+	consumeTestSegment(t, normalizer, "openrouter-agent", 1, map[string]any{
+		"request_headers": map[string]any{"headers": []any{
+			map[string]any{"key": ":authority", "value": "openrouter.ai"},
+			map[string]any{"key": ":path", "value": "/api/v1/chat/completions"},
+		}},
+	})
+	consumeTestSegment(t, normalizer, "openrouter-agent", 1, map[string]any{
+		"request_body_chunk": bodyChunk(`{"model":"anthropic/claude-test"}`),
+	})
+	active := normalizer.Active()
+	if len(active) != 1 || active[0].Provider != "openrouter" ||
+		active[0].Operation != "chat.completions" ||
+		active[0].Model != "anthropic/claude-test" {
+		t.Fatalf("unexpected active OpenRouter request: %+v", active)
+	}
+	consumeTestSegment(t, normalizer, "openrouter-agent", 1, map[string]any{
+		"response_headers": map[string]any{"headers": []any{
+			map[string]any{"key": ":status", "value": "200"},
+		}},
+	})
+	consumeTestSegment(t, normalizer, "openrouter-agent", 1, map[string]any{
+		"response_body_chunk": bodyChunk(
+			`data: {"id":"gen-1","model":"anthropic/claude-test","usage":{"prompt_tokens":194,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":100,"cache_write_tokens":12},"completion_tokens_details":{"reasoning_tokens":3},"cost":0.00125}}` + "\n\n"),
+	})
+	operations, err := store.Recent(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(operations) != 1 {
+		t.Fatalf("operations = %d, want 1", len(operations))
+	}
+	op := operations[0]
+	if op.Provider != "openrouter" || op.Operation != "chat.completions" ||
+		op.Model != "anthropic/claude-test" || op.InputTokens != 194 ||
+		op.OutputTokens != 20 || op.CacheReadTokens != 100 ||
+		op.CacheWriteTokens != 12 || op.ReasoningTokens != 3 ||
+		op.CostCredits != 0.00125 {
+		t.Fatalf("unexpected OpenRouter operation: %+v", op)
+	}
+}
+
+func TestOpenRouterResponsesUsage(t *testing.T) {
+	body := []byte(`data: {"type":"response.done","response":{"model":"openai/gpt-test","usage":{"input_tokens":12,"output_tokens":45,"input_tokens_details":{"cached_tokens":4},"output_tokens_details":{"reasoning_tokens":5},"cost":0.002}}}` + "\n\n" + `data: [DONE]` + "\n\n")
+	usage, complete := parseOpenRouter(body)
+	if !complete || usage.model != "openai/gpt-test" || usage.input != 12 ||
+		usage.output != 45 || usage.cacheRead != 4 || usage.reasoning != 5 ||
+		usage.cost != 0.002 {
+		t.Fatalf("usage = %+v complete=%v", usage, complete)
+	}
+}
+
 func bodyChunk(body string) map[string]any {
 	return encodedBodyChunk([]byte(body))
 }

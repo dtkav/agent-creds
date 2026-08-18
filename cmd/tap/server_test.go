@@ -20,10 +20,18 @@ func TestGroupOperationsByAgentAndIdleGap(t *testing.T) {
 	}
 
 	activities := groupOperations([]Operation{
-		operation(4, "agent-a", "Dispatch", "02:00", "02:05", 40, 4),
+		func() Operation {
+			op := operation(4, "agent-a", "Dispatch", "02:00", "02:05", 40, 4)
+			op.CostCredits = 0.004
+			return op
+		}(),
 		operation(3, "agent-a", "Dispatch", "00:40", "00:50", 30, 3),
 		operation(2, "agent-b", "Merge Queue", "00:05", "00:06", 20, 2),
-		operation(1, "agent-a", "Dispatch", "00:00", "00:10", 10, 1),
+		func() Operation {
+			op := operation(1, "agent-a", "Dispatch", "00:00", "00:10", 10, 1)
+			op.CostCredits = 0.001
+			return op
+		}(),
 	}, 45*time.Second)
 
 	if len(activities) != 3 {
@@ -45,6 +53,9 @@ func TestGroupOperationsByAgentAndIdleGap(t *testing.T) {
 	}
 	if grouped.InputTokens != 40 || grouped.OutputTokens != 4 {
 		t.Fatalf("token totals = %d/%d, want 40/4", grouped.InputTokens, grouped.OutputTokens)
+	}
+	if grouped.CostCredits != 0.001 {
+		t.Fatalf("credit total = %f, want 0.001", grouped.CostCredits)
 	}
 	if grouped.DurationMS != 50_000 {
 		t.Fatalf("activity duration = %dms, want 50000ms", grouped.DurationMS)

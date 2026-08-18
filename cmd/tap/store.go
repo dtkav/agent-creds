@@ -9,25 +9,26 @@ import (
 )
 
 type Operation struct {
-	ID               int64  `json:"id"`
-	Source           string `json:"source"`
-	AgentID          string `json:"agent_id"`
-	AgentName        string `json:"agent_name"`
-	Provider         string `json:"provider"`
-	Operation        string `json:"operation"`
-	Model            string `json:"model"`
-	StartedAt        string `json:"started_at"`
-	EndedAt          string `json:"ended_at"`
-	DurationMS       int64  `json:"duration_ms"`
-	StatusCode       int    `json:"status_code"`
-	Outcome          string `json:"outcome"`
-	InputTokens      int64  `json:"input_tokens"`
-	OutputTokens     int64  `json:"output_tokens"`
-	CacheReadTokens  int64  `json:"cache_read_tokens"`
-	CacheWriteTokens int64  `json:"cache_write_tokens"`
-	ReasoningTokens  int64  `json:"reasoning_tokens"`
-	RequestBytes     int64  `json:"request_bytes"`
-	ResponseBytes    int64  `json:"response_bytes"`
+	ID               int64   `json:"id"`
+	Source           string  `json:"source"`
+	AgentID          string  `json:"agent_id"`
+	AgentName        string  `json:"agent_name"`
+	Provider         string  `json:"provider"`
+	Operation        string  `json:"operation"`
+	Model            string  `json:"model"`
+	StartedAt        string  `json:"started_at"`
+	EndedAt          string  `json:"ended_at"`
+	DurationMS       int64   `json:"duration_ms"`
+	StatusCode       int     `json:"status_code"`
+	Outcome          string  `json:"outcome"`
+	InputTokens      int64   `json:"input_tokens"`
+	OutputTokens     int64   `json:"output_tokens"`
+	CacheReadTokens  int64   `json:"cache_read_tokens"`
+	CacheWriteTokens int64   `json:"cache_write_tokens"`
+	ReasoningTokens  int64   `json:"reasoning_tokens"`
+	CostCredits      float64 `json:"cost_credits"`
+	RequestBytes     int64   `json:"request_bytes"`
+	ResponseBytes    int64   `json:"response_bytes"`
 }
 
 type Store struct {
@@ -74,7 +75,8 @@ CREATE TABLE IF NOT EXISTS operations (
 	reasoning_tokens INTEGER NOT NULL,
 	request_bytes INTEGER NOT NULL,
 	response_bytes INTEGER NOT NULL,
-	agent_name TEXT NOT NULL DEFAULT ''
+	agent_name TEXT NOT NULL DEFAULT '',
+	cost_credits REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS operations_ended_at ON operations(ended_at DESC);
 CREATE INDEX IF NOT EXISTS operations_source ON operations(source, ended_at DESC);
@@ -87,6 +89,7 @@ CREATE INDEX IF NOT EXISTS operations_source ON operations(source, ended_at DESC
 		return err
 	}
 	hasAgentName := false
+	hasCostCredits := false
 	for rows.Next() {
 		var cid, notNull, primaryKey int
 		var name, dataType string
@@ -98,12 +101,18 @@ CREATE INDEX IF NOT EXISTS operations_source ON operations(source, ended_at DESC
 			return err
 		}
 		hasAgentName = hasAgentName || name == "agent_name"
+		hasCostCredits = hasCostCredits || name == "cost_credits"
 	}
 	if err := rows.Close(); err != nil {
 		return err
 	}
 	if !hasAgentName {
-		_, err = s.db.Exec(`ALTER TABLE operations ADD COLUMN agent_name TEXT NOT NULL DEFAULT ''`)
+		if _, err = s.db.Exec(`ALTER TABLE operations ADD COLUMN agent_name TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	if !hasCostCredits {
+		_, err = s.db.Exec(`ALTER TABLE operations ADD COLUMN cost_credits REAL NOT NULL DEFAULT 0`)
 	}
 	return err
 }
@@ -117,12 +126,12 @@ INSERT INTO operations (
 	source, provider, operation_name, model, started_at, ended_at,
 	duration_ms, status_code, outcome, input_tokens, output_tokens,
 	cache_read_tokens, cache_write_tokens, reasoning_tokens,
-	request_bytes, response_bytes, agent_name
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	request_bytes, response_bytes, agent_name, cost_credits
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		op.Source, op.Provider, op.Operation, op.Model, op.StartedAt, op.EndedAt,
 		op.DurationMS, op.StatusCode, op.Outcome, op.InputTokens, op.OutputTokens,
 		op.CacheReadTokens, op.CacheWriteTokens, op.ReasoningTokens,
-		op.RequestBytes, op.ResponseBytes, op.AgentName)
+		op.RequestBytes, op.ResponseBytes, op.AgentName, op.CostCredits)
 	if err != nil {
 		return err
 	}
@@ -138,7 +147,7 @@ func (s *Store) Recent(limit int) ([]Operation, error) {
 SELECT id, source, provider, operation_name, model, started_at, ended_at,
 	duration_ms, status_code, outcome, input_tokens, output_tokens,
 	cache_read_tokens, cache_write_tokens, reasoning_tokens,
-	request_bytes, response_bytes, agent_name
+	request_bytes, response_bytes, agent_name, cost_credits
 FROM operations
 WHERE NOT (input_tokens = 0 AND output_tokens = 0 AND duration_ms >= 300000)
 ORDER BY id DESC LIMIT ?`, limit)
@@ -152,7 +161,7 @@ func (s *Store) Since(since time.Time, limit int) ([]Operation, error) {
 SELECT id, source, provider, operation_name, model, started_at, ended_at,
 	duration_ms, status_code, outcome, input_tokens, output_tokens,
 	cache_read_tokens, cache_write_tokens, reasoning_tokens,
-	request_bytes, response_bytes, agent_name
+	request_bytes, response_bytes, agent_name, cost_credits
 FROM operations
 WHERE ended_at >= ?
 	AND NOT (input_tokens = 0 AND output_tokens = 0 AND duration_ms >= 300000)
@@ -173,7 +182,7 @@ func (s *Store) queryOperations(query string, arguments ...any) ([]Operation, er
 			&op.StartedAt, &op.EndedAt, &op.DurationMS, &op.StatusCode,
 			&op.Outcome, &op.InputTokens, &op.OutputTokens,
 			&op.CacheReadTokens, &op.CacheWriteTokens, &op.ReasoningTokens,
-			&op.RequestBytes, &op.ResponseBytes, &op.AgentName,
+			&op.RequestBytes, &op.ResponseBytes, &op.AgentName, &op.CostCredits,
 		); err != nil {
 			return nil, err
 		}
@@ -195,6 +204,7 @@ type MetricRow struct {
 	CacheReadTokens  int64
 	CacheWriteTokens int64
 	ReasoningTokens  int64
+	CostCredits      float64
 	DurationMS       int64
 }
 
@@ -202,7 +212,7 @@ func (s *Store) Metrics() ([]MetricRow, error) {
 	rows, err := s.db.Query(`
 SELECT source, agent_name, provider, model, outcome, COUNT(*),
 	SUM(input_tokens), SUM(output_tokens), SUM(cache_read_tokens),
-	SUM(cache_write_tokens), SUM(reasoning_tokens), SUM(duration_ms)
+	SUM(cache_write_tokens), SUM(reasoning_tokens), SUM(cost_credits), SUM(duration_ms)
 FROM operations
 WHERE NOT (input_tokens = 0 AND output_tokens = 0 AND duration_ms >= 300000)
 GROUP BY source, agent_name, provider, model, outcome`)
@@ -217,7 +227,8 @@ GROUP BY source, agent_name, provider, model, outcome`)
 			&row.AgentID, &row.AgentName,
 			&row.Provider, &row.Model, &row.Outcome, &row.Operations,
 			&row.InputTokens, &row.OutputTokens, &row.CacheReadTokens,
-			&row.CacheWriteTokens, &row.ReasoningTokens, &row.DurationMS,
+			&row.CacheWriteTokens, &row.ReasoningTokens, &row.CostCredits,
+			&row.DurationMS,
 		); err != nil {
 			return nil, err
 		}

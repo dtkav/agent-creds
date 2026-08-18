@@ -7,7 +7,8 @@ is not in the agent's request path and has no Vault mount, so collector failure
 cannot affect agent networking or credential exchange.
 
 The service attaches to each explicitly configured Envoy admin tap endpoint
-over HTTP/2 and captures only OpenAI Responses and Anthropic Messages paths. It
+over HTTP/2 and captures OpenAI Responses, Anthropic Messages, and OpenRouter
+Chat Completions, Responses, and Completions paths. It
 reassembles streamed bodies in bounded memory, reverses standard HTTP content
 codings (`gzip`, `deflate`, `br`, and `zstd`), recognizes terminal provider
 usage events, and then discards the transport material. Partial traces are
@@ -15,8 +16,8 @@ discarded when an Envoy source disconnects; they are never carried into a new
 tap session or represented as completed operations.
 SQLite has an allowlisted `operations` schema containing agent ID, resolved
 agent name, provider, operation, model, timing, status, byte counts, and
-provider-reported token counts. It has no columns for headers, URLs,
-request/response bodies, or generic JSON.
+provider-reported token counts and OpenRouter charged credits. It has no
+columns for headers, URLs, request/response bodies, or generic JSON.
 
 The UI is at `/`, the Server-Sent Events endpoint is at
 `/api/operations/stream`, normalized operations are at `/api/operations`,

@@ -266,7 +266,7 @@ func (s *Server) stream(w http.ResponseWriter, request *http.Request) {
 		case <-request.Context().Done():
 			return
 		case <-heartbeat.C:
-			fmt.Fprint(w, ": keepalive\n\n")
+			fmt.Fprint(w, "event: heartbeat\ndata: {}\n\n")
 			flusher.Flush()
 		case operation := <-events:
 			data, _ := json.Marshal(operation)
@@ -420,8 +420,8 @@ h1{font:600 21px system-ui;margin:0}h2{font:600 15px system-ui;margin:0}.status,
 <section class="panel"><div class="section-head"><h2>Agent timeline</h2><div id="window-controls" class="window-controls"><button data-window="3600000" class="active">1h</button><button data-window="21600000">6h</button><button data-window="86400000">24h</button></div></div><div id="timeline" class="timeline"></div></section>
 <section class="history"><div class="section-head"><h2>Recent activity</h2><span class="grouping" title="Requests from the same agent stay together until it has been idle for 45 seconds">grouped by agent · 45s idle · click to expand</span></div><main id="history"></main></section>
 <script>
-const GAP=45000,statusEl=document.getElementById("status"),runningRoot=document.getElementById("running"),runningCount=document.getElementById("running-count"),timelineRoot=document.getElementById("timeline"),historyRoot=document.getElementById("history");
-let activities=[],timelineActivities=[],running=[],seen=new Set(),timelineWindow=3600000,runningFetch=false,timelineFetch=false,timelineTimer;
+const GAP=45000,STREAM_STALE=45000,statusEl=document.getElementById("status"),runningRoot=document.getElementById("running"),runningCount=document.getElementById("running-count"),timelineRoot=document.getElementById("timeline"),historyRoot=document.getElementById("history");
+let activities=[],timelineActivities=[],running=[],seen=new Set(),timelineWindow=3600000,runningFetch=false,timelineFetch=false,timelineTimer,operationStream=null,streamRetryTimer=null,lastStreamEvent=0;
 function agentID(op){return op.agent_id||op.source}
 function identity(value){return value.agent_name?value.agent_name+" · "+agentID(value):agentID(value)}
 function unique(ops,key){return [...new Set(ops.map(op=>op[key]).filter(Boolean))].sort()}
@@ -488,7 +488,11 @@ function renderHistory(){
 async function refreshRunning(){if(runningFetch)return;runningFetch=true;try{const response=await fetch("/api/running",{cache:"no-store"});if(!response.ok)throw new Error("running");running=await response.json();renderRunning();renderTimeline()}catch(error){runningCount.textContent="active status unavailable"}finally{runningFetch=false}}
 async function refreshTimeline(){if(timelineFetch)return;timelineFetch=true;try{const since=new Date(Date.now()-timelineWindow-GAP).toISOString(),response=await fetch("/api/activities?since="+encodeURIComponent(since)+"&details=false",{cache:"no-store"});if(!response.ok)throw new Error("timeline");timelineActivities=await response.json();renderTimeline()}finally{timelineFetch=false}}
 function scheduleTimelineRefresh(){clearTimeout(timelineTimer);timelineTimer=setTimeout(refreshTimeline,200)}
-function connect(){const stream=new EventSource("/api/operations/stream");stream.addEventListener("ready",()=>{statusEl.textContent="live";statusEl.className="status ok"});stream.onmessage=event=>merge(JSON.parse(event.data));stream.onerror=()=>{statusEl.textContent="disconnected";statusEl.className="status bad"}}
+function streamStatus(text,cls=""){statusEl.textContent=text;statusEl.className="status"+(cls?" "+cls:"")}
+function markStreamLive(stream){if(operationStream!==stream)return;lastStreamEvent=Date.now();clearTimeout(streamRetryTimer);streamRetryTimer=null;streamStatus("live","ok")}
+function connect(){const replacing=Boolean(operationStream);clearTimeout(streamRetryTimer);streamRetryTimer=null;if(operationStream)operationStream.close();if(replacing)streamStatus("reconnecting…");const stream=new EventSource("/api/operations/stream");operationStream=stream;lastStreamEvent=Date.now();stream.addEventListener("ready",()=>markStreamLive(stream));stream.addEventListener("heartbeat",()=>markStreamLive(stream));stream.onmessage=event=>{markStreamLive(stream);merge(JSON.parse(event.data))};stream.onerror=()=>{if(operationStream!==stream)return;streamStatus(navigator.onLine?"reconnecting…":"offline",navigator.onLine?"":"bad");if(streamRetryTimer)return;streamRetryTimer=setTimeout(()=>{if(operationStream!==stream)return;stream.close();operationStream=null;connect()},8000)}}
+setInterval(()=>{if(operationStream&&Date.now()-lastStreamEvent>STREAM_STALE){streamStatus("reconnecting…");connect()}},5000);
+window.addEventListener("online",()=>connect());window.addEventListener("offline",()=>{clearTimeout(streamRetryTimer);streamRetryTimer=null;if(operationStream)operationStream.close();operationStream=null;streamStatus("offline","bad")});document.addEventListener("visibilitychange",()=>{if(!document.hidden&&navigator.onLine&&(!operationStream||Date.now()-lastStreamEvent>STREAM_STALE))connect()});
 for(const button of document.querySelectorAll("[data-window]"))button.addEventListener("click",()=>{timelineWindow=Number(button.dataset.window);for(const current of document.querySelectorAll("[data-window]"))current.classList.toggle("active",current===button);refreshTimeline()});
 fetch("/api/activities?limit=1000").then(response=>response.json()).then(items=>{activities=items.map(summarize);for(const activity of activities)for(const op of activity.operations)seen.add(op.id);activities.sort((a,b)=>Date.parse(b.ended_at)-Date.parse(a.ended_at));renderHistory()}).catch(()=>{statusEl.textContent="load failed";statusEl.className="status bad"}).finally(connect);
 refreshRunning();refreshTimeline();setInterval(refreshRunning,1000);

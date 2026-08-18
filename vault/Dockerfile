@@ -26,11 +26,10 @@ COPY --from=builder /app/vault-admin .
 COPY --from=builder /app/vault-ssh .
 COPY --from=builder /app/vaultctl .
 COPY entrypoint.sh .
-COPY providers ./providers
 
-# Standard reviewed adapters ship in /app/providers. Compose can additionally
-# mount administrator-owned deployment extensions in /app/providers.d.
-RUN mkdir -p /data /app/providers.d
+# Provider search paths always exist even when the public image ships without
+# service-specific adapters. Compose mounts deployment extensions separately.
+RUN mkdir -p /data /app/providers /app/providers.d
 
 # wish generates an Ed25519 keypair here on first start. /data is persistent.
 ENV SSH_HOST_KEY=/data/vault_host_key

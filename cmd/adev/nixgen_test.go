@@ -14,6 +14,8 @@ func TestGeneratePackagesNixBuildsImportablePythonEnvironment(t *testing.T) {
 		"python3Packages": {
 			"websockets": true,
 			"click":      true,
+			"pyyaml":     true,
+			"requests":   true,
 		},
 	}
 	output := filepath.Join(t.TempDir(), "packages.nix")
@@ -29,6 +31,8 @@ func TestGeneratePackagesNixBuildsImportablePythonEnvironment(t *testing.T) {
 		"pkgs.git",
 		"pkgs.python3.withPackages",
 		"ps.click",
+		"ps.pyyaml",
+		"ps.requests",
 		"ps.websockets",
 	} {
 		if !strings.Contains(got, want) {

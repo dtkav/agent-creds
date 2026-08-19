@@ -100,8 +100,16 @@
           then import ./generated/packages.nix { inherit pkgs; }
           else with pkgs; [
             # Default fallback packages
-            python311
-            python311Packages.pip
+            (python3.withPackages (ps: with ps; [
+              pip
+              click
+              httpx
+              pytest
+              pyyaml
+              requests
+              rich
+              websockets
+            ]))
             nodejs_20
             go
             rustup

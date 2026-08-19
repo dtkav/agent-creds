@@ -9,8 +9,13 @@ python3 = true
 
 [python3Packages]
 pip = true
-websockets = true
 click = true
+httpx = true
+pytest = true
+pyyaml = true
+requests = true
+rich = true
+websockets = true
 
 [upstream."pypi.org"]
 [upstream."files.pythonhosted.org"]

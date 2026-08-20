@@ -27,11 +27,11 @@ make clean-certs    # Remove generated certs (forces regeneration)
 ### Dev Environment Workflow
 
 `adev` (built via `make binaries` or `cd cmd/adev && go build`):
-1. Generates configs from `agent-creds.toml`
+1. Generates configs from `sandbox.toml`
 2. Starts vault service if not running
 3. Starts envoy proxy with runtime cert generation
 4. Launches sandbox container with network isolation
-5. Watches `agent-creds.toml` for changes and hot-reloads upstream config
+5. Watches the selected sandbox policy for changes and hot-reloads upstream config
 
 ## Architecture
 
@@ -77,14 +77,14 @@ api.stripe.com (real)
 
 ## Configuration
 
-Project configuration is in `agent-creds.toml`. The `adev` tool reads this and generates:
+Project configuration is in `sandbox.toml`. The `adev` tool reads this and generates:
 - `generated/certs/ca.crt` - CA certificate (only generated once)
 - `generated/envoy.json` - Envoy config with TLS termination
 - `generated/domains.json` - Domain config for runtime cert generation
 
 ### Adding a New API Service
 
-1. Add upstream to `agent-creds.toml`:
+1. Add upstream to `sandbox.toml`:
    ```toml
    # Passthrough (no credential injection)
    [upstream."api.example.com"]

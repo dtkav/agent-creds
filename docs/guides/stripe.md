@@ -50,7 +50,7 @@ receive `sk_test_...`.
 
 ## 2. Restrict the project route
 
-Add the same host, method, and path boundary to `agent-creds.toml`:
+Add the same host, method, and path boundary to `sandbox.toml`:
 
 ```toml
 [sandbox]

@@ -89,7 +89,7 @@ func shapeTokens(entries []TokenEntry, infos map[string]*CredentialInfo) map[str
 	return tokens
 }
 
-// resolveStaticEnv processes the [env] section from agent-creds.toml, resolving
+// resolveStaticEnv processes the [env] section from the project sandbox policy, resolving
 // $secret references against the vault.yaml secrets map. Plain string values
 // pass through unchanged. Returns a map of env var name → resolved value.
 func resolveStaticEnv(staticEnv map[string]interface{}, vaultYAMLPath string) (map[string]string, error) {

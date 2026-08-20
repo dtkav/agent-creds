@@ -32,6 +32,7 @@ authz/fly.toml
 cmd/odev
 
 # User config
+sandbox.toml
 agent-creds.toml
 
 # Sandbox agent config mount directories

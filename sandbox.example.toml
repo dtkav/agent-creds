@@ -1,6 +1,6 @@
-# agent-creds.toml - Example configuration
+# sandbox.toml - Example configuration
 #
-# Copy this file to agent-creds.toml and customize for your project.
+# Copy this file to sandbox.toml and customize for your project.
 
 [sandbox]
 name = "myproject"
@@ -34,6 +34,18 @@ name = "myproject"
 # paths = ["/repos/myorg/**"]
 # Set `forward_token = true` when the application supplies its own macaroon;
 # the route still selects `credential`, but adev does not mint an env token.
+
+# Keep routing separate from a signed, provider-specific credential grant.
+# The table name is organizational; the selected credential publishes the
+# schema for repository and branches.
+# [authorization.github]
+# upstreams = ["github.com"]
+# credential = "/github/myorg/project/git"
+# env = "GIT_GITHUB_TOKEN"
+# methods = ["GET", "POST"]
+# paths = ["/myorg/project.git/**"]
+# repository = "myorg/project"
+# branches = ["queue/example"]
 
 # Identity-only ingress: verifies a subject macaroon and forwards Vault-owned
 # x-agent-creds-* identity headers without selecting or injecting a credential.

@@ -81,7 +81,7 @@ policies:
 ```
 
 Then select `/service/prod` or `/records/read` from the appropriate upstream
-in `agent-creds.toml`.
+in `sandbox.toml`.
 
 ## Build a deployment image
 

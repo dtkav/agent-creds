@@ -175,7 +175,7 @@ credentials:
 
 ### 3. Configure a project
 
-From the project the agent will work on, create `agent-creds.toml`:
+From the project the agent will work on, create `sandbox.toml`:
 
 ```toml
 [sandbox]
@@ -293,7 +293,7 @@ changing the global switch.
 
 ### Declare network and credential access
 
-Every reachable upstream must appear in `agent-creds.toml`:
+Every reachable upstream must appear in `sandbox.toml`:
 
 ```toml
 [sandbox]
@@ -328,7 +328,7 @@ The main upstream fields are:
 Changes to upstreams are watched. Envoy configuration and credential tokens
 are refreshed without rebuilding the entire environment when possible.
 
-See [`agent-creds.example.toml`](agent-creds.example.toml) for browser, CDP,
+See [`sandbox.example.toml`](sandbox.example.toml) for browser, CDP,
 identity-route, and plugin examples.
 
 ### Configure credentials
@@ -832,7 +832,7 @@ examples/               trusted JavaScript extension examples
 plugins/                composable development-tool profiles
 vault/                  credential service, providers, policies, and token code
 vault/providers.d/      local trusted JavaScript extensions (ignored)
-agent-creds.example.toml
+sandbox.example.toml
 docker-compose.yml
 ```
 

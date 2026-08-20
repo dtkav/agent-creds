@@ -1,6 +1,6 @@
 ---
 name: access
-description: Configure agent API access. Use when the user wants to add, review, or fix credential access in agent-creds.toml. Handles Stripe, AWS, GitHub, and other API credentials.
+description: Configure agent API access. Use when the user wants to add, review, or fix credential access in sandbox.toml. Handles Stripe, AWS, GitHub, and other API credentials.
 ---
 
 # /access — Configure Agent API Access
@@ -9,7 +9,7 @@ You are helping a developer configure which API endpoints their AI agent can acc
 
 ## Context
 
-agent-creds lets agents use real API credentials (Stripe, AWS, GitHub, etc.) without seeing the actual secrets. The developer configures access in `agent-creds.toml`, and the system mints scoped tokens, injects credentials transparently, and logs all access.
+The sandbox runtime lets agents use real API credentials (Stripe, AWS, GitHub, etc.) without seeing the actual secrets. The developer configures access in `sandbox.toml`, and the system mints scoped tokens, injects credentials transparently, and logs all access.
 
 ## Steps
 
@@ -17,7 +17,7 @@ agent-creds lets agents use real API credentials (Stripe, AWS, GitHub, etc.) wit
 
 Read and run all of these to understand what's configured and what's available:
 
-- **Current config**: Read `agent-creds.toml` to see existing upstream entries and their scopes (methods, paths, credential references).
+- **Current config**: Read `sandbox.toml` to see existing upstream entries and their scopes (methods, paths, credential references).
 - **Available credentials**: Run `actl vault show --credentials` to list credentials stored in the vault, their types (bearer, sigv4, basic), and associated hosts.
 - **Credential capabilities**: For each credential from the list above, run `actl vault show --capabilities <path>` (e.g., `actl vault show --capabilities /stripe/prod`) to discover what endpoints the credential supports — allowed hosts, methods, paths, and descriptions.
 - **Recent denials**: Run `actl vault log --recent --denials` to see recent authorization failures with method, host, path, and reason.
@@ -30,7 +30,7 @@ Before acting on the request, show the operator a summary of the current access 
 - Credential path (e.g., `/stripe/prod`)
 - Type (bearer, sigv4, basic)
 - Associated host(s)
-- Whether it's referenced in `agent-creds.toml` (active) or available but unused
+- Whether it's referenced in `sandbox.toml` (active) or available but unused
 - Capability ceiling (if defined): allowed hosts, methods, paths, and endpoint descriptions
 
 **Recent failures** — If there are any recent denials, surface them prominently:
@@ -59,7 +59,7 @@ Before proposing changes, check every requested endpoint against the credential'
 
 If some requested endpoints are within capabilities and others are not, propose the valid subset and list the rejected endpoints separately with explanations.
 
-### 5. Propose changes to agent-creds.toml
+### 5. Propose changes to sandbox.toml
 
 Show the user the exact TOML changes before applying. Clearly distinguish between:
 
@@ -93,13 +93,13 @@ When proposing changes, present a before/after diff so the user can see exactly 
 
 After the user confirms the proposed changes:
 
-1. **Read** the current `agent-creds.toml` to get the latest content
+1. **Read** the current `sandbox.toml` to get the latest content
 2. **Edit** the file using precise string replacements:
    - For new upstreams: append the new `[upstream."host"]` section at the end of the file
    - For modifications: replace the specific fields within the existing upstream section
    - Preserve all other sections and formatting in the file
 3. **Verify** the edit was applied correctly by reading the file back
-4. **Hot-reload** happens automatically — `adev` watches `agent-creds.toml` for changes and will:
+4. **Hot-reload** happens automatically — `adev` watches the selected sandbox policy for changes and will:
    - Re-generate envoy config with updated routes
    - Re-mint tokens with new caveats (methods/paths) for changed upstreams
    - Regenerate `sandbox.env` with updated tokens

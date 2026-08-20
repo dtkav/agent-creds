@@ -49,7 +49,7 @@ func NewGenerator(rootDir, genDir string, cfg ProjectConfig) (*Generator, error)
 
 func (g *Generator) Generate() error {
 	if len(g.hosts) == 0 {
-		return fmt.Errorf("no upstream hosts configured in agent-creds.toml")
+		return fmt.Errorf("no upstream hosts configured in sandbox policy")
 	}
 
 	// Generate CA

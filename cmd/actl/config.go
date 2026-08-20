@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -51,16 +52,37 @@ type ProjectConfig struct {
 	Vault   VaultConfig   `toml:"vault"`
 }
 
-// LoadProjectConfig reads agent-creds.toml from dir if it exists.
-// Returns a zero-value config (not an error) if the file is absent.
+func projectConfigPath(dir string) (string, bool, error) {
+	current := filepath.Join(dir, "sandbox.toml")
+	legacy := filepath.Join(dir, "agent-creds.toml")
+	currentExists := fileExists(current)
+	legacyExists := fileExists(legacy)
+	if currentExists && legacyExists {
+		return "", false, fmt.Errorf(
+			"both sandbox.toml and agent-creds.toml exist; keep only sandbox.toml")
+	}
+	if currentExists {
+		return current, true, nil
+	}
+	if legacyExists {
+		return legacy, true, nil
+	}
+	return current, false, nil
+}
+
+// LoadProjectConfig reads sandbox.toml, falling back to agent-creds.toml for
+// existing projects. Returns a zero-value config if neither file exists.
 func LoadProjectConfig(dir string) (ProjectConfig, error) {
 	var cfg ProjectConfig
-	path := filepath.Join(dir, "agent-creds.toml")
+	path, exists, err := projectConfigPath(dir)
+	if err != nil {
+		return cfg, err
+	}
+	if !exists {
+		return cfg, nil
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return cfg, nil
-		}
 		return cfg, err
 	}
 	if err := toml.Unmarshal(data, &cfg); err != nil {

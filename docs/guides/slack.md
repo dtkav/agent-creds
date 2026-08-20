@@ -58,7 +58,7 @@ Raw tokens belong only below `secrets`; SOPS encrypts that subtree.
 
 ## 2. Allow one Slack method
 
-Add the upstream to the project agent's `agent-creds.toml`:
+Add the upstream to the project agent's `sandbox.toml`:
 
 ```toml
 [sandbox]

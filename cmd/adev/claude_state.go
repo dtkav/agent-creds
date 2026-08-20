@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -18,8 +19,10 @@ func prepareClaudeProjectState(
 		scriptDir, "claude-dev", "claude-config", ".claude.json")
 	shared := map[string]any{}
 	if data, err := os.ReadFile(sharedPath); err == nil {
-		if err := json.Unmarshal(data, &shared); err != nil {
-			return "", fmt.Errorf("reading shared Claude project state: %w", err)
+		if len(bytes.TrimSpace(data)) > 0 {
+			if err := json.Unmarshal(data, &shared); err != nil {
+				return "", fmt.Errorf("reading shared Claude project state: %w", err)
+			}
 		}
 	} else if !os.IsNotExist(err) {
 		return "", fmt.Errorf("reading shared Claude project state: %w", err)
@@ -31,8 +34,10 @@ func prepareClaudeProjectState(
 	instancePath := filepath.Join(instanceGenDir, "home", ".claude.json")
 	instance := map[string]any{}
 	if data, err := os.ReadFile(instancePath); err == nil {
-		if err := json.Unmarshal(data, &instance); err != nil {
-			return "", fmt.Errorf("reading instance Claude project state: %w", err)
+		if len(bytes.TrimSpace(data)) > 0 {
+			if err := json.Unmarshal(data, &instance); err != nil {
+				return "", fmt.Errorf("reading instance Claude project state: %w", err)
+			}
 		}
 	} else if !os.IsNotExist(err) {
 		return "", fmt.Errorf("reading instance Claude project state: %w", err)

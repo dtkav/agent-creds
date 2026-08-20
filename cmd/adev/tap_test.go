@@ -48,6 +48,24 @@ func TestRegisterTapSourceWaitsForReadyAdminSocket(t *testing.T) {
 	}
 }
 
+func TestPrepareTapSourceRuntimeDiscardsPreviousAuthState(t *testing.T) {
+	scriptDir := t.TempDir()
+	const slug = "reused-agent"
+	if err := prepareTapSourceRuntime(scriptDir, slug); err != nil {
+		t.Fatal(err)
+	}
+	authLog := filepath.Join(tapSourceRuntimeDir(scriptDir, slug), "auth.log")
+	if err := os.WriteFile(authLog, []byte("2026-08-19T22:58:16Z 400\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareTapSourceRuntime(scriptDir, slug); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(authLog); !os.IsNotExist(err) {
+		t.Fatalf("stale auth status file was retained: %v", err)
+	}
+}
+
 func TestTapFilterPrecedesCredentialInjection(t *testing.T) {
 	g := &Generator{cfg: ProjectConfig{TapEnabled: true}}
 	filters := g.httpFilters()

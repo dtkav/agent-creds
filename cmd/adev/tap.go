@@ -210,8 +210,10 @@ func prepareTapSourceRuntime(scriptDir, slug string) error {
 	if err := os.Chmod(runtimeDir, 0777); err != nil {
 		return fmt.Errorf("setting tap source runtime permissions: %w", err)
 	}
-	if err := os.Remove(filepath.Join(runtimeDir, "admin.sock")); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("removing stale tap socket: %w", err)
+	for _, name := range []string{"admin.sock", "auth.log"} {
+		if err := os.Remove(filepath.Join(runtimeDir, name)); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("removing stale tap runtime file %s: %w", name, err)
+		}
 	}
 	return nil
 }

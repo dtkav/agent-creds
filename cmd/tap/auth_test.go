@@ -46,6 +46,24 @@ func TestAuthTrackerCorrelatesRegardlessOfOrderAndClears(t *testing.T) {
 	}
 }
 
+func TestAuthTrackerDeactivationClearsAlertButRetainsCounter(t *testing.T) {
+	tracker := NewAuthTracker()
+	at := time.Now().UTC().Truncate(time.Second)
+	tracker.ObserveOAuth("agent", "Agent", 400, at)
+	tracker.ObserveOperation(Operation{
+		AgentID: "agent", Provider: "anthropic", Operation: "messages",
+		StatusCode: 401, EndedAt: at.Add(time.Second).Format(time.RFC3339Nano),
+	})
+	tracker.Deactivate("agent")
+	if alerts := tracker.Alerts(); len(alerts) != 0 {
+		t.Fatalf("inactive source retained alert: %+v", alerts)
+	}
+	metrics := tracker.Metrics()
+	if len(metrics) != 1 || metrics[0].Blocked || metrics[0].FailureCount != 1 {
+		t.Fatalf("inactive source lost failure counter: %+v", metrics)
+	}
+}
+
 func TestAuthTrackerIgnoresUncorrelatedAndUnrelatedFailures(t *testing.T) {
 	tracker := NewAuthTracker()
 	at := time.Date(2026, 8, 19, 22, 58, 16, 0, time.UTC)

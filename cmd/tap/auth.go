@@ -153,10 +153,12 @@ func (t *AuthTracker) Metrics() []AuthMetric {
 	return metrics
 }
 
-func (t *AuthTracker) Remove(agentID string) {
+func (t *AuthTracker) Deactivate(agentID string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	delete(t.states, strings.TrimSpace(agentID))
+	if state := t.states[strings.TrimSpace(agentID)]; state != nil {
+		state.clear()
+	}
 }
 
 func (t *AuthTracker) state(agentID, agentName string) *authState {

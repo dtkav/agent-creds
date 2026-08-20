@@ -140,7 +140,7 @@ func (m *SourceManager) Reconcile(ctx context.Context, config Config) {
 	if m.normalizer != nil && m.normalizer.auth != nil {
 		for _, agentID := range removedAgentIDs {
 			if !remainingAgentIDs[agentID] {
-				m.normalizer.auth.Remove(agentID)
+				m.normalizer.auth.Deactivate(agentID)
 			}
 		}
 	}

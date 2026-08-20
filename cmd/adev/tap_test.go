@@ -56,6 +56,44 @@ func TestTapFilterPrecedesCredentialInjection(t *testing.T) {
 	}
 }
 
+func TestTapAuthAccessLogContainsOnlyStatusMetadata(t *testing.T) {
+	g := &Generator{cfg: ProjectConfig{TapEnabled: true}}
+	logs := g.accessLogConfig()
+	if len(logs) != 3 {
+		t.Fatalf("tap access log count = %d, want 3", len(logs))
+	}
+	authLog := logs[2]
+	typed, ok := authLog["typed_config"].(map[string]interface{})
+	if !ok || typed["path"] != "/run/adev-tap/auth.log" {
+		t.Fatalf("unexpected auth access log: %#v", authLog)
+	}
+	encoded, err := json.Marshal(authLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(encoded)
+	for _, want := range []string{
+		"platform.claude.com", "/v1/oauth/token", "%RESPONSE_CODE%",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("auth access log is missing %q: %s", want, text)
+		}
+	}
+	for _, forbidden := range []string{
+		"%REQ(", "%RESP(", "authorization", "request_body", "response_body",
+	} {
+		if strings.Contains(strings.ToLower(text), strings.ToLower(forbidden)) {
+			t.Fatalf("auth access log contains forbidden material %q: %s", forbidden, text)
+		}
+	}
+}
+
+func TestTapDisabledOmitsAuthAccessLog(t *testing.T) {
+	if logs := (&Generator{}).accessLogConfig(); len(logs) != 2 {
+		t.Fatalf("disabled tap access log count = %d, want 2", len(logs))
+	}
+}
+
 func TestTapDisabledByDefault(t *testing.T) {
 	for _, filter := range (&Generator{}).httpFilters() {
 		if filter["name"] == "envoy.filters.http.tap" {

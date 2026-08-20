@@ -19,9 +19,18 @@ agent name, provider, operation, model, timing, status, byte counts, and
 provider-reported token counts and OpenRouter charged credits. It has no
 columns for headers, URLs, request/response bodies, or generic JSON.
 
+When tap is enabled, each agent Envoy also emits a separate authentication
+status feed for the exact Claude OAuth token endpoint. Each record contains
+only a UTC timestamp and HTTP response status. The collector correlates a
+failed token exchange with an Anthropic Messages `401` from the same agent and
+reports that agent as blocked until a successful token exchange or provider
+request is observed. OAuth headers, bodies, URLs, tokens, and response payloads
+never enter the collector.
+
 The UI is at `/`, the Server-Sent Events endpoint is at
 `/api/operations/stream`, normalized operations are at `/api/operations`,
-Prometheus exposition is at `/metrics`, and
+active authentication alerts are at `/api/auth-alerts`, Prometheus exposition
+is at `/metrics`, and
 `/api/export/otel-genai.jsonl` exports normalized records using OpenTelemetry
 GenAI semantic-convention attribute names. The latter is a conversion boundary,
 not a raw traffic archive or an OTLP transport.

@@ -55,6 +55,7 @@ type traceKey struct {
 type Normalizer struct {
 	store *Store
 	hub   *Hub
+	auth  *AuthTracker
 
 	mu     sync.Mutex
 	traces map[traceKey]*traceState
@@ -81,7 +82,18 @@ type ActiveOperation struct {
 }
 
 func NewNormalizer(store *Store, hub *Hub) *Normalizer {
-	return &Normalizer{store: store, hub: hub, traces: make(map[traceKey]*traceState)}
+	auth := NewAuthTracker()
+	if store != nil {
+		if operations, err := store.Recent(1000); err == nil {
+			for i := len(operations) - 1; i >= 0; i-- {
+				auth.ObserveOperation(operations[i])
+			}
+		}
+	}
+	return &Normalizer{
+		store: store, hub: hub, auth: auth,
+		traces: make(map[traceKey]*traceState),
+	}
 }
 
 func (n *Normalizer) Consume(
@@ -186,6 +198,7 @@ func (n *Normalizer) finish(key traceKey, op *Operation) {
 	if op == nil || op.validate() != nil {
 		return
 	}
+	n.auth.ObserveOperation(*op)
 	if err := n.store.Insert(op); err != nil {
 		// Do not include any transport material in errors.
 		n.invalidSegments.Add(1)
@@ -219,6 +232,7 @@ func (n *Normalizer) Reap() {
 				if op.Outcome == "success" {
 					op.Outcome = "incomplete"
 				}
+				n.auth.ObserveOperation(*op)
 				if err := n.store.Insert(op); err == nil {
 					n.hub.Publish(*op)
 				}

@@ -252,8 +252,8 @@ func (g *Generator) connectHTTPFilters() []map[string]interface{} {
 }
 
 // accessLogConfig returns the access log config used by all HTTP connection managers.
-func accessLogConfig() []map[string]interface{} {
-	return []map[string]interface{}{
+func (g *Generator) accessLogConfig() []map[string]interface{} {
+	logs := []map[string]interface{}{
 		{
 			"name": "envoy.access_loggers.stdout",
 			"typed_config": map[string]interface{}{
@@ -273,6 +273,50 @@ func accessLogConfig() []map[string]interface{} {
 			},
 		},
 	}
+	if g.cfg.TapEnabled {
+		// This deliberately records only timestamp and status for one exact
+		// credential endpoint. The tap never receives OAuth request or response
+		// bodies, headers, tokens, URLs, or other credential-plane material.
+		logs = append(logs, map[string]interface{}{
+			"name": "envoy.access_loggers.file",
+			"filter": map[string]interface{}{
+				"and_filter": map[string]interface{}{
+					"filters": []map[string]interface{}{
+						{
+							"header_filter": map[string]interface{}{
+								"header": map[string]interface{}{
+									"name": ":authority",
+									"string_match": map[string]interface{}{
+										"exact": "platform.claude.com",
+									},
+								},
+							},
+						},
+						{
+							"header_filter": map[string]interface{}{
+								"header": map[string]interface{}{
+									"name": ":path",
+									"string_match": map[string]interface{}{
+										"exact": "/v1/oauth/token",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			"typed_config": map[string]interface{}{
+				"@type": "type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog",
+				"path":  "/run/adev-tap/auth.log",
+				"log_format": map[string]interface{}{
+					"text_format_source": map[string]interface{}{
+						"inline_string": "%START_TIME(%Y-%m-%dT%H:%M:%SZ)% %RESPONSE_CODE%\n",
+					},
+				},
+			},
+		})
+	}
+	return logs
 }
 
 func (g *Generator) routeForHost(host string) map[string]interface{} {
@@ -342,7 +386,7 @@ func (g *Generator) tlsFilterChain(host, statPrefix string) map[string]interface
 			"typed_config": map[string]interface{}{
 				"@type":        "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
 				"stat_prefix":  statPrefix,
-				"access_log":   accessLogConfig(),
+				"access_log":   g.accessLogConfig(),
 				"http_filters": g.httpFilters(),
 				"route_config": map[string]interface{}{
 					"name": "local_route",
@@ -379,7 +423,7 @@ func (g *Generator) httpFilterChain(hosts []string) map[string]interface{} {
 			"typed_config": map[string]interface{}{
 				"@type":        "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
 				"stat_prefix":  "ingress_http_plaintext",
-				"access_log":   accessLogConfig(),
+				"access_log":   g.accessLogConfig(),
 				"http_filters": g.httpFilters(),
 				"route_config": map[string]interface{}{
 					"name":          "plaintext_route",
@@ -424,7 +468,7 @@ func (g *Generator) connectFilterChain(httpHosts []string) map[string]interface{
 			"typed_config": map[string]interface{}{
 				"@type":       "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
 				"stat_prefix": "connect_proxy",
-				"access_log":  accessLogConfig(),
+				"access_log":  g.accessLogConfig(),
 				"http_protocol_options": map[string]interface{}{
 					"allow_absolute_url": true,
 				},

@@ -1,6 +1,11 @@
 package main
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -81,5 +86,57 @@ func TestGroupOperationsKeepsOverlappingRequestsTogether(t *testing.T) {
 
 	if len(activities) != 1 || activities[0].RequestCount != 2 {
 		t.Fatalf("overlapping requests should form one activity: %+v", activities)
+	}
+}
+
+func TestAuthAlertsAreExposedToUIAPIAndPrometheus(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "operations.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	normalizer := NewNormalizer(store, NewHub())
+	sources := NewSourceManager(normalizer)
+	at := time.Now().UTC().Truncate(time.Second)
+	normalizer.auth.ObserveOAuth("kind", "Kind", 400, at)
+	normalizer.auth.ObserveOperation(Operation{
+		AgentID: "kind", AgentName: "Kind", Provider: "anthropic",
+		Operation: "messages", StatusCode: 401,
+		EndedAt: at.Add(time.Second).Format(time.RFC3339Nano),
+	})
+	server := (&Server{
+		store: store, sources: sources, normalizer: normalizer, hub: NewHub(),
+	}).Routes()
+
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/auth-alerts", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("auth alerts status = %d", response.Code)
+	}
+	var alerts []AuthAlert
+	if err := json.Unmarshal(response.Body.Bytes(), &alerts); err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 1 || alerts[0].AgentID != "kind" {
+		t.Fatalf("unexpected auth alerts response: %+v", alerts)
+	}
+
+	response = httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	metrics := response.Body.String()
+	for _, want := range []string{
+		`agent_creds_tap_auth_blocked{agent_id="kind",agent_name="Kind",provider="anthropic"} 1`,
+		`agent_creds_tap_auth_failures_total{agent_id="kind",agent_name="Kind",provider="anthropic"} 1`,
+	} {
+		if !strings.Contains(metrics, want) {
+			t.Fatalf("metrics missing %q:\n%s", want, metrics)
+		}
+	}
+
+	response = httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	if !strings.Contains(response.Body.String(), "Login required") ||
+		!strings.Contains(response.Body.String(), "/api/auth-alerts") {
+		t.Fatal("UI does not render authentication alerts")
 	}
 }

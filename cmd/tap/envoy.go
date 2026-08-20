@@ -111,6 +111,7 @@ func (m *SourceManager) Reconcile(ctx context.Context, config Config) {
 	var starts []sourceStart
 
 	m.mu.Lock()
+	var removedAgentIDs []string
 	for id, current := range m.sources {
 		next, ok := desired[id]
 		if ok && next == current.source {
@@ -118,6 +119,7 @@ func (m *SourceManager) Reconcile(ctx context.Context, config Config) {
 			continue
 		}
 		current.cancel()
+		removedAgentIDs = append(removedAgentIDs, current.source.AgentID)
 		delete(m.sources, id)
 	}
 	for _, source := range desired {
@@ -130,10 +132,24 @@ func (m *SourceManager) Reconcile(ctx context.Context, config Config) {
 			ctx: sourceCtx, source: source, state: state,
 		})
 	}
+	remainingAgentIDs := make(map[string]bool, len(m.sources))
+	for _, current := range m.sources {
+		remainingAgentIDs[current.source.AgentID] = true
+	}
 	m.mu.Unlock()
+	if m.normalizer != nil && m.normalizer.auth != nil {
+		for _, agentID := range removedAgentIDs {
+			if !remainingAgentIDs[agentID] {
+				m.normalizer.auth.Remove(agentID)
+			}
+		}
+	}
 
 	for _, start := range starts {
 		go m.capture(start.ctx, start.source, start.state)
+		if m.normalizer != nil && m.normalizer.auth != nil {
+			go watchAuthLog(start.ctx, start.source, m.normalizer.auth)
+		}
 	}
 }
 

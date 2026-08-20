@@ -371,11 +371,11 @@ injects the configured upstream authorization header:
 
 ```yaml
 credentials:
-  github/no-instructions/relay:
+  github/dtkav/agent-creds:
     type: github
     header: Authorization
     value:
-      $secret: github#NO_INSTRUCTIONS_RELAY_AUTHORIZATION
+      $secret: github#DTKAV_AGENT_CREDS_AUTHORIZATION
     env: GIT_GITHUB_TOKEN
     capabilities:
       hosts: [github.com, api.github.com]

@@ -21,3 +21,30 @@ git = true
 
 [upstream."github.com"]
 [upstream."api.github.com"]
+
+# Accept both common GitHub origin forms. SSH-style origins are translated
+# inside the sandbox to the HTTPS route, where the bundled helper supplies the
+# short-lived scoped credential; HTTPS origins already use that route.
+[[env]]
+name = "GIT_CONFIG_COUNT"
+value = "2"
+
+[[env]]
+name = "GIT_CONFIG_KEY_0"
+value = "url.https://github.com/.insteadOf"
+
+[[env]]
+name = "GIT_CONFIG_VALUE_0"
+value = "git@github.com:"
+
+[[env]]
+name = "GIT_CONFIG_KEY_1"
+value = "credential.https://github.com.helper"
+
+[[env]]
+name = "GIT_CONFIG_VALUE_1"
+value = "agent-creds-github"
+
+[[env]]
+name = "GIT_TERMINAL_PROMPT"
+value = "0"

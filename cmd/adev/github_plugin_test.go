@@ -4,9 +4,32 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestGitHubPluginConfiguresHTTPSGitTransport(t *testing.T) {
+	plugin, err := LoadPlugin(filepath.Join("..", "..", "plugins", "github.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(map[string]string, len(plugin.Env))
+	for _, item := range plugin.Env {
+		got[item.Name] = item.Value
+	}
+	want := map[string]string{
+		"GIT_CONFIG_COUNT":    "2",
+		"GIT_CONFIG_KEY_0":    "url.https://github.com/.insteadOf",
+		"GIT_CONFIG_VALUE_0":  "git@github.com:",
+		"GIT_CONFIG_KEY_1":    "credential.https://github.com.helper",
+		"GIT_CONFIG_VALUE_1":  "agent-creds-github",
+		"GIT_TERMINAL_PROMPT": "0",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("github plugin environment = %#v, want %#v", got, want)
+	}
+}
 
 func TestGitHubCredentialHelperReadsRefreshedSandboxEnv(t *testing.T) {
 	envFile := filepath.Join(t.TempDir(), "sandbox.env")

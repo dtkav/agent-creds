@@ -127,6 +127,38 @@ func TestWatchAuthLogCorrelatesNetworkStatus(t *testing.T) {
 	}
 }
 
+func TestReadAuthLogUpdatesSkipsUnchangedFileAndDetectsRotation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "auth.log")
+	first := []byte("2026-08-19T22:58:16Z 400\n")
+	if err := os.WriteFile(path, first, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cursor := &authLogCursor{}
+	if lines := readAuthLogUpdates(path, cursor); len(lines) != 1 {
+		t.Fatalf("initial lines = %q", lines)
+	}
+	previousInfo := cursor.info
+	if lines := readAuthLogUpdates(path, cursor); len(lines) != 0 {
+		t.Fatalf("unchanged file produced lines = %q", lines)
+	}
+	if cursor.info == nil || !os.SameFile(previousInfo, cursor.info) {
+		t.Fatal("unchanged file lost its identity")
+	}
+	rotated := filepath.Join(dir, "auth.log.1")
+	if err := os.Rename(path, rotated); err != nil {
+		t.Fatal(err)
+	}
+	second := []byte("2026-08-19T22:59:16Z 200\n")
+	if err := os.WriteFile(path, second, 0600); err != nil {
+		t.Fatal(err)
+	}
+	lines := readAuthLogUpdates(path, cursor)
+	if len(lines) != 1 || string(lines[0]) != "2026-08-19T22:59:16Z 200" {
+		t.Fatalf("rotated lines = %q", lines)
+	}
+}
+
 func TestNormalizerRestoresRecentUnauthorizedOperation(t *testing.T) {
 	store, err := OpenStore(filepath.Join(t.TempDir(), "operations.db"))
 	if err != nil {

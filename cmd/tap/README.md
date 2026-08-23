@@ -18,6 +18,10 @@ SQLite has an allowlisted `operations` schema containing agent ID, resolved
 agent name, provider, operation, model, timing, status, byte counts, and
 provider-reported token counts and OpenRouter charged credits. It has no
 columns for headers, URLs, request/response bodies, or generic JSON.
+Normalized operations are retained indefinitely in this single database.
+Recent UI windows use a time-ordered index, while Prometheus totals are loaded
+once at collector startup and maintained incrementally as new operations are
+inserted, so live review does not repeatedly scan the historical archive.
 
 When tap is enabled, each agent Envoy also emits a separate authentication
 status feed for the exact Claude OAuth token endpoint. Each record contains

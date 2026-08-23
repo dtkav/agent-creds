@@ -139,3 +139,56 @@ func TestStoreSinceReturnsTimelineWindow(t *testing.T) {
 		t.Fatalf("timeline window returned unexpected operations: %+v", operations)
 	}
 }
+
+func TestStoreMetricsCacheTracksNewOperationsAndSurvivesRestart(t *testing.T) {
+	path := t.TempDir() + "/operations.db"
+	store, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	insert := func(input, output int64) {
+		t.Helper()
+		op := &Operation{
+			Source: "agent", AgentName: "Agent", Provider: "openai",
+			Operation: "responses", Model: "gpt-test",
+			StartedAt: "2026-01-01T00:00:00Z", EndedAt: "2026-01-01T00:00:01Z",
+			DurationMS: 1000, StatusCode: 200, Outcome: "success",
+			InputTokens: input, OutputTokens: output,
+		}
+		if err := store.Insert(op); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insert(10, 2)
+	metrics, err := store.Metrics()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metrics) != 1 || metrics[0].Operations != 1 {
+		t.Fatalf("initial metrics = %+v", metrics)
+	}
+	insert(20, 3)
+	metrics, err = store.Metrics()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metrics) != 1 || metrics[0].Operations != 2 ||
+		metrics[0].InputTokens != 30 || metrics[0].OutputTokens != 5 {
+		t.Fatalf("incremental metrics = %+v", metrics)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	metrics, err = store.Metrics()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metrics) != 1 || metrics[0].Operations != 2 || metrics[0].InputTokens != 30 {
+		t.Fatalf("reloaded cumulative metrics = %+v", metrics)
+	}
+}

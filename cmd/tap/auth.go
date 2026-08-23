@@ -205,6 +205,7 @@ func (s *authState) clear() {
 type authLogCursor struct {
 	offset  int64
 	pending []byte
+	info    os.FileInfo
 }
 
 func watchAuthLog(ctx context.Context, source Source, tracker *AuthTracker) {
@@ -243,19 +244,24 @@ func authLogPath(source Source) (string, bool) {
 }
 
 func readAuthLogUpdates(path string, cursor *authLogCursor) [][]byte {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil
+	}
+	rotated := cursor.info != nil && !os.SameFile(cursor.info, info)
+	if rotated || info.Size() < cursor.offset {
+		cursor.offset = 0
+		cursor.pending = nil
+	}
+	cursor.info = info
+	if info.Size() == cursor.offset {
+		return nil
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return nil
 	}
 	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return nil
-	}
-	if info.Size() < cursor.offset {
-		cursor.offset = 0
-		cursor.pending = nil
-	}
 	if _, err := file.Seek(cursor.offset, io.SeekStart); err != nil {
 		return nil
 	}

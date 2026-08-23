@@ -140,6 +140,103 @@ func TestNormalizerReportsOnlySafeActiveOperationFields(t *testing.T) {
 	}
 }
 
+func TestJSONModelScannerFindsSplitTopLevelModel(t *testing.T) {
+	var scanner jsonModelScanner
+	chunks := [][]byte{
+		[]byte(` {"input":{"model":"nested-model","text":"model"},"mo`),
+		[]byte(`del":"gpt-\u0074est","ignored":"`),
+		[]byte(strings.Repeat("x", 128<<10)),
+	}
+	var model string
+	for _, chunk := range chunks {
+		if current := scanner.Feed(chunk); current != "" {
+			model = current
+			break
+		}
+	}
+	if model != "gpt-test" {
+		t.Fatalf("model = %q, want gpt-test", model)
+	}
+}
+
+func TestNormalizerExtractsModelWithoutBufferingIncompleteRequest(t *testing.T) {
+	store, err := OpenStore(t.TempDir() + "/operations.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	normalizer := NewNormalizer(store, NewHub())
+	consumeTestSegment(t, normalizer, "large-request", 1, map[string]any{
+		"request_headers": map[string]any{"headers": []any{
+			map[string]any{"key": ":authority", "value": "api.openai.com"},
+			map[string]any{"key": ":path", "value": "/v1/responses"},
+		}},
+	})
+	consumeTestSegment(t, normalizer, "large-request", 1, map[string]any{
+		"request_body_chunk": bodyChunk(`{"mo`),
+	})
+	consumeTestSegment(t, normalizer, "large-request", 1, map[string]any{
+		"request_body_chunk": bodyChunk(`del":"gpt-early","input":"` + strings.Repeat("x", 256<<10)),
+	})
+	active := normalizer.Active()
+	if len(active) != 1 || active[0].Model != "gpt-early" {
+		t.Fatalf("model was not extracted from partial request: %+v", active)
+	}
+	for _, trace := range normalizer.traces {
+		if trace.requestBody.Len() != 0 {
+			t.Fatalf("identity request retained %d raw bytes", trace.requestBody.Len())
+		}
+	}
+}
+
+func TestNormalizerWaitsForSplitStreamingTerminalEvent(t *testing.T) {
+	store, err := OpenStore(t.TempDir() + "/operations.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	normalizer := NewNormalizer(store, NewHub())
+	for _, segment := range []map[string]any{
+		{"request_headers": map[string]any{"headers": []any{
+			map[string]any{"key": ":authority", "value": "api.anthropic.com"},
+			map[string]any{"key": ":path", "value": "/v1/messages"},
+		}}},
+		{"request_body_chunk": bodyChunk(`{"model":"claude-test"}`)},
+		{"response_headers": map[string]any{"headers": []any{
+			map[string]any{"key": ":status", "value": "200"},
+			map[string]any{"key": "content-type", "value": "text/event-stream"},
+		}}},
+		{"response_body_chunk": bodyChunk("data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\",\"usage\":{\"input_tokens\":11,\"output_tokens\":1}}}\n\n")},
+		{"response_body_chunk": bodyChunk("data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9}}\n\n" + strings.Repeat("data: {\"type\":\"content_block_delta\"}\n\n", 1000))},
+		{"response_body_chunk": bodyChunk("data: {\"type\":\"message_st")},
+	} {
+		consumeTestSegment(t, normalizer, "streaming-agent", 9, segment)
+	}
+	if operations, err := store.Recent(10); err != nil || len(operations) != 0 {
+		t.Fatalf("operation completed before terminal event: operations=%+v err=%v", operations, err)
+	}
+	consumeTestSegment(t, normalizer, "streaming-agent", 9, map[string]any{
+		"response_body_chunk": bodyChunk("op\"}\n\n"),
+	})
+	operations, err := store.Recent(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(operations) != 1 || operations[0].InputTokens != 11 || operations[0].OutputTokens != 9 {
+		t.Fatalf("split terminal event was not normalized: %+v", operations)
+	}
+}
+
+func TestJSONCompletionScannerHandlesStringsAcrossChunks(t *testing.T) {
+	var scanner jsonCompletionScanner
+	if scanner.Feed([]byte(`{"value":"not } yet`)) {
+		t.Fatal("partial JSON was reported complete")
+	}
+	if !scanner.Feed([]byte(` and escaped \" brace","usage":{"input_tokens":1}}`)) {
+		t.Fatal("complete JSON was not detected")
+	}
+}
+
 func TestNormalizerDecodesCompressedStreamingUsage(t *testing.T) {
 	path := t.TempDir() + "/operations.db"
 	store, err := OpenStore(path)

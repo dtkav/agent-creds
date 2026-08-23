@@ -3,6 +3,8 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"sort"
+	"sync"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -33,6 +35,9 @@ type Operation struct {
 
 type Store struct {
 	db *sql.DB
+
+	metricsMu    sync.Mutex
+	metricsCache map[metricKey]MetricRow
 }
 
 func OpenStore(path string) (*Store, error) {
@@ -78,7 +83,8 @@ CREATE TABLE IF NOT EXISTS operations (
 	agent_name TEXT NOT NULL DEFAULT '',
 	cost_credits REAL NOT NULL DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS operations_ended_at ON operations(ended_at DESC);
+CREATE INDEX IF NOT EXISTS operations_ended_at_id ON operations(ended_at DESC, id DESC);
+DROP INDEX IF EXISTS operations_ended_at;
 CREATE INDEX IF NOT EXISTS operations_source ON operations(source, ended_at DESC);
 `)
 	if err != nil {
@@ -121,6 +127,8 @@ func (s *Store) Insert(op *Operation) error {
 	if op.AgentID == "" {
 		op.AgentID = op.Source
 	}
+	s.metricsMu.Lock()
+	defer s.metricsMu.Unlock()
 	result, err := s.db.Exec(`
 INSERT INTO operations (
 	source, provider, operation_name, model, started_at, ended_at,
@@ -136,6 +144,9 @@ INSERT INTO operations (
 		return err
 	}
 	op.ID, err = result.LastInsertId()
+	if err == nil && s.metricsCache != nil && includedInReports(op) {
+		addMetric(s.metricsCache, op)
+	}
 	return err
 }
 
@@ -165,7 +176,7 @@ SELECT id, source, provider, operation_name, model, started_at, ended_at,
 FROM operations
 WHERE ended_at >= ?
 	AND NOT (input_tokens = 0 AND output_tokens = 0 AND duration_ms >= 300000)
-ORDER BY id DESC LIMIT ?`, since.UTC().Format(time.RFC3339Nano), limit)
+ORDER BY ended_at DESC, id DESC LIMIT ?`, since.UTC().Format(time.RFC3339Nano), limit)
 }
 
 func (s *Store) queryOperations(query string, arguments ...any) ([]Operation, error) {
@@ -209,6 +220,29 @@ type MetricRow struct {
 }
 
 func (s *Store) Metrics() ([]MetricRow, error) {
+	s.metricsMu.Lock()
+	defer s.metricsMu.Unlock()
+	if s.metricsCache == nil {
+		rows, err := s.loadMetrics()
+		if err != nil {
+			return nil, err
+		}
+		s.metricsCache = make(map[metricKey]MetricRow, len(rows))
+		for _, row := range rows {
+			s.metricsCache[metricKeyForRow(row)] = row
+		}
+	}
+	metrics := make([]MetricRow, 0, len(s.metricsCache))
+	for _, row := range s.metricsCache {
+		metrics = append(metrics, row)
+	}
+	sort.Slice(metrics, func(i, j int) bool {
+		return metricKeyForRow(metrics[i]).less(metricKeyForRow(metrics[j]))
+	})
+	return metrics, nil
+}
+
+func (s *Store) loadMetrics() ([]MetricRow, error) {
 	rows, err := s.db.Query(`
 SELECT source, agent_name, provider, model, outcome, COUNT(*),
 	SUM(input_tokens), SUM(output_tokens), SUM(cache_read_tokens),
@@ -235,6 +269,58 @@ GROUP BY source, agent_name, provider, model, outcome`)
 		metrics = append(metrics, row)
 	}
 	return metrics, rows.Err()
+}
+
+type metricKey struct {
+	agentID   string
+	agentName string
+	provider  string
+	model     string
+	outcome   string
+}
+
+func metricKeyForRow(row MetricRow) metricKey {
+	return metricKey{
+		agentID: row.AgentID, agentName: row.AgentName,
+		provider: row.Provider, model: row.Model, outcome: row.Outcome,
+	}
+}
+
+func (k metricKey) less(other metricKey) bool {
+	left := [...]string{k.agentID, k.agentName, k.provider, k.model, k.outcome}
+	right := [...]string{other.agentID, other.agentName, other.provider, other.model, other.outcome}
+	for i := range left {
+		if left[i] != right[i] {
+			return left[i] < right[i]
+		}
+	}
+	return false
+}
+
+func includedInReports(op *Operation) bool {
+	return !(op.InputTokens == 0 && op.OutputTokens == 0 && op.DurationMS >= 300000)
+}
+
+func addMetric(cache map[metricKey]MetricRow, op *Operation) {
+	key := metricKey{
+		agentID: op.Source, agentName: op.AgentName,
+		provider: op.Provider, model: op.Model, outcome: op.Outcome,
+	}
+	row := cache[key]
+	row.AgentID = op.Source
+	row.AgentName = op.AgentName
+	row.Provider = op.Provider
+	row.Model = op.Model
+	row.Outcome = op.Outcome
+	row.Operations++
+	row.InputTokens += op.InputTokens
+	row.OutputTokens += op.OutputTokens
+	row.CacheReadTokens += op.CacheReadTokens
+	row.CacheWriteTokens += op.CacheWriteTokens
+	row.ReasoningTokens += op.ReasoningTokens
+	row.CostCredits += op.CostCredits
+	row.DurationMS += op.DurationMS
+	cache[key] = row
 }
 
 func operationTimes(start, end time.Time) (string, string, int64) {

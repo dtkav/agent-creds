@@ -27,23 +27,26 @@ const (
 )
 
 type traceState struct {
-	activeID       uint64
-	source         string
-	agentName      string
-	traceID        string
-	started        time.Time
-	lastSeen       time.Time
-	provider       string
-	operation      string
-	model          string
-	statusCode     int
-	requestCoding  string
-	responseCoding string
-	requestBytes   int64
-	responseBytes  int64
-	requestBody    bytes.Buffer
-	responseBody   bytes.Buffer
-	overflowed     bool
+	activeID            uint64
+	source              string
+	agentName           string
+	traceID             string
+	started             time.Time
+	lastSeen            time.Time
+	provider            string
+	operation           string
+	model               string
+	statusCode          int
+	requestCoding       string
+	responseCoding      string
+	responseContentType string
+	requestBytes        int64
+	responseBytes       int64
+	requestBody         bytes.Buffer
+	responseBody        bytes.Buffer
+	requestModel        jsonModelScanner
+	responseJSON        jsonCompletionScanner
+	overflowed          bool
 }
 
 type traceKey struct {
@@ -131,22 +134,29 @@ func (n *Normalizer) Consume(
 	case first(segment, "request_body_chunk", "requestBodyChunk") != nil:
 		chunk, truncated := bodyBytes(first(segment, "request_body_chunk", "requestBodyChunk"))
 		state.requestBytes += int64(len(chunk))
-		state.appendBounded(&state.requestBody, chunk, n)
+		if state.model == "" && identityContentCoding(state.requestCoding) {
+			state.model = state.requestModel.Feed(chunk)
+		} else if state.model == "" {
+			state.appendBounded(&state.requestBody, chunk, n)
+			state.parseCompressedRequestModel(n)
+		}
 		if truncated {
 			state.markOverflowed(n)
 		}
-		state.parseRequestModel(n)
 	case first(segment, "response_headers", "responseHeaders") != nil:
 		state.applyResponseHeaders(first(segment, "response_headers", "responseHeaders"))
 	case first(segment, "response_body_chunk", "responseBodyChunk") != nil:
 		chunk, truncated := bodyBytes(first(segment, "response_body_chunk", "responseBodyChunk"))
 		state.responseBytes += int64(len(chunk))
+		previousLength := state.responseBody.Len()
 		state.appendBounded(&state.responseBody, chunk, n)
 		if truncated {
 			state.markOverflowed(n)
 		}
-		if op, complete := state.normalized(false, n); complete {
-			n.finish(key, op)
+		if state.shouldNormalizeResponse(chunk, previousLength) {
+			if op, complete := state.normalized(false, n); complete {
+				n.finish(key, op)
+			}
 		}
 	case first(segment, "response_trailers", "responseTrailers") != nil:
 		if op, _ := state.normalized(true, n); op != nil {
@@ -311,9 +321,10 @@ func (s *traceState) applyResponseHeaders(value any) {
 	status, _ := strconv.Atoi(headers[":status"])
 	s.statusCode = status
 	s.responseCoding = headers["content-encoding"]
+	s.responseContentType = headers["content-type"]
 }
 
-func (s *traceState) parseRequestModel(n *Normalizer) {
+func (s *traceState) parseCompressedRequestModel(n *Normalizer) {
 	if s.model != "" || s.overflowed {
 		return
 	}
@@ -322,12 +333,282 @@ func (s *traceState) parseRequestModel(n *Normalizer) {
 		s.markOverflowed(n)
 		return
 	}
-	var body struct {
-		Model string `json:"model"`
+	var scanner jsonModelScanner
+	if model := scanner.Feed(decoded); model != "" {
+		s.model = model
+		s.requestBody.Reset()
 	}
-	if json.Unmarshal(decoded, &body) == nil {
-		s.model = body.Model
+}
+
+func (s *traceState) shouldNormalizeResponse(chunk []byte, previousLength int) bool {
+	if s.overflowed || len(chunk) == 0 {
+		return false
 	}
+	if !identityContentCoding(s.responseCoding) {
+		// Incremental decoding is content-coding specific. Preserve support for
+		// compressed provider streams while keeping the common identity path
+		// strictly linear.
+		return true
+	}
+	contentType := strings.ToLower(s.responseContentType)
+	if strings.Contains(contentType, "text/event-stream") {
+		return s.hasTerminalResponseEvent(previousLength)
+	}
+	if contentType == "" {
+		if eventStream, needMore := eventStreamPrefix(s.responseBody.Bytes()); eventStream {
+			return s.hasTerminalResponseEvent(previousLength)
+		} else if needMore {
+			return false
+		}
+	}
+	return s.responseJSON.Feed(chunk)
+}
+
+func eventStreamPrefix(body []byte) (eventStream, needMore bool) {
+	body = bytes.TrimLeft(body, " \t\r\n")
+	if len(body) == 0 {
+		return false, true
+	}
+	for _, prefix := range [][]byte{
+		[]byte("data:"), []byte("event:"), []byte("id:"), []byte("retry:"), []byte(":"),
+	} {
+		if bytes.HasPrefix(body, prefix) {
+			return true, false
+		}
+		if bytes.HasPrefix(prefix, body) {
+			needMore = true
+		}
+	}
+	return false, needMore
+}
+
+func (s *traceState) hasTerminalResponseEvent(previousLength int) bool {
+	var markers [][]byte
+	switch s.provider {
+	case "openai":
+		markers = [][]byte{[]byte("response.completed"), []byte("[DONE]")}
+	case "anthropic":
+		markers = [][]byte{[]byte("message_stop")}
+	case "openrouter":
+		markers = [][]byte{
+			[]byte("response.completed"), []byte("response.done"), []byte("[DONE]"),
+			[]byte(`"usage":{`), []byte(`"usage": {`),
+		}
+	default:
+		return false
+	}
+	maxMarkerLength := 0
+	for _, marker := range markers {
+		if len(marker) > maxMarkerLength {
+			maxMarkerLength = len(marker)
+		}
+	}
+	start := previousLength - maxMarkerLength + 1
+	if start < 0 {
+		start = 0
+	}
+	recent := s.responseBody.Bytes()[start:]
+	for _, marker := range markers {
+		if bytes.Contains(recent, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func identityContentCoding(contentEncoding string) bool {
+	for _, encoding := range strings.Split(strings.ToLower(contentEncoding), ",") {
+		encoding = strings.TrimSpace(encoding)
+		if encoding != "" && encoding != "identity" {
+			return false
+		}
+	}
+	return true
+}
+
+const maxJSONTokenBytes = 4 << 10
+
+// jsonModelScanner extracts only a top-level string-valued model field from a
+// request body. It is resumable across Envoy chunks, handles nested prompt
+// objects and escaped strings, and never retains arbitrary string values.
+type jsonModelScanner struct {
+	started       bool
+	depth         int
+	inString      bool
+	escaped       bool
+	expectKey     bool
+	haveKey       bool
+	keyIsModel    bool
+	expectValue   bool
+	capture       byte
+	token         []byte
+	tokenOverflow bool
+}
+
+func (s *jsonModelScanner) Feed(chunk []byte) string {
+	for _, current := range chunk {
+		if s.inString {
+			if s.escaped {
+				s.appendToken(current)
+				s.escaped = false
+				continue
+			}
+			switch current {
+			case '\\':
+				s.appendToken(current)
+				s.escaped = true
+			case '"':
+				s.inString = false
+				if value, found := s.finishString(); found {
+					return value
+				}
+			default:
+				s.appendToken(current)
+			}
+			continue
+		}
+
+		if !s.started {
+			if current == '{' {
+				s.started = true
+				s.depth = 1
+				s.expectKey = true
+			}
+			continue
+		}
+
+		if current == '"' {
+			s.inString = true
+			s.escaped = false
+			s.token = s.token[:0]
+			s.tokenOverflow = false
+			s.capture = 0
+			if s.depth == 1 && s.expectKey {
+				s.capture = 1
+			} else if s.depth == 1 && s.expectValue && s.keyIsModel {
+				s.capture = 2
+			}
+			continue
+		}
+
+		if s.depth == 1 {
+			switch current {
+			case ':':
+				if s.haveKey {
+					s.haveKey = false
+					s.expectValue = true
+				}
+				continue
+			case ',':
+				s.expectKey = true
+				s.expectValue = false
+				s.keyIsModel = false
+				continue
+			case ' ', '\t', '\r', '\n':
+				continue
+			}
+			if s.expectValue {
+				s.expectValue = false
+				s.keyIsModel = false
+			}
+		}
+
+		switch current {
+		case '{', '[':
+			s.depth++
+		case '}', ']':
+			s.depth--
+			if s.depth == 1 {
+				s.expectValue = false
+				s.keyIsModel = false
+			}
+		}
+	}
+	return ""
+}
+
+func (s *jsonModelScanner) appendToken(current byte) {
+	if s.capture == 0 || s.tokenOverflow {
+		return
+	}
+	if len(s.token) >= maxJSONTokenBytes {
+		s.token = s.token[:0]
+		s.tokenOverflow = true
+		return
+	}
+	s.token = append(s.token, current)
+}
+
+func (s *jsonModelScanner) finishString() (string, bool) {
+	capture := s.capture
+	s.capture = 0
+	if capture == 0 || s.tokenOverflow {
+		if s.depth == 1 && s.expectValue {
+			s.expectValue = false
+			s.keyIsModel = false
+		}
+		return "", false
+	}
+	value, err := strconv.Unquote(`"` + string(s.token) + `"`)
+	if err != nil {
+		return "", false
+	}
+	if capture == 1 {
+		s.expectKey = false
+		s.haveKey = true
+		s.keyIsModel = value == "model"
+		return "", false
+	}
+	s.expectValue = false
+	s.keyIsModel = false
+	return value, value != ""
+}
+
+// jsonCompletionScanner recognizes the end of one top-level JSON object or
+// array without reparsing bytes from prior chunks.
+type jsonCompletionScanner struct {
+	started  bool
+	depth    int
+	inString bool
+	escaped  bool
+}
+
+func (s *jsonCompletionScanner) Feed(chunk []byte) bool {
+	for _, current := range chunk {
+		if s.inString {
+			if s.escaped {
+				s.escaped = false
+				continue
+			}
+			if current == '\\' {
+				s.escaped = true
+			} else if current == '"' {
+				s.inString = false
+			}
+			continue
+		}
+		if current == '"' && s.started {
+			s.inString = true
+			continue
+		}
+		if !s.started {
+			if current == '{' || current == '[' {
+				s.started = true
+				s.depth = 1
+			}
+			continue
+		}
+		switch current {
+		case '{', '[':
+			s.depth++
+		case '}', ']':
+			s.depth--
+			if s.depth == 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (s *traceState) normalized(force bool, n *Normalizer) (*Operation, bool) {

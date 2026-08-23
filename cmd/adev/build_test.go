@@ -141,3 +141,48 @@ func TestSandboxEnvPrivateStoreRejectsUnsafeKey(t *testing.T) {
 		t.Fatal("unsafe private store key was accepted")
 	}
 }
+
+func TestCachedSandboxEnvReturnsValidatedSnapshot(t *testing.T) {
+	configHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+
+	cfg := ProjectConfig{}
+	scriptDir := t.TempDir()
+	envPath := "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-sandbox-env"
+	key := "0123456789abcdef"
+	store := filepath.Join(configHome, "agent-creds", "nix", "envs", key, "nix", "store")
+	if err := os.MkdirAll(store, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(
+		"/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-env-target",
+		filepath.Join(store, filepath.Base(envPath)),
+	); err != nil {
+		t.Fatal(err)
+	}
+	manifest := sandboxEnvStoreFile(envPath)
+	if err := os.MkdirAll(filepath.Dir(manifest), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifest, []byte(key+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveEnvHash(cfg, scriptDir, envPath); err != nil {
+		t.Fatal(err)
+	}
+
+	got, available := cachedSandboxEnv(cfg, scriptDir)
+	if !available || got != envPath {
+		t.Fatalf("cachedSandboxEnv() = %q, %v; want %q, true", got, available, envPath)
+	}
+}
+
+func TestCachedSandboxEnvTreatsRemovedCacheAsRebuild(t *testing.T) {
+	configHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+
+	cfg := ProjectConfig{}
+	if got, available := cachedSandboxEnv(cfg, t.TempDir()); available || got != "" {
+		t.Fatalf("cachedSandboxEnv() = %q, %v; want empty, false", got, available)
+	}
+}

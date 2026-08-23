@@ -236,18 +236,25 @@ func needsBaseRebuild(scriptDir string) bool {
 // Each distinct env hash gets its own cache file in nixDir(), so switching
 // between projects with different package sets doesn't trigger rebuilds.
 func needsEnvRebuild(cfg ProjectConfig, scriptDir string) bool {
-	currentHash := envHash(cfg, scriptDir)
-	envFile := filepath.Join(nixDir(), "env-"+currentHash)
-	if !fileExists(envFile) {
-		return true
-	}
-	// Verify the stored path still exists on disk
-	data, err := os.ReadFile(envFile)
+	_, available := cachedSandboxEnv(cfg, scriptDir)
+	return !available
+}
+
+// cachedSandboxEnv reads and validates one cache snapshot. Callers must use
+// the returned path rather than checking the cache and reopening it later:
+// cache maintenance or a concurrent environment build may replace the file
+// between those operations.
+func cachedSandboxEnv(cfg ProjectConfig, scriptDir string) (string, bool) {
+	cacheFile := filepath.Join(nixDir(), "env-"+envHash(cfg, scriptDir))
+	data, err := os.ReadFile(cacheFile)
 	if err != nil {
-		return true
+		return "", false
 	}
 	envPath := strings.TrimSpace(string(data))
-	return !sandboxEnvAvailable(envPath)
+	if envPath == "" || !sandboxEnvAvailable(envPath) {
+		return "", false
+	}
+	return envPath, true
 }
 
 // saveBaseHash saves the base image hash after successful build.
@@ -318,14 +325,8 @@ func ensureBaseImage(scriptDir string, spinner *Spinner) error {
 // ensureSandboxEnv builds the sandbox env if needed.
 // Returns the env store path (e.g. /nix/store/xxx-sandbox-env).
 func ensureSandboxEnv(cfg ProjectConfig, scriptDir string, spinner *Spinner) (string, error) {
-	if !needsEnvRebuild(cfg, scriptDir) {
-		// Read cached env path for this hash
-		cacheFile := filepath.Join(nixDir(), "env-"+envHash(cfg, scriptDir))
-		data, err := os.ReadFile(cacheFile)
-		if err != nil {
-			return "", fmt.Errorf("reading cached env path: %w", err)
-		}
-		return strings.TrimSpace(string(data)), nil
+	if envPath, available := cachedSandboxEnv(cfg, scriptDir); available {
+		return envPath, nil
 	}
 
 	spinner.Status("generating packages.nix...")

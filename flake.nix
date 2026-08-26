@@ -270,6 +270,16 @@
           ignoreCollisions = true;  # multiple packages may provide same file
         };
 
+        # Floorplan projects skills from their individual semantic components,
+        # so its PATH environment must not retain the compatibility harness
+        # derivation (which copies all skills into one output). Package Nix
+        # requirements are already represented in pluginPackages.
+        floorplanEnv = pkgs.buildEnv {
+          name = "floorplan-env";
+          paths = basePackages ++ pluginPackages;
+          ignoreCollisions = true;
+        };
+
       in {
         packages = {
           default = sandboxBase;
@@ -280,6 +290,7 @@
         legacyPackages.floorplan = {
           schema = floorplanComponentPlan.schema;
           baseRoots = basePackages;
+          environmentRoot = floorplanEnv;
           components = floorplanComponentPlan.components;
           skillsRoot = skills;
           harnessRoot = harnessLayer;

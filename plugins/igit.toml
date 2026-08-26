@@ -5,12 +5,12 @@ nix = """
 let
   igit = pkgs.git.overrideAttrs (old: {
     pname = "igit";
-    version = "2.53.0-rc2";
+    version = "2.9.8";
     src = pkgs.fetchFromGitHub {
       owner = "dtkav";
       repo = "igit";
-      rev = "7468c842712a5f9c1e34d09502143e3208bfb757";
-      hash = "sha256-vLJhhwimbvuxlU+EzWoidafxkFf/syREdf2zJeiiiDc=";
+      rev = "4f6de0c6c52d46c606c6180fba1b2fd57b61f53e";
+      hash = "sha256-mH2FS1oCsbPmrQ09ZgaYSuWKknQ3K47qXx2S6+KV6cM=";
     };
     patches = [];
     outputs = [ "out" ];

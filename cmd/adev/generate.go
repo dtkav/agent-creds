@@ -99,9 +99,6 @@ func (g *Generator) generateMergedConfig() error {
 	for _, host := range g.hosts {
 		sb.WriteString(fmt.Sprintf("[upstream.%q]\n", host))
 		ucfg := g.upstream[host]
-		if ucfg.Mode != "" {
-			sb.WriteString(fmt.Sprintf("mode = %q\n", ucfg.Mode))
-		}
 		if ucfg.Credential != "" {
 			sb.WriteString(fmt.Sprintf("credential = %q\n", ucfg.Credential))
 		}
@@ -122,9 +119,6 @@ func (g *Generator) generateMergedConfig() error {
 		}
 		if ucfg.Network != "" {
 			sb.WriteString(fmt.Sprintf("network = %q\n", ucfg.Network))
-		}
-		if ucfg.ForwardToken {
-			sb.WriteString("forward_token = true\n")
 		}
 		if len(ucfg.Methods) > 0 {
 			sb.WriteString(fmt.Sprintf("methods = [%s]\n", quotedList(ucfg.Methods)))
@@ -332,9 +326,8 @@ func (g *Generator) routeForHost(host string) map[string]interface{} {
 			"timeout":              "300s",
 		},
 	}
-	if len(upstreamCfg.Methods) > 0 || len(upstreamCfg.Paths) > 0 || upstreamCfg.Credential != "" || upstreamCfg.Policy != "" || upstreamCfg.Mode != "" {
+	if len(upstreamCfg.Methods) > 0 || len(upstreamCfg.Paths) > 0 || upstreamCfg.Credential != "" || upstreamCfg.Policy != "" {
 		contextExtensions := map[string]string{}
-		contextExtensions["agent_creds_mode"] = upstreamCfg.ModeValue()
 		if upstreamCfg.Credential != "" {
 			contextExtensions["credential"] = upstreamCfg.Credential
 		}

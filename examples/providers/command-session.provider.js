@@ -76,13 +76,6 @@ registerCredentialProvider({
     paths: ["/v1/**"],
   },
 
-  validate(config) {
-    const header = (config.session_header || "authorization").toLowerCase();
-    if (header.startsWith("x-agent-creds-")) {
-      throw new Error("session_header must not use the verifier namespace");
-    }
-  },
-
   resolve(request, config) {
     $log.debug(
       "issuing " + request.credential + " session for " + config.audience,
@@ -92,11 +85,10 @@ registerCredentialProvider({
       config.command,
       ["assertion", "--audience", config.audience],
       {
-        inheritEnv: false,
         env: {
           HOME: "/tmp",
-          SERVICE_CLIENT_SECRET: config.client_secret,
         },
+        stdin: config.client_secret,
       },
     );
     if (!assertion) {

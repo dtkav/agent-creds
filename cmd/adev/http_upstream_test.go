@@ -93,7 +93,6 @@ func TestHTTPListenerHasOnlyExplicitVirtualHostsAndExtAuthz(t *testing.T) {
 func TestConnectListenerRoutesPlainHTTPThroughExtAuthz(t *testing.T) {
 	g := &Generator{upstream: map[string]UpstreamConfig{
 		"service.internal": {
-			Mode:    "identity",
 			Scheme:  "http",
 			Port:    8890,
 			Methods: []string{"POST"},
@@ -140,60 +139,9 @@ func TestValidateUpstreamScheme(t *testing.T) {
 	}
 }
 
-func TestIdentityRouteCarriesVaultModeWithoutCredential(t *testing.T) {
-	g := &Generator{upstream: map[string]UpstreamConfig{
-		"service.internal": {
-			Mode:    "identity",
-			Scheme:  "http",
-			Port:    8890,
-			Methods: []string{"POST"},
-			Paths:   []string{"/graphql"},
-		},
-	}}
-	route := g.routeForHost("service.internal")
-	perFilter := route["typed_per_filter_config"].(map[string]interface{})
-	extAuthz := perFilter["envoy.filters.http.ext_authz"].(map[string]interface{})
-	settings := extAuthz["check_settings"].(map[string]interface{})
-	extensions := settings["context_extensions"].(map[string]string)
-	if extensions["agent_creds_mode"] != "identity" {
-		t.Fatalf("context extensions = %#v", extensions)
-	}
-	if _, ok := extensions["credential"]; ok {
-		t.Fatalf("identity route selected a credential: %#v", extensions)
-	}
-	if err := ValidateUpstreams(g.upstream); err != nil {
-		t.Fatalf("identity upstream rejected: %v", err)
-	}
-}
-
-func TestIdentityRouteRejectsCredentialInjection(t *testing.T) {
-	err := ValidateUpstreams(map[string]UpstreamConfig{
-		"service.internal": {Mode: "identity", Credential: "/service"},
-	})
-	if err == nil {
-		t.Fatal("identity route accepted a credential")
-	}
-}
-
-func TestForwardTokenBindsCredentialWithoutMintingEnvToken(t *testing.T) {
-	upstream := UpstreamConfig{Credential: "/example/prod", ForwardToken: true}
-	if upstream.MintsToken() {
-		t.Fatal("forward-token route would expose a minted env token")
-	}
-	if err := ValidateUpstreams(map[string]UpstreamConfig{"api.example.com": upstream}); err != nil {
-		t.Fatalf("forward-token route rejected: %v", err)
-	}
-	if err := ValidateUpstreams(map[string]UpstreamConfig{
-		"api.example.com": {ForwardToken: true},
-	}); err == nil {
-		t.Fatal("forward_token without a credential was accepted")
-	}
-}
-
 func TestUpstreamPolicyIsBoundIntoExtAuthzContext(t *testing.T) {
 	g := &Generator{upstream: map[string]UpstreamConfig{
 		"records.internal": {
-			Mode:   "identity",
 			Scheme: "http",
 			Policy: "/records/read",
 		},
@@ -213,7 +161,7 @@ func TestUpstreamPolicyIsBoundIntoExtAuthzContext(t *testing.T) {
 
 func TestUpstreamPolicyPathMustBeAbsolute(t *testing.T) {
 	err := ValidateUpstreams(map[string]UpstreamConfig{
-		"records.internal": {Mode: "identity", Policy: "records/read"},
+		"records.internal": {Policy: "records/read"},
 	})
 	if err == nil {
 		t.Fatal("relative upstream policy path was accepted")

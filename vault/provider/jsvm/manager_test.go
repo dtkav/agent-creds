@@ -871,7 +871,7 @@ registerCredentialProvider({
 	}
 }
 
-func TestExecRunCanReplaceInheritedEnvironment(t *testing.T) {
+func TestExecRunReceivesOnlyExplicitEnvironment(t *testing.T) {
 	t.Setenv("AGENT_CREDS_EXEC_PARENT", "must-not-leak")
 	directory := t.TempDir()
 	writeScript(t, directory, "exec.provider.js", fmt.Sprintf(`
@@ -879,10 +879,8 @@ registerCredentialProvider({
   name: "exec",
   credentialType: "exec-test",
   resolve: function () {
-    var output = $exec.run(%q, ["-test.run=TestExecRunHelperProcess", "--"], {
-      inheritEnv: false,
+    var output = $exec.run(%q, ["-test.run=TestExecRunHelperProcess", "--", "exec-helper"], {
       env: {
-        AGENT_CREDS_EXEC_HELPER: "1",
         AGENT_CREDS_EXEC_EXPLICIT: "available"
       }
     });
@@ -905,16 +903,15 @@ registerCredentialProvider({
 	}
 }
 
-func TestExecRunInheritsEnvironmentByDefault(t *testing.T) {
-	t.Setenv("AGENT_CREDS_EXEC_HELPER", "1")
-	t.Setenv("AGENT_CREDS_EXEC_PARENT", "inherited")
+func TestExecRunUsesEmptyEnvironmentByDefault(t *testing.T) {
+	t.Setenv("AGENT_CREDS_EXEC_PARENT", "must-not-leak")
 	directory := t.TempDir()
 	writeScript(t, directory, "exec.provider.js", fmt.Sprintf(`
 registerCredentialProvider({
   name: "exec",
   credentialType: "exec-test",
   resolve: function () {
-    var output = $exec.run(%q, ["-test.run=TestExecRunHelperProcess", "--"]);
+    var output = $exec.run(%q, ["-test.run=TestExecRunHelperProcess", "--", "exec-helper"]);
     return { headers: { "x-exec-output": output } };
   }
 });
@@ -929,8 +926,37 @@ registerCredentialProvider({
 	}
 	configured := manager.Provider(Spec{Name: "configured", Type: "exec-test"})
 	got := resolveForTest(t, configured, provider.Request{}).Headers["x-exec-output"]
-	if got != "explicit=;parent=inherited" {
+	if got != "explicit=;parent=" {
 		t.Fatalf("default child environment = %q", got)
+	}
+}
+
+func TestExecRunRejectsAmbientEnvironmentInheritance(t *testing.T) {
+	directory := t.TempDir()
+	writeScript(t, directory, "exec.provider.js", fmt.Sprintf(`
+registerCredentialProvider({
+  name: "exec",
+  credentialType: "exec-test",
+  resolve: function () {
+    $exec.run(%q, ["-test.run=TestExecRunHelperProcess", "--", "exec-helper"], {
+      inheritEnv: true
+    });
+    return {headers: {}};
+  }
+});
+`, os.Args[0]))
+
+	manager, err := NewManager([]string{directory}, 1, []Spec{{
+		Name: "configured",
+		Type: "exec-test",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	configured := manager.Provider(Spec{Name: "configured", Type: "exec-test"})
+	_, err = configured.Resolve(context.Background(), provider.Request{})
+	if err == nil || !strings.Contains(err.Error(), `$exec.run unknown option "inheritEnv"`) {
+		t.Fatalf("inheritEnv error = %v", err)
 	}
 }
 
@@ -941,9 +967,7 @@ registerCredentialProvider({
   name: "exec",
   credentialType: "exec-test",
   resolve: function () {
-    var output = $exec.run(%q, ["-test.run=TestExecRunHelperProcess", "--"], {
-      inheritEnv: false,
-      env: {AGENT_CREDS_EXEC_HELPER: "1"},
+    var output = $exec.run(%q, ["-test.run=TestExecRunHelperProcess", "--", "exec-helper"], {
       stdin: "secret on standard input"
     });
     return {headers: {"x-exec-output": output}};
@@ -966,7 +990,7 @@ registerCredentialProvider({
 }
 
 func TestExecRunHelperProcess(t *testing.T) {
-	if os.Getenv("AGENT_CREDS_EXEC_HELPER") != "1" {
+	if len(os.Args) == 0 || os.Args[len(os.Args)-1] != "exec-helper" {
 		return
 	}
 	if input, err := io.ReadAll(os.Stdin); err == nil && len(input) > 0 {
@@ -987,9 +1011,6 @@ registerUpstreamPolicy({
     if (config.service !== "records") throw new Error("service is required");
   },
   authorize: function (request, config) {
-    if (request.subject !== "customer-123") {
-      return {allow: false, reason: "wrong subject"};
-    }
     for (var i = 0; i < request.constraints.length; i++) {
       var caveat = request.constraints[i];
       if (caveat.namespace !== "example") {
@@ -997,6 +1018,9 @@ registerUpstreamPolicy({
       }
       if (caveat.body.service.indexOf(config.service) === -1) {
         return {allow: false, reason: "service excluded"};
+      }
+      if (caveat.authorized !== true) {
+        return {allow: false, reason: "third-party authorization required"};
       }
     }
     return true;
@@ -1021,15 +1045,13 @@ registerUpstreamPolicy({
 		Type:   "example-service",
 		Config: map[string]any{"service": "records"},
 	})
-	subject := "customer-123"
 	request := policy.Request{
-		Host:    "records.example.test",
-		Method:  "GET",
-		Path:    "/v1/records/1",
-		Subject: &subject,
+		Host:   "records.example.test",
+		Method: "GET",
+		Path:   "/v1/records/1",
 		Constraints: []policy.Constraint{
-			{Namespace: "example", Body: map[string]any{"service": []string{"records", "files"}}},
-			{Namespace: "example", Body: map[string]any{"service": []string{"records"}}},
+			{Namespace: "example", Body: map[string]any{"service": []string{"records", "files"}}, Authorized: true},
+			{Namespace: "example", Body: map[string]any{"service": []string{"records"}}, Authorized: true},
 		},
 	}
 	decision, err := authorizer.Authorize(context.Background(), request)
@@ -1043,6 +1065,7 @@ registerUpstreamPolicy({
 	request.Constraints = append(request.Constraints, policy.Constraint{
 		Namespace: "example",
 		Body:      map[string]any{"service": []string{"files"}},
+		Authorized: true,
 	})
 	decision, err = authorizer.Authorize(context.Background(), request)
 	if err != nil {

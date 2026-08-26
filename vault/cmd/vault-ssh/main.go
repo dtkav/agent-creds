@@ -117,7 +117,6 @@ Commands:
   help              Show this help
   whoami            Show your identity and status
   mint <host>       Mint a token for the given host
-    --subject              Restrict to an opaque application subject
     --no-host              Omit host caveat (admin only; for isolated support sessions)
     --credential           Include default caveats derived from a credential path
     --methods              Restrict HTTP methods (e.g., GET,POST)
@@ -152,7 +151,7 @@ func cmdMint(sess ssh.Session, userID []byte, status string, args []string) {
 	}
 
 	if len(args) == 0 {
-		fmt.Fprintln(sess, "Usage: mint <host> [--credential /path] [--subject <subject>] [--no-host] [--methods GET,POST] [--paths /v1/*] [--constraint namespace=JSON] [--valid-for 1h]")
+		fmt.Fprintln(sess, "Usage: mint <host> [--credential /path] [--no-host] [--methods GET,POST] [--paths /v1/*] [--constraint namespace=JSON] [--valid-for 1h]")
 		hosts := configuredCredentialHosts(vaultConfig)
 		if len(hosts) > 0 {
 			fmt.Fprintln(sess, "\nHosts declared by credential capabilities:")
@@ -169,7 +168,6 @@ func cmdMint(sess ssh.Session, userID []byte, status string, args []string) {
 	// Parse optional flags
 	var methods, paths, constraintSpecs []string
 	var configuredConstraints []credentialConstraintInfo
-	var subject string
 	var credentialPath string
 	validFor := 24 * time.Hour
 	requireAttestation := false
@@ -187,11 +185,6 @@ func cmdMint(sess ssh.Session, userID []byte, status string, args []string) {
 		case "--credential":
 			if i+1 < len(args) {
 				credentialPath = args[i+1]
-				i++
-			}
-		case "--subject":
-			if i+1 < len(args) {
-				subject = args[i+1]
 				i++
 			}
 		case "--methods":
@@ -290,18 +283,6 @@ func cmdMint(sess ssh.Session, userID []byte, status string, args []string) {
 			NotAfter:  now.Add(validFor).Unix(),
 		}); err != nil {
 			fmt.Fprintf(sess, "Error adding validity: %v\n", err)
-			return
-		}
-	}
-
-	if subject != "" {
-		caveat, err := tfmac.NewSubjectCaveat(subject)
-		if err != nil {
-			fmt.Fprintf(sess, "Error: %v\n", err)
-			return
-		}
-		if err := m.Add(caveat); err != nil {
-			fmt.Fprintf(sess, "Error adding subject caveat: %v\n", err)
 			return
 		}
 	}

@@ -1,6 +1,6 @@
 registerUpstreamPolicy({
-  name: "example-subject-scope",
-  policyType: "subject_scope",
+  name: "example-constraint-scope",
+  policyType: "constraint_scope",
 
   validate(config) {
     if (!config.namespace) throw new Error("namespace is required");
@@ -8,9 +8,6 @@ registerUpstreamPolicy({
   },
 
   authorize(request, config) {
-    if (!request.subject) {
-      return { allow: false, reason: "subject required" };
-    }
     if (request.constraints.length === 0) {
       return { allow: false, reason: "scope constraint required" };
     }

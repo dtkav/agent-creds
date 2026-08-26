@@ -94,12 +94,10 @@ type UpstreamConfig struct {
 	Env            string   `toml:"env,omitempty"`             // client-facing env var override for the minted capability
 	CredentialFile string   `toml:"credential_file,omitempty"` // basename projected under /run/credentials instead of an env var
 	Policy         string   `toml:"policy,omitempty"`          // vault upstream policy path
-	Mode           string   `toml:"mode,omitempty"`            // "credential" (default) or "identity"
 	Scheme         string   `toml:"scheme,omitempty"`          // "https" (default) or "http"
 	Port           int      `toml:"port,omitempty"`            // defaults to 443 for https, 80 for http
 	Address        string   `toml:"address,omitempty"`         // fixed upstream origin (default: public host)
 	Network        string   `toml:"network,omitempty"`         // extra Docker network attached to Envoy only
-	ForwardToken   bool     `toml:"forward_token,omitempty"`   // caller supplies macaroon; do not mint/expose env token
 	Methods        []string `toml:"methods"`                   // allowed HTTP methods (empty = all)
 	Paths          []string `toml:"paths"`                     // allowed path patterns with glob support (empty = all)
 
@@ -108,10 +106,11 @@ type UpstreamConfig struct {
 	// of the legacy [upstream] TOML shape.
 	Authorization           string         `toml:"-"`
 	AuthorizationConstraint map[string]any `toml:"-"`
+	OmitHostCaveat          bool           `toml:"-"`
 }
 
 func (u UpstreamConfig) MintsToken() bool {
-	return u.Credential != "" && !u.ForwardToken
+	return u.Credential != ""
 }
 
 func (u UpstreamConfig) AddressValue(host string) string {
@@ -119,13 +118,6 @@ func (u UpstreamConfig) AddressValue(host string) string {
 		return host
 	}
 	return u.Address
-}
-
-func (u UpstreamConfig) ModeValue() string {
-	if u.Mode == "" {
-		return "credential"
-	}
-	return u.Mode
 }
 
 func (u UpstreamConfig) SchemeValue() string {
@@ -252,6 +244,7 @@ type AuthorizationConfig struct {
 	Credential     string
 	Env            string
 	CredentialFile string
+	HostCaveat     bool
 	Methods        []string
 	Paths          []string
 	Constraint     map[string]any
@@ -262,6 +255,7 @@ type authorizationCommonFields struct {
 	Credential     string   `toml:"credential"`
 	Env            string   `toml:"env"`
 	CredentialFile string   `toml:"credential_file"`
+	HostCaveat     *bool    `toml:"host_caveat"`
 	Methods        []string `toml:"methods"`
 	Paths          []string `toml:"paths"`
 }
@@ -366,15 +360,6 @@ func MatchGlob(pattern, value string) bool {
 func ValidateUpstreams(upstreams map[string]UpstreamConfig) error {
 	credentialFiles := make(map[string]string)
 	for host, u := range upstreams {
-		if mode := u.ModeValue(); mode != "credential" && mode != "identity" {
-			return fmt.Errorf("upstream %q: mode %q must be credential or identity", host, mode)
-		}
-		if u.ModeValue() == "identity" && u.Credential != "" {
-			return fmt.Errorf("upstream %q: identity mode cannot inject credential %q", host, u.Credential)
-		}
-		if u.ForwardToken && u.Credential == "" {
-			return fmt.Errorf("upstream %q: forward_token requires a credential path", host)
-		}
 		if u.CredentialFile != "" {
 			if u.Env != "" {
 				return fmt.Errorf("upstream %q: env and credential_file are mutually exclusive", host)
@@ -399,10 +384,6 @@ func ValidateUpstreams(upstreams map[string]UpstreamConfig) error {
 		if u.Credential != "" {
 			if !strings.HasPrefix(u.Credential, "/") {
 				return fmt.Errorf("upstream %q: credential path %q must start with /", host, u.Credential)
-			}
-		} else if u.ModeValue() != "identity" {
-			if len(u.Methods) > 0 || len(u.Paths) > 0 {
-				fmt.Fprintf(os.Stderr, "Warning: upstream %q has methods/paths caveats but no credential; caveats will have no effect\n", host)
 			}
 		}
 		if u.Policy != "" && !strings.HasPrefix(u.Policy, "/") {
@@ -432,17 +413,22 @@ func decodeAuthorizations(md toml.MetaData, encoded map[string]toml.Primitive) (
 		if err := md.PrimitiveDecode(primitive, &raw); err != nil {
 			return nil, fmt.Errorf("decoding authorization.%s provider fields: %w", name, err)
 		}
-		for _, key := range []string{"upstreams", "credential", "env", "credential_file", "methods", "paths"} {
+		for _, key := range []string{"upstreams", "credential", "env", "credential_file", "host_caveat", "methods", "paths"} {
 			delete(raw, key)
 		}
 		if _, err := json.Marshal(raw); err != nil {
 			return nil, fmt.Errorf("authorization.%s provider fields must be JSON-compatible: %w", name, err)
+		}
+		hostCaveat := true
+		if common.HostCaveat != nil {
+			hostCaveat = *common.HostCaveat
 		}
 		result[name] = AuthorizationConfig{
 			Upstreams:      common.Upstreams,
 			Credential:     common.Credential,
 			Env:            common.Env,
 			CredentialFile: common.CredentialFile,
+			HostCaveat:     hostCaveat,
 			Methods:        common.Methods,
 			Paths:          common.Paths,
 			Constraint:     raw,
@@ -487,7 +473,7 @@ func BindAuthorizations(cfg *ProjectConfig) error {
 			if upstream.Authorization != "" {
 				return fmt.Errorf("upstream %q is claimed by both authorization.%s and authorization.%s", host, upstream.Authorization, name)
 			}
-			if upstream.Credential != "" || upstream.ForwardToken || len(upstream.Methods) > 0 || len(upstream.Paths) > 0 || upstream.Env != "" || upstream.CredentialFile != "" {
+			if upstream.Credential != "" || len(upstream.Methods) > 0 || len(upstream.Paths) > 0 || upstream.Env != "" || upstream.CredentialFile != "" {
 				return fmt.Errorf("authorization.%s: upstream %q also declares credential authorization fields; keep credential, env, credential_file, methods, and paths in the authorization table", name, host)
 			}
 			upstream.Credential = authorization.Credential
@@ -497,6 +483,7 @@ func BindAuthorizations(cfg *ProjectConfig) error {
 			upstream.Paths = append([]string(nil), authorization.Paths...)
 			upstream.Authorization = name
 			upstream.AuthorizationConstraint = cloneAnyMap(authorization.Constraint)
+			upstream.OmitHostCaveat = !authorization.HostCaveat
 			cfg.Upstream[host] = upstream
 		}
 	}

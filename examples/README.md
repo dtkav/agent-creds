@@ -11,8 +11,8 @@ This directory contains two deployment-neutral examples:
   demonstrates the complete credential extension surface: schema and semantic
   validation, custom capability extraction, request matching, a minimal child
   process environment, an HTTP session exchange, and credential-scoped caching.
-- [`policies/subject-scope.policy.js`](policies/subject-scope.policy.js)
-  requires a verified subject and evaluates every application constraint.
+- [`policies/constraint-scope.policy.js`](policies/constraint-scope.policy.js)
+  evaluates every application constraint conjunctively.
 
 ## Load the examples locally
 
@@ -20,7 +20,7 @@ Copy only the scripts you intend to trust into the ignored provider directory:
 
 ```console
 $ cp examples/providers/command-session.provider.js vault/providers.d/
-$ cp examples/policies/subject-scope.policy.js vault/providers.d/
+$ cp examples/policies/constraint-scope.policy.js vault/providers.d/
 ```
 
 Docker Compose mounts `vault/providers.d` read-only inside Vault. This is a
@@ -75,7 +75,7 @@ Configure the policy independently:
 ```yaml
 policies:
   records/read:
-    type: subject_scope
+    type: constraint_scope
     namespace: records
     required_scope: records:read
 ```
@@ -107,10 +107,10 @@ JavaScript extensions are deliberately trusted. They can make context-bound
 HTTP requests, run installed programs, receive resolved credential config,
 and return upstream headers. Review them like other credential-plane code.
 
-`$exec.run(command, args, options)` does not invoke a local shell. For helpers
-that receive credentials, use an absolute executable path and
-`inheritEnv: false`. Never interpolate request-controlled values into a remote
-shell command.
+`$exec.run(command, args, options)` does not invoke a local shell. Helpers start
+with an empty environment. Use an absolute executable path, supply only required
+environment values, and prefer standard input for secret material. Never
+interpolate request-controlled values into a remote shell command.
 
 The complete registration and helper contract is documented in the
 [Vault JavaScript API reference](../docs/reference/vault-js-api.md).

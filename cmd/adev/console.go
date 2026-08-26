@@ -939,7 +939,7 @@ func mintTokens(cfg ProjectConfig, instanceGenDir string, spinner *Spinner) ([]T
 
 		// Step 3: Mint if no cache
 		if authzToken == "" {
-			authzToken, err = vaultSSHMint(cfg.Vault, upstream.Credential, host, upstream.Methods, upstream.Paths, upstream.Authorization != "")
+			authzToken, err = vaultSSHMint(cfg.Vault, upstream.Credential, host, upstream.Methods, upstream.Paths, upstream.Authorization != "", upstream.OmitHostCaveat)
 			if err != nil {
 				return nil, nil, fmt.Errorf("minting %s: %w", host, err)
 			}
@@ -954,7 +954,7 @@ func mintTokens(cfg ProjectConfig, instanceGenDir string, spinner *Spinner) ([]T
 		if err != nil && fileExists(cachePath) {
 			// Cached token may be stale (e.g., vault key rotated) — delete and re-mint
 			os.Remove(cachePath)
-			authzToken, err = vaultSSHMint(cfg.Vault, upstream.Credential, host, upstream.Methods, upstream.Paths, upstream.Authorization != "")
+			authzToken, err = vaultSSHMint(cfg.Vault, upstream.Credential, host, upstream.Methods, upstream.Paths, upstream.Authorization != "", upstream.OmitHostCaveat)
 			if err != nil {
 				return nil, nil, fmt.Errorf("re-minting %s: %w", host, err)
 			}
@@ -1103,13 +1103,13 @@ func copyUpstreamMap(m map[string]UpstreamConfig) map[string]UpstreamConfig {
 
 // upstreamChanged returns true if the transport, credential, or caveats differ.
 func upstreamChanged(old, new UpstreamConfig) bool {
-	if old.Mode != new.Mode || old.Scheme != new.Scheme || old.Port != new.Port || old.Address != new.Address || old.Network != new.Network || old.ForwardToken != new.ForwardToken || old.Env != new.Env || old.CredentialFile != new.CredentialFile {
+	if old.Scheme != new.Scheme || old.Port != new.Port || old.Address != new.Address || old.Network != new.Network || old.Env != new.Env || old.CredentialFile != new.CredentialFile {
 		return true
 	}
 	if old.Credential != new.Credential || old.Policy != new.Policy {
 		return true
 	}
-	if old.Authorization != new.Authorization || !reflect.DeepEqual(old.AuthorizationConstraint, new.AuthorizationConstraint) {
+	if old.Authorization != new.Authorization || old.OmitHostCaveat != new.OmitHostCaveat || !reflect.DeepEqual(old.AuthorizationConstraint, new.AuthorizationConstraint) {
 		return true
 	}
 	if !slices.Equal(old.Methods, new.Methods) {
@@ -1180,7 +1180,7 @@ func remintTokens(newCfg ProjectConfig, scriptDir, instanceGenDir string, oldUps
 		}
 
 		if authzToken == "" {
-			authzToken, err = vaultSSHMint(newCfg.Vault, upstream.Credential, host, upstream.Methods, upstream.Paths, upstream.Authorization != "")
+			authzToken, err = vaultSSHMint(newCfg.Vault, upstream.Credential, host, upstream.Methods, upstream.Paths, upstream.Authorization != "", upstream.OmitHostCaveat)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: re-mint %s failed: %v\n", host, err)
 				continue

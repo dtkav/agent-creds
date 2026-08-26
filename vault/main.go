@@ -73,7 +73,6 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 	headers := httpReq.GetHeaders()
 	body, bodyPartial := bufferedRequestBody(httpReq)
 	contextExtensions := req.GetAttributes().GetContextExtensions()
-	routeMode := contextExtensions["agent_creds_mode"]
 	routePolicy := strings.TrimPrefix(contextExtensions["policy"], "/")
 	runtime := s.currentRuntime()
 
@@ -104,12 +103,12 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 	cred, hasConfiguredCredential := runtime.credentials[credentialKey]
 
 	// Let the selected credential adapter understand client-specific framing.
-	// Built-in schemes remain the fallback for built-in providers and identity
-	// routes. Go verifies every returned token before injection is possible.
+	// Built-in schemes remain the fallback for built-in providers. Go verifies
+	// every returned token before injection is possible.
 	authHeader := headers["authorization"]
 	tokenPrefix := s.verifier.GetTokenPrefix()
 	var requestToken string
-	if routeMode != "identity" && hasConfiguredCredential && cred.extractor != nil {
+	if hasConfiguredCredential && cred.extractor != nil {
 		var extractionErr error
 		requestToken, extractionErr = cred.extractor.Extract(ctx, provider.ExtractionRequest{
 			Credential:     credentialKey,
@@ -131,10 +130,9 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 	}
 	hasRequestToken := requestToken != ""
 
-	// Identity routes and routes with an explicit policy are authentication
-	// boundaries even when global strict mode is disabled. Never allow the
-	// passthrough path to bypass them.
-	requiresMacaroon := s.strictMode || routeMode == "identity" || routePolicy != ""
+	// Routes with an explicit policy are authentication boundaries even when
+	// global strict mode is disabled. Never allow passthrough to bypass them.
+	requiresMacaroon := s.strictMode || routePolicy != ""
 
 	// Passthrough: unrecognized token format (unless this route requires auth)
 	if !hasRequestToken {
@@ -233,54 +231,6 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 				},
 			}, nil
 		}
-	}
-
-	mode := routeMode
-	if mode == "identity" {
-		if result.Subject == nil {
-			reason := "identity route requires a subject-scoped token"
-			s.logAudit("deny", access.Method, host, access.Path, reason, tokenID)
-			return &authv3.CheckResponse{
-				Status: &status.Status{Code: int32(codes.PermissionDenied)},
-				HttpResponse: &authv3.CheckResponse_DeniedResponse{
-					DeniedResponse: &authv3.DeniedHttpResponse{
-						Status: &typev3.HttpStatus{Code: typev3.StatusCode_Forbidden},
-						Body:   "A subject-scoped token is required",
-					},
-				},
-			}, nil
-		}
-		decision, policyErr := s.authorizePoliciesWithRuntime(runtime, ctx, result, access, body, bodyPartial, nil, false, routePolicy)
-		if policyErr != nil {
-			reason := fmt.Sprintf("upstream policy failed: %v", policyErr)
-			s.logAudit("deny", access.Method, host, access.Path, reason, tokenID)
-			return policyErrorResponse(), nil
-		}
-		if !decision.Allow {
-			s.logAudit("deny", access.Method, host, access.Path, decision.Reason, tokenID)
-			return policyDeniedResponse(decision.Reason), nil
-		}
-		log.Printf("Identity verified for %s %s %s", access.Method, host, access.Path)
-		s.logAudit("allow", access.Method, host, access.Path, "", tokenID)
-		return &authv3.CheckResponse{
-			Status: &status.Status{Code: int32(codes.OK)},
-			HttpResponse: &authv3.CheckResponse_OkResponse{
-				OkResponse: &authv3.OkHttpResponse{Headers: identityHeaderOptions(result)},
-			},
-		}, nil
-	}
-	if mode != "" && mode != "credential" {
-		reason := fmt.Sprintf("unknown agent-creds route mode %q", mode)
-		s.logAudit("deny", access.Method, host, access.Path, reason, tokenID)
-		return &authv3.CheckResponse{
-			Status: &status.Status{Code: int32(codes.PermissionDenied)},
-			HttpResponse: &authv3.CheckResponse_DeniedResponse{
-				DeniedResponse: &authv3.DeniedHttpResponse{
-					Status: &typev3.HttpStatus{Code: typev3.StatusCode_Forbidden},
-					Body:   "Unknown agent-creds route mode",
-				},
-			},
-		}, nil
 	}
 
 	if !hasConfiguredCredential {
@@ -383,8 +333,9 @@ func (s *authServer) authorizePoliciesWithRuntime(
 	constraints := make([]policy.Constraint, 0, len(verified.ApplicationConstraints))
 	for _, caveat := range verified.ApplicationConstraints {
 		constraints = append(constraints, policy.Constraint{
-			Namespace: caveat.Namespace,
-			Body:      caveat.Constraint,
+			Namespace:  caveat.Namespace,
+			Body:       caveat.Constraint,
+			Authorized: caveat.Authorized,
 		})
 	}
 	remainingConstraints := constraints
@@ -394,7 +345,6 @@ func (s *authServer) authorizePoliciesWithRuntime(
 		Path:        access.Path,
 		Body:        bytes.Clone(body),
 		BodyPartial: bodyPartial,
-		Subject:     verified.Subject,
 	}
 	if credential != nil {
 		request.Credential = credential.name
@@ -492,24 +442,6 @@ func policyErrorResponse() *authv3.CheckResponse {
 			},
 		},
 	}
-}
-
-func identityHeaderOptions(result *macaroon.VerifyResult) []*corev3.HeaderValueOption {
-	headers := result.IdentityHeaders()
-	keys := make([]string, 0, len(headers))
-	for key := range headers {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-
-	options := make([]*corev3.HeaderValueOption, 0, len(keys))
-	for _, key := range keys {
-		options = append(options, &corev3.HeaderValueOption{
-			Header:       &corev3.HeaderValue{Key: key, Value: headers[key]},
-			AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
-		})
-	}
-	return options
 }
 
 func credentialHeaderOptions(headers map[string]string) []*corev3.HeaderValueOption {

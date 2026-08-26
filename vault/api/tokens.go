@@ -16,7 +16,6 @@ import (
 // CreateTokenRequest is the request to create a token
 type CreateTokenRequest struct {
 	ID                 string                         `json:"id"`                 // Token name
-	Subject            string                         `json:"subject,omitempty"`  // opaque application subject
 	Hosts              []string                       `json:"hosts,omitempty"`    // Allowed hosts
 	Methods            []string                       `json:"methods,omitempty"`  // Allowed HTTP methods
 	Paths              []string                       `json:"paths,omitempty"`    // Allowed path patterns
@@ -113,12 +112,6 @@ func (s *Server) createToken(w http.ResponseWriter, r *http.Request, userID []by
 		writeError(w, http.StatusBadRequest, "id is required")
 		return
 	}
-	if req.Subject != "" {
-		if err := tfmac.ValidateSubject(req.Subject); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-	}
 	for _, constraint := range req.Constraints {
 		if err := tfmac.ValidateApplicationConstraint(constraint.Namespace, constraint.Constraint); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
@@ -150,7 +143,6 @@ func (s *Server) createToken(w http.ResponseWriter, r *http.Request, userID []by
 
 	// Mint the token
 	tokenStr, err := s.mintToken(
-		req.Subject,
 		req.Hosts,
 		req.Methods,
 		req.Paths,
@@ -190,7 +182,7 @@ func (s *Server) createToken(w http.ResponseWriter, r *http.Request, userID []by
 }
 
 // mintToken creates a new macaroon token
-func (s *Server) mintToken(subject string, hosts, methods, paths []string, constraints []ApplicationConstraintRequest, validFor time.Duration, requireAttestation bool) (string, error) {
+func (s *Server) mintToken(hosts, methods, paths []string, constraints []ApplicationConstraintRequest, validFor time.Duration, requireAttestation bool) (string, error) {
 	if s.keyStore == nil {
 		return "", &tokenError{"vault token store is not configured"}
 	}
@@ -207,17 +199,6 @@ func (s *Server) mintToken(subject string, hosts, methods, paths []string, const
 		NotAfter:  now.Add(validFor).Unix(),
 	}); err != nil {
 		return "", err
-	}
-
-	// Add subject caveat
-	if subject != "" {
-		caveat, err := tfmac.NewSubjectCaveat(subject)
-		if err != nil {
-			return "", err
-		}
-		if err := m.Add(caveat); err != nil {
-			return "", err
-		}
 	}
 
 	// Add host caveat

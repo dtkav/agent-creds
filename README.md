@@ -31,7 +31,7 @@ reach a prompt, tool log, dependency, or compromised subprocess.
 - **Egress is allowlisted.** A sandbox can reach only the hosts declared for
   that project, and only through its Envoy.
 - **Access can be narrower than the credential.** Host, method, path, time,
-  subject, and application-specific caveats constrain each token.
+  and application-specific caveats constrain each token.
 - **Applications remain unmodified.** Environment variables, HTTP clients,
   CLIs, and SDKs send their usual authentication headers.
 - **Deployment logic stays private.** Trusted JavaScript extensions can
@@ -223,7 +223,7 @@ the real token only after Vault approves the request.
 - [Protect a Stripe API key](docs/guides/stripe.md) with HTTP Basic
   authentication and a path-scoped test-mode credential.
 - [Load trusted JavaScript extensions](examples/README.md), including a
-  command-backed session provider and a subject/scope policy.
+  command-backed session provider and a constraint policy.
 
 ## Guide
 
@@ -369,8 +369,6 @@ The main upstream fields are:
 | `policy` | Trusted Vault policy path; selecting one requires a valid macaroon |
 | `methods` | Allowed HTTP methods; empty means all |
 | `paths` | Allowed path patterns; `*` matches one segment and `**` matches many |
-| `mode` | `credential` (default) or `identity` |
-| `forward_token` | Accept an application-supplied macaroon instead of minting an environment token |
 | `scheme`, `port` | Upstream transport; defaults to HTTPS on 443 |
 | `address`, `network` | Fixed origin and Envoy-only Docker network for private services |
 
@@ -400,8 +398,8 @@ services routed through one upstream host point at a shared credential file.
 Token-valued environment variables are compatibility fallbacks, not the
 primary delivery mechanism.
 
-See [`sandbox.example.toml`](sandbox.example.toml) for browser, CDP,
-identity-route, and plugin examples.
+See [`sandbox.example.toml`](sandbox.example.toml) for browser, CDP, and plugin
+examples.
 
 ### Configure credentials
 
@@ -485,7 +483,6 @@ not a copy of the root key or upstream credential.
 Macaroons can also carry:
 
 - validity windows;
-- an opaque application subject;
 - third-party attestation requirements; and
 - repeatable `namespace=JSON` application constraints.
 
@@ -517,8 +514,11 @@ The selected credential type publishes the schema for the remaining fields.
 place them in a signed discharge macaroon. The primary macaroon requires that
 provider constraint, so the primary token alone—or an empty discharge—cannot
 use the credential. Route fields may still carry transport settings, but
-`credential`, `env`, `methods`, and `paths` belong in the named authorization
-when this form is used.
+`credential`, `env`, `credential_file`, `host_caveat`, `methods`, and `paths`
+belong in the named authorization when this form is used. `host_caveat`
+defaults to `true`; set it to `false` only when the same capability must be
+reverified across multiple routed hosts and the Envoy allowlist is the domain
+boundary.
 
 GitHub also accepts a repository map when one workflow owns distinct branches
 in a product and a private overlay:
@@ -529,27 +529,6 @@ upstreams = ["github.com"]
 credential = "/github/example/project/git"
 repositories = { "Example/Project" = ["queue/example"], "Example/project-private" = ["queue/example-private"] }
 ```
-
-### Authenticate an internal service
-
-An identity route verifies a subject-scoped macaroon without selecting or
-injecting an upstream credential:
-
-```toml
-[upstream."records.internal"]
-mode = "identity"
-policy = "/records/read"
-scheme = "http"
-port = 8890
-address = "records-service"
-network = "records-network"
-methods = ["POST"]
-paths = ["/graphql"]
-```
-
-Vault strips caller-supplied `x-agent-creds-*` headers and writes verified
-identity facts itself. The service may use those facts for convenience, but
-Vault and its selected policy remain the authorization boundary.
 
 ### Browser and CDP access
 
@@ -773,16 +752,15 @@ can reuse the same headers. Cached results must include `expiresAt`.
 Registrations can be layered with `priority`, request matchers, header
 merging, and `stop`.
 
-`$exec.run` inherits Vault's environment for backward compatibility. Trusted
-providers that pass secrets to a helper should replace it explicitly:
+`$exec.run` starts helpers with an empty environment. Supply only the values a
+helper needs, and pass secrets over standard input when the helper supports it:
 
 ```js
 $exec.run("/usr/local/bin/session-helper", ["issue"], {
-  inheritEnv: false,
   env: {
     HOME: "/tmp",
-    SERVICE_ACCESS_TOKEN: config.access_token,
   },
+  stdin: config.access_token,
 });
 ```
 
@@ -803,10 +781,6 @@ registerUpstreamPolicy({
   },
 
   authorize(request, config) {
-    if (!request.subject) {
-      return { allow: false, reason: "subject required" };
-    }
-
     for (const constraint of request.constraints) {
       if (constraint.namespace !== "records") {
         return { allow: false, reason: "unknown constraint namespace" };
@@ -832,7 +806,6 @@ policies:
 
 ```toml
 [upstream."records.internal"]
-mode = "identity"
 policy = "/records/read"
 ```
 
@@ -861,7 +834,7 @@ The design provides:
 - no real upstream credentials in the sandbox;
 - deny-by-default egress with per-project host allowlists;
 - per-request macaroon verification and attenuation;
-- optional trusted policies over verified identity and application claims;
+- optional trusted policies over verified application constraints;
 - encrypted Vault configuration at rest with the age identity in the system
   keychain;
 - a unique, persistent Vault SSH host key generated on first start; and
@@ -871,8 +844,8 @@ A configured upstream without a credential or policy is a passthrough route:
 non-macaroon authentication is forwarded unchanged. This is useful for agent
 OAuth and public APIs, but it does not protect a caller-supplied secret. Set
 `STRICT_MODE=true` to require macaroons globally. Selecting a credential,
-policy, or identity mode already requires the relevant verified token even
-when strict mode is off.
+policy already requires the relevant verified token even when strict mode is
+off.
 
 The sandbox trusts a generated CA so Envoy can terminate configured HTTPS
 connections. That CA is scoped to the sandbox infrastructure; protect its

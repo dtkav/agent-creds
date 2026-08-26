@@ -95,28 +95,24 @@ func TestCredentialRouteRejectsUnconsumedApplicationConstraints(t *testing.T) {
 }
 
 func TestConfiguredPolicyReceivesVerifiedConstraints(t *testing.T) {
-	subject := "customer-123"
 	called := false
 	server := &authServer{policies: map[string]policy.Authorizer{
 		"records/read": policyFunc(func(_ context.Context, request policy.Request) (policy.Decision, error) {
 			called = true
-			if request.Subject == nil || *request.Subject != subject {
-				t.Fatalf("subject = %#v", request.Subject)
-			}
 			if request.Credential != "records/prod" || request.CredentialType != "bearer" {
 				t.Fatalf("credential context = %#v", request)
 			}
-			if len(request.Constraints) != 1 || request.Constraints[0].Namespace != "example" {
+			if len(request.Constraints) != 1 || request.Constraints[0].Namespace != "example" || !request.Constraints[0].Authorized {
 				t.Fatalf("constraints = %#v", request.Constraints)
 			}
 			return policy.Allow(), nil
 		}),
 	}}
 	verified := &tfmac.VerifyResult{
-		Subject: &subject,
 		ApplicationConstraints: []*tfmac.ApplicationConstraint{{
 			Namespace:  "example",
 			Constraint: map[string]any{"services": []string{"records"}},
+			Authorized: true,
 		}},
 	}
 	decision, err := server.authorizePolicies(
@@ -210,29 +206,6 @@ func TestCredentialMacaroonEnforcesConfigWithoutSignedConstraint(t *testing.T) {
 	}
 }
 
-func TestIdentityRouteCannotBypassAuthenticationThroughPassthrough(t *testing.T) {
-	server := &authServer{verifier: tfmac.NewVerifier(&tfmac.KeyStore{
-		SigningKey:  macaroon.NewSigningKey(),
-		TokenPrefix: tfmac.DefaultTokenPrefix,
-	})}
-	response, err := server.Check(context.Background(), &authv3.CheckRequest{
-		Attributes: &authv3.AttributeContext{
-			Request: &authv3.AttributeContext_Request{Http: &authv3.AttributeContext_HttpRequest{
-				Method:  "POST",
-				Path:    "/graphql",
-				Headers: map[string]string{"host": "records.internal"},
-			}},
-			ContextExtensions: map[string]string{"agent_creds_mode": "identity"},
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if response.GetStatus().GetCode() != int32(codes.PermissionDenied) {
-		t.Fatalf("status = %#v", response.GetStatus())
-	}
-}
-
 func TestRoutePolicyCannotBypassAuthenticationThroughPassthrough(t *testing.T) {
 	server := &authServer{verifier: tfmac.NewVerifier(&tfmac.KeyStore{
 		SigningKey:  macaroon.NewSigningKey(),
@@ -288,8 +261,7 @@ func TestInvalidExtractedTokenNeverReachesCredentialProvider(t *testing.T) {
 				Headers: map[string]string{"host": "api.github.com"},
 			}},
 			ContextExtensions: map[string]string{
-				"agent_creds_mode": "credential",
-				"credential":       "/github/test",
+				"credential": "/github/test",
 			},
 		},
 	})

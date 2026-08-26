@@ -8,12 +8,13 @@ import (
 // Constraint is an application-owned restriction from a verified macaroon.
 // Policies must evaluate every constraint they receive conjunctively.
 type Constraint struct {
-	Namespace string         `json:"namespace"`
-	Body      map[string]any `json:"body"`
+	Namespace  string         `json:"namespace"`
+	Body       map[string]any `json:"body"`
+	Authorized bool           `json:"authorized"`
 }
 
 // Request is the verified request context presented to an upstream policy.
-// Subject and Constraints originate only from the verified macaroon.
+// Constraints originate only from the verified macaroon.
 type Request struct {
 	Policy         string
 	PolicyType     string
@@ -24,7 +25,6 @@ type Request struct {
 	BodyPartial    bool
 	Credential     string
 	CredentialType string
-	Subject        *string
 	Constraints    []Constraint
 }
 

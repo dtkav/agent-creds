@@ -238,8 +238,10 @@ resolved. Selection metadata such as `type`, `env`, `policy`, and
 ```
 
 Header values and other request facts remain caller-controlled. Do not treat
-them as secrets or authorization decisions, and do not forward the incoming
-authorization header as an upstream credential.
+them as secrets or authorization decisions. A pass-through credential type
+may deliberately return the incoming authorization header, but only after its
+extractor has required a capability and its macaroon authorizer or selected
+policy has consumed every application constraint.
 
 `body` is an `ArrayBuffer` containing at most the first 8 KiB of the request
 body. `bodyPartial` is true when Envoy stopped buffering at that limit. Parse
@@ -258,11 +260,11 @@ extractors.
 | `expiresAt` | no | Positive Unix timestamp in seconds. Required for caching. |
 | `stop` | no | When truthy, prevents later matching providers from running. |
 
-Vault rejects invalid header names, multiline values, and names beginning with
-`x-agent-creds-`. When registrations are layered, later providers overwrite
-earlier values with the same case-insensitive header name. The earliest
-positive expiry becomes the combined expiry. If any matching provider omits
-an expiry, the combined result is not cacheable.
+Vault rejects invalid header names and multiline values. When registrations
+are layered, later providers overwrite earlier values with the same
+case-insensitive header name. The earliest positive expiry becomes the
+combined expiry. If any matching provider omits an expiry, the combined result
+is not cacheable.
 
 ### Credential caching
 
@@ -326,9 +328,6 @@ registerUpstreamPolicy({
     if (!config.required_scope) throw new Error("required_scope is required");
   },
   authorize(request, config) {
-    if (!request.subject) {
-      return { allow: false, reason: "subject required" };
-    }
     return request.constraints.every(
       (constraint) =>
         constraint.namespace === "records" &&
@@ -357,23 +356,30 @@ excluding `type`. The request object is:
   path: "/v1/records",
   body: new ArrayBuffer(0),          // same 8 KiB prefix as providers receive
   bodyPartial: false,
-  credential: "service/prod",        // may be empty on identity routes
-  credentialType: "session",         // may be empty on identity routes
-  subject: "verified-subject",       // string or null
+  credential: "service/prod",        // may be empty without a configured credential
+  credentialType: "session",         // may be empty without a configured credential
   constraints: [
-    { namespace: "records", body: { scopes: ["records:read"] } },
+    {
+      namespace: "records",
+      body: { scopes: ["records:read"] },
+      authorized: true,
+    },
   ],
 }
 ```
 
-`subject` and `constraints` come from the verified macaroon. Credential-bound
-macaroon hooks consume their own namespace first, so an explicit policy
-receives the remaining constraints. A policy must evaluate every constraint it
-receives conjunctively and reject namespaces it does not understand. Policy
+`constraints` come from the verified macaroon. Credential-bound macaroon hooks
+consume their own namespace first, so an explicit policy receives the
+remaining constraints. A policy must evaluate every constraint it receives
+conjunctively and reject namespaces it does not understand. Policy
 registrations have no priority or request matcher; matching registrations run
 by source path and name until one denies. All registrations matching the
 selected policy type must allow the request. `false` uses a generic denial
 reason; an object can supply a specific reason.
+
+`authorized` is true only for a constraint carried by a verified third-party
+discharge. A policy that relies on an external authorizer, rather than ordinary
+holder-added attenuation, must require it.
 
 Credential type schemas do not apply to policy configuration. Use the policy
 registration's `validate(config)` callback for policy configuration checks.
@@ -413,26 +419,26 @@ const assertion = $exec.run(
   "/usr/local/bin/session-helper",
   ["assertion", "--audience", config.audience],
   {
-    inheritEnv: false,
     env: {
       HOME: "/tmp",
-      SERVICE_ACCESS_TOKEN: config.access_token,
     },
-    stdin: JSON.stringify({challenge: config.challenge}),
+    stdin: JSON.stringify({
+      accessToken: config.access_token,
+      challenge: config.challenge,
+    }),
   },
 );
 ```
 
-Arguments and environment values must be strings. `inheritEnv` defaults to
-`true`; `env` adds or overrides variables. `stdin` supplies a string directly
-to the child's standard input, which keeps secret material out of argv and the
-child environment. With `inheritEnv: false`, the child receives only the
-supplied `env`. Unknown option names are rejected.
+Arguments and environment values must be strings. The child starts with an
+empty environment; `env` defines its complete environment. `stdin` supplies a
+string directly to the child's standard input, which keeps secret material out
+of argv and the child environment. Unknown option names are rejected.
 
 Standard output is limited to 4 MiB and standard error to 64 KiB. A non-zero
 exit raises an exception and includes captured standard error. Use an absolute
-executable path, replace the inherited environment when passing secrets, and
-never interpolate request values into a shell command.
+executable path, supply only the environment values the helper needs, and never
+interpolate request values into a shell command.
 
 ### `$jwt.expiresAt(token)`
 
@@ -479,4 +485,4 @@ canceled with it.
 See the complete provider and extractor example in
 [`examples/providers/command-session.provider.js`](../../examples/providers/command-session.provider.js)
 and the policy example in
-[`examples/policies/subject-scope.policy.js`](../../examples/policies/subject-scope.policy.js).
+[`examples/policies/constraint-scope.policy.js`](../../examples/policies/constraint-scope.policy.js).

@@ -16,7 +16,7 @@ func TestMintTokenUsesInjectedVaultKeyStore(t *testing.T) {
 		TokenPrefix: tfmac.DefaultTokenPrefix,
 	}
 	server := &Server{keyStore: store}
-	token, err := server.mintToken("subject-123", nil, nil, nil, []ApplicationConstraintRequest{{
+	token, err := server.mintToken(nil, nil, nil, []ApplicationConstraintRequest{{
 		Namespace:  "example",
 		Constraint: map[string]any{"service": []string{"records"}},
 	}}, time.Hour, false)
@@ -30,10 +30,6 @@ func TestMintTokenUsesInjectedVaultKeyStore(t *testing.T) {
 	caveats, err := decoded.VerifyParsed(store.SigningKey, nil, nil)
 	if err != nil {
 		t.Fatal(err)
-	}
-	subjects := supermac.GetCaveats[*tfmac.SubjectCaveat](caveats)
-	if len(subjects) != 1 || subjects[0].Subject != "subject-123" {
-		t.Fatalf("subjects = %#v", subjects)
 	}
 	constraints := supermac.GetCaveats[*tfmac.ApplicationConstraint](caveats)
 	if len(constraints) != 1 || constraints[0].Namespace != "example" {

@@ -41,7 +41,7 @@ func TestValidateHeaders(t *testing.T) {
 	}{
 		{name: "valid", headers: map[string]string{"authorization": "Bearer token"}},
 		{name: "empty", headers: map[string]string{}, wantErr: true},
-		{name: "verifier owned", headers: map[string]string{"x-agent-creds-subject": "value"}, wantErr: true},
+		{name: "extension header", headers: map[string]string{"x-extension-context": "value"}},
 		{name: "space in name", headers: map[string]string{"bad name": "value"}, wantErr: true},
 		{name: "colon in name", headers: map[string]string{":authority": "value"}, wantErr: true},
 		{name: "newline in value", headers: map[string]string{"x-test": "one\ntwo"}, wantErr: true},
@@ -128,7 +128,6 @@ func TestHeaderProviderRejectsInvalidConfiguration(t *testing.T) {
 		{name: "missing value", config: map[string]any{"header": "Authorization"}},
 		{name: "invalid header", config: map[string]any{"header": "bad header", "value": "secret"}},
 		{name: "routing header", config: map[string]any{"header": "Host", "value": "secret"}},
-		{name: "verifier header", config: map[string]any{"header": "X-Agent-Creds-Subject", "value": "secret"}},
 		{name: "multiline value", config: map[string]any{"header": "Authorization", "value": "one\ntwo"}},
 	}
 

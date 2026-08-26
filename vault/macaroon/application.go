@@ -16,6 +16,9 @@ import (
 type ApplicationConstraint struct {
 	Namespace  string         `json:"namespace" msgpack:"namespace"`
 	Constraint map[string]any `json:"constraint" msgpack:"constraint"`
+	// Authorized is set by the verifier when the constraint came from a
+	// trusted third-party discharge. It is not part of the caveat wire format.
+	Authorized bool `json:"-" msgpack:"-"`
 }
 
 func (c *ApplicationConstraint) CaveatType() macaroon.CaveatType { return CavApplication }

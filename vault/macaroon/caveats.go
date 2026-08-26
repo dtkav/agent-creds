@@ -14,7 +14,6 @@ const (
 	CavAPIMethod             macaroon.CaveatType = 1<<32 + 2
 	CavAPIPath               macaroon.CaveatType = 1<<32 + 3
 	CavAttestation           macaroon.CaveatType = 1<<32 + 4
-	CavSubject               macaroon.CaveatType = 1<<32 + 5
 	CavApplication           macaroon.CaveatType = 1<<32 + 6
 	CavAuthorizationRequest  macaroon.CaveatType = 1<<32 + 7
 	CavApplicationRequired   macaroon.CaveatType = 1<<32 + 8
@@ -25,7 +24,6 @@ func init() {
 	macaroon.RegisterCaveatType(&HostCaveat{})
 	macaroon.RegisterCaveatType(&MethodCaveat{})
 	macaroon.RegisterCaveatType(&PathCaveat{})
-	macaroon.RegisterCaveatType(&SubjectCaveat{})
 	macaroon.RegisterCaveatType(&ApplicationConstraint{})
 	macaroon.RegisterCaveatType(&AuthorizationRequest{})
 	macaroon.RegisterCaveatType(&ApplicationConstraintRequirement{})

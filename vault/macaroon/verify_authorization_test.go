@@ -120,7 +120,7 @@ func TestThirdPartyAuthorizationRequiresSignedApplicationConstraint(t *testing.T
 	if !result.Valid {
 		t.Fatalf("signed authorization failed: %s", result.Error)
 	}
-	if len(result.ApplicationConstraints) != 1 || result.ApplicationConstraints[0].Namespace != "github" {
+	if len(result.ApplicationConstraints) != 1 || result.ApplicationConstraints[0].Namespace != "github" || !result.ApplicationConstraints[0].Authorized {
 		t.Fatalf("verified constraints = %#v", result.ApplicationConstraints)
 	}
 }

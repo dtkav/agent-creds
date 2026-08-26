@@ -25,7 +25,7 @@ func TestGeneratedRuntimeArtifactsAreInstanceScoped(t *testing.T) {
 		Upstream: map[string]UpstreamConfig{"telemetry.internal": {}},
 	}
 	supportCfg := ProjectConfig{
-		Upstream: map[string]UpstreamConfig{"service.internal": {Mode: "identity"}},
+		Upstream: map[string]UpstreamConfig{"service.internal": {}},
 	}
 
 	service, err := NewGenerator(root, serviceDir, serviceCfg)

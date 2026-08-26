@@ -103,12 +103,15 @@ func vaultSSHRun(cfg VaultConfig, args ...string) (string, error) {
 
 // vaultSSHMint mints an authorization token for the given host and includes
 // any default macaroon constraints derived from the selected credential.
-func vaultSSHMint(cfg VaultConfig, credential, host string, methods, paths []string, requireAuthorization bool) (string, error) {
+func vaultSSHMint(cfg VaultConfig, credential, host string, methods, paths []string, requireAuthorization, omitHostCaveat bool) (string, error) {
 	requirement := "--require-attestation"
 	if requireAuthorization {
 		requirement = "--require-authorization"
 	}
 	args := []string{"mint", host, requirement, "--credential", credential}
+	if omitHostCaveat {
+		args = append(args, "--no-host")
+	}
 	if len(methods) > 0 {
 		args = append(args, "--methods", strings.Join(methods, ","))
 	}

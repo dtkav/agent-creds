@@ -31,7 +31,7 @@ func TestPublicExampleScriptsLoad(t *testing.T) {
 		}},
 		[]PolicySpec{{
 			Name: "example-policy",
-			Type: "subject_scope",
+			Type: "constraint_scope",
 			Config: map[string]any{
 				"namespace":      "records",
 				"required_scope": "records:read",

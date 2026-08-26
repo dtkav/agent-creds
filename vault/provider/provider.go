@@ -102,7 +102,7 @@ func (r *Registry) Has(name string) bool {
 }
 
 // ValidateHeaders rejects values that cannot safely be copied into an HTTP
-// response and protects identity headers owned by the verifier.
+// response.
 func ValidateHeaders(headers map[string]string) error {
 	if len(headers) == 0 {
 		return fmt.Errorf("provider returned no headers")
@@ -111,9 +111,6 @@ func ValidateHeaders(headers map[string]string) error {
 		lower := strings.ToLower(strings.TrimSpace(name))
 		if lower == "" {
 			return fmt.Errorf("provider returned an empty header name")
-		}
-		if strings.HasPrefix(lower, "x-agent-creds-") {
-			return fmt.Errorf("provider may not set verifier-owned header %q", name)
 		}
 		if !validHeaderName(name) {
 			return fmt.Errorf("provider returned invalid header name %q", name)

@@ -2,7 +2,6 @@ package macaroon
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/superfly/macaroon"
@@ -18,12 +17,6 @@ type VerifyResult struct {
 
 	// Caveats contains the validated caveat set (for logging/auditing)
 	Caveats *macaroon.CaveatSet
-
-	// Token facts are populated only after the signature has been verified.
-	Subject   *string
-	KeyID     string
-	Location  string
-	ExpiresAt *int64
 
 	// ApplicationConstraints are verified, deployment-owned restrictions.
 	// They are interpreted by the selected upstream policy, never by callers.
@@ -114,20 +107,6 @@ func (v *Verifier) VerifyRequest(authHeader string, access *Access) *VerifyResul
 		return &VerifyResult{Valid: false, Error: fmt.Sprintf("signature verification failed: %v", err)}
 	}
 
-	// A Subject caveat is an assertion carried by the signed token, not a
-	// value supplied by the HTTP request. Extract it after signature
-	// verification and make it available to SubjectCaveat.Prohibits.
-	subjects := macaroon.GetCaveats[*SubjectCaveat](caveats)
-	var subject *string
-	for _, caveat := range subjects {
-		if subject != nil && *subject != caveat.Subject {
-			return &VerifyResult{Valid: false, Error: "conflicting subject caveats"}
-		}
-		value := caveat.Subject
-		subject = &value
-	}
-	access.Subject = subject
-
 	// Validate caveats against the access.
 	if err := caveats.Validate(access); err != nil {
 		return &VerifyResult{Valid: false, Error: fmt.Sprintf("caveat validation failed: %v", err)}
@@ -151,47 +130,15 @@ func (v *Verifier) VerifyRequest(authHeader string, access *Access) *VerifyResul
 		applicationConstraints = append(applicationConstraints, &ApplicationConstraint{
 			Namespace:  constraint.Namespace,
 			Constraint: constraint.Constraint,
+			Authorized: true,
 		})
-	}
-
-	var expiresAt *int64
-	for _, window := range macaroon.GetCaveats[*macaroon.ValidityWindow](caveats) {
-		if expiresAt == nil || window.NotAfter < *expiresAt {
-			value := window.NotAfter
-			expiresAt = &value
-		}
 	}
 
 	return &VerifyResult{
 		Valid:                  true,
 		Caveats:                caveats,
-		Subject:                subject,
-		KeyID:                  string(m.Nonce.KID),
-		Location:               m.Location,
-		ExpiresAt:              expiresAt,
 		ApplicationConstraints: applicationConstraints,
 	}
-}
-
-// IdentityHeaders returns verified token facts suitable for an ext_authz
-// identity route. Header values are derived only after signature and caveat
-// validation. The original Authorization header remains unchanged so the
-// same macaroon can authorize downstream requests.
-func (r *VerifyResult) IdentityHeaders() map[string]string {
-	headers := map[string]string{
-		"x-agent-creds-verified":       "1",
-		"x-agent-creds-subject":        "",
-		"x-agent-creds-token-kid":      r.KeyID,
-		"x-agent-creds-token-location": r.Location,
-		"x-agent-creds-expires-at":     "",
-	}
-	if r.Subject != nil {
-		headers["x-agent-creds-subject"] = *r.Subject
-	}
-	if r.ExpiresAt != nil {
-		headers["x-agent-creds-expires-at"] = strconv.FormatInt(*r.ExpiresAt, 10)
-	}
-	return headers
 }
 
 // extractTokens extracts the main token and any discharge tokens from an Authorization header

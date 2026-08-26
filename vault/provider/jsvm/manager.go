@@ -1276,15 +1276,12 @@ func (r *scriptRuntime) authorizeCredential(ctx context.Context, request policy.
 }
 
 func (r *scriptRuntime) policyRequestValue(request policy.Request) map[string]any {
-	var subject any
-	if request.Subject != nil {
-		subject = *request.Subject
-	}
 	constraints := make([]map[string]any, 0, len(request.Constraints))
 	for _, constraint := range request.Constraints {
 		constraints = append(constraints, map[string]any{
-			"namespace": constraint.Namespace,
-			"body":      cloneMap(constraint.Body),
+			"namespace":  constraint.Namespace,
+			"body":       cloneMap(constraint.Body),
+			"authorized": constraint.Authorized,
 		})
 	}
 	return map[string]any{
@@ -1297,7 +1294,6 @@ func (r *scriptRuntime) policyRequestValue(request policy.Request) map[string]an
 		"bodyPartial":    request.BodyPartial,
 		"credential":     request.Credential,
 		"credentialType": request.CredentialType,
-		"subject":        subject,
 		"constraints":    constraints,
 	}
 }
@@ -1527,16 +1523,14 @@ func (r *scriptRuntime) execRun(call goja.FunctionCall) goja.Value {
 			panic(r.vm.NewTypeError("$exec.run arguments must be an array"))
 		}
 	}
-	inheritEnv, environment, stdin := r.execOptions(call)
+	environment, stdin := r.execOptions(call)
 
 	ctx := r.callContext
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	cmd := exec.CommandContext(ctx, command, args...)
-	if !inheritEnv || len(environment) > 0 {
-		cmd.Env = mergedEnvironment(inheritEnv, environment)
-	}
+	cmd.Env = explicitEnvironment(environment)
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
 	}
@@ -1561,12 +1555,11 @@ func (r *scriptRuntime) execRun(call goja.FunctionCall) goja.Value {
 	return r.vm.ToValue(strings.TrimSpace(stdout.String()))
 }
 
-func (r *scriptRuntime) execOptions(call goja.FunctionCall) (bool, map[string]string, string) {
-	inheritEnv := true
+func (r *scriptRuntime) execOptions(call goja.FunctionCall) (map[string]string, string) {
 	environment := make(map[string]string)
 	var stdin string
 	if len(call.Arguments) < 3 || isNullish(call.Arguments[2]) {
-		return inheritEnv, environment, stdin
+		return environment, stdin
 	}
 
 	exported, ok := call.Arguments[2].Export().(map[string]any)
@@ -1574,16 +1567,9 @@ func (r *scriptRuntime) execOptions(call goja.FunctionCall) (bool, map[string]st
 		panic(r.vm.NewTypeError("$exec.run options must be an object"))
 	}
 	for key := range exported {
-		if key != "inheritEnv" && key != "env" && key != "stdin" {
+		if key != "env" && key != "stdin" {
 			panic(r.vm.NewTypeError("$exec.run unknown option %q", key))
 		}
-	}
-	if value, exists := exported["inheritEnv"]; exists {
-		configured, ok := value.(bool)
-		if !ok {
-			panic(r.vm.NewTypeError("$exec.run inheritEnv must be a boolean"))
-		}
-		inheritEnv = configured
 	}
 	if value, exists := exported["env"]; exists {
 		values, ok := value.(map[string]any)
@@ -1614,31 +1600,18 @@ func (r *scriptRuntime) execOptions(call goja.FunctionCall) (bool, map[string]st
 		}
 		stdin = text
 	}
-	return inheritEnv, environment, stdin
+	return environment, stdin
 }
 
-func mergedEnvironment(inherit bool, overrides map[string]string) []string {
-	values := make(map[string]string, len(overrides))
-	if inherit {
-		for _, entry := range os.Environ() {
-			name, value, ok := strings.Cut(entry, "=")
-			if ok {
-				values[name] = value
-			}
-		}
-	}
-	for name, value := range overrides {
-		values[name] = value
-	}
-
-	names := make([]string, 0, len(values))
-	for name := range values {
+func explicitEnvironment(environment map[string]string) []string {
+	names := make([]string, 0, len(environment))
+	for name := range environment {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	result := make([]string, 0, len(names))
 	for _, name := range names {
-		result = append(result, name+"="+values[name])
+		result = append(result, name+"="+environment[name])
 	}
 	return result
 }

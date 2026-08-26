@@ -70,6 +70,30 @@ branches = ["queue/example"]
 	}
 }
 
+func TestNamedAuthorizationCanOmitHostCaveat(t *testing.T) {
+	dir := writeAuthorizationConfig(t, `
+[upstream."support.internal"]
+
+[authorization.support]
+upstreams = ["support.internal"]
+credential = "/support/internal"
+credential_file = "support"
+host_caveat = false
+subject = "user:usr_123"
+`)
+	cfg, err := LoadProjectConfigWithPlugins(dir, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream := cfg.Upstream["support.internal"]
+	if !upstream.OmitHostCaveat {
+		t.Fatal("host_caveat = false was ignored")
+	}
+	if _, exists := upstream.AuthorizationConstraint["host_caveat"]; exists {
+		t.Fatalf("host_caveat leaked into provider constraint: %#v", upstream.AuthorizationConstraint)
+	}
+}
+
 func TestNamedAuthorizationRejectsOverlappingUpstreams(t *testing.T) {
 	dir := writeAuthorizationConfig(t, `
 [upstream."github.com"]

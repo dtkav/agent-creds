@@ -94,6 +94,15 @@
           direnv           # auto-loads .envrc per project directory
         ];
 
+        # Floorplan consumes this semantic plan when present. packages.nix is
+        # intentionally still the flattened compatibility environment; the
+        # component plan retains the originating project/plugin/harness TOML
+        # boundaries for OCI layer composition.
+        floorplanComponentPlan =
+          if builtins.pathExists ./generated/components.nix
+          then import ./generated/components.nix { inherit pkgs; }
+          else { schema = 1; components = []; };
+
         # Plugin packages (from generated/packages.nix if exists, otherwise defaults)
         pluginPackages =
           if builtins.pathExists ./generated/packages.nix
@@ -266,6 +275,14 @@
           default = sandboxBase;
           sandbox-base = sandboxBase;
           sandbox-env = sandboxEnv;
+        };
+
+        legacyPackages.floorplan = {
+          schema = floorplanComponentPlan.schema;
+          baseRoots = basePackages;
+          components = floorplanComponentPlan.components;
+          skillsRoot = skills;
+          harnessRoot = harnessLayer;
         };
 
         # Development shell for working on agent-creds itself

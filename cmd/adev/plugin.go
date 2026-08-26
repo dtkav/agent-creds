@@ -37,9 +37,9 @@ func discoverTOMLFiles(dirs []string) map[string]string {
 // Returns a map of plugin name -> file path, with later sources overriding earlier ones.
 func DiscoverPlugins(projectDir, scriptDir string) map[string]string {
 	dirs := []string{
-		filepath.Join(scriptDir, "plugins"),         // bundled
-		expandPath("~/.config/agent-creds/plugins"), // global
-		filepath.Join(projectDir, "plugins"),        // project
+		filepath.Join(scriptDir, "plugins"),             // bundled
+		filepath.Join(agentCredsConfigRoot(), "plugins"), // global
+		filepath.Join(projectDir, "plugins"),            // project
 	}
 	return discoverTOMLFiles(dirs)
 }
@@ -48,9 +48,9 @@ func DiscoverPlugins(projectDir, scriptDir string) map[string]string {
 // Returns a map of agent name -> file path, with later sources overriding earlier ones.
 func DiscoverAgents(projectDir, scriptDir string) map[string]string {
 	dirs := []string{
-		filepath.Join(scriptDir, "agents"),         // bundled
-		expandPath("~/.config/agent-creds/agents"), // global
-		filepath.Join(projectDir, "agents"),        // project
+		filepath.Join(scriptDir, "agents"),             // bundled
+		filepath.Join(agentCredsConfigRoot(), "agents"), // global
+		filepath.Join(projectDir, "agents"),            // project
 	}
 	return discoverTOMLFiles(dirs)
 }
@@ -60,11 +60,23 @@ func DiscoverAgents(projectDir, scriptDir string) map[string]string {
 // later scopes override earlier ones by filename, just like plugins.
 func DiscoverSkills(projectDir, scriptDir string) map[string]string {
 	dirs := []string{
-		filepath.Join(scriptDir, "skills"),         // bundled
-		expandPath("~/.config/agent-creds/skills"), // global
-		filepath.Join(projectDir, "skills"),        // project
+		filepath.Join(scriptDir, "skills"),             // bundled
+		filepath.Join(agentCredsConfigRoot(), "skills"), // global
+		filepath.Join(projectDir, "skills"),            // project
 	}
 	return discoverTOMLFiles(dirs)
+}
+
+func agentCredsConfigRoot() string {
+	root := os.Getenv("XDG_CONFIG_HOME")
+	if root == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return filepath.Join("~", ".config", "agent-creds")
+		}
+		root = filepath.Join(home, ".config")
+	}
+	return filepath.Join(root, "agent-creds")
 }
 
 // LoadPlugin parses a plugin TOML file.

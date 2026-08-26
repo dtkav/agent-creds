@@ -17,6 +17,8 @@ func TestCopyNixSourceExcludesRuntimeState(t *testing.T) {
 		"dirty-source.txt":       "included",
 		".git/config":            "excluded",
 		"generated/packages.nix": "included",
+		"generated/skills.nix":   "excluded",
+		"generated/harness.nix":  "excluded",
 		"generated/runtime.log":  "excluded",
 	} {
 		fullPath := filepath.Join(sourceDir, path)
@@ -46,7 +48,7 @@ func TestCopyNixSourceExcludesRuntimeState(t *testing.T) {
 			t.Errorf("expected %s in workspace: %v", path, err)
 		}
 	}
-	for _, path := range []string{".git", "generated/runtime.log", "generated/admin.sock"} {
+	for _, path := range []string{".git", "generated/skills.nix", "generated/harness.nix", "generated/runtime.log", "generated/admin.sock"} {
 		if _, err := os.Lstat(filepath.Join(workspaceDir, path)); !os.IsNotExist(err) {
 			t.Errorf("runtime path %s was copied", path)
 		}

@@ -116,6 +116,18 @@ func runGenerateNix(args []string) {
 		fmt.Fprintf(os.Stderr, "Error generating packages.nix: %v\n", err)
 		os.Exit(1)
 	}
+	skillsPath := filepath.Join(scriptDir, "generated", "skills.nix")
+	if err := GenerateSkillsNix(cfg, skillsPath); err != nil {
+		fmt.Fprintf(os.Stderr, "Error generating skills.nix: %v\n", err)
+		os.Exit(1)
+	}
+	harnessPath := filepath.Join(scriptDir, "generated", "harness.nix")
+	if err := GenerateHarnessNix(cfg, harnessPath); err != nil {
+		fmt.Fprintf(os.Stderr, "Error generating harness.nix: %v\n", err)
+		os.Exit(1)
+	}
 
 	fmt.Printf("Generated %s\n", outputPath)
+	fmt.Printf("Generated %s\n", skillsPath)
+	fmt.Printf("Generated %s\n", harnessPath)
 }

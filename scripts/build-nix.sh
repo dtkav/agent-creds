@@ -14,6 +14,20 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 NIX_IMAGE="nixos/nix:2.24.10"
 NIX_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/agent-creds/nix"
 
+validate_env_key() {
+    local env_key="$1"
+    case "$env_key" in
+        *[!0-9a-f]*|'')
+            echo "invalid sandbox env cache key: $env_key" >&2
+            exit 2
+            ;;
+    esac
+    if [ "${#env_key}" -ne 16 ]; then
+        echo "invalid sandbox env cache key length: $env_key" >&2
+        exit 2
+    fi
+}
+
 build_base() {
     local image_name="${1:-sandbox-base}"
 
@@ -77,16 +91,7 @@ EOF
 
 build_env() {
     local env_key="${1:-0000000000000000}"
-    case "$env_key" in
-        *[!0-9a-f]*|'')
-            echo "invalid sandbox env cache key: $env_key" >&2
-            exit 2
-            ;;
-    esac
-    if [ "${#env_key}" -ne 16 ]; then
-        echo "invalid sandbox env cache key length: $env_key" >&2
-        exit 2
-    fi
+    validate_env_key "$env_key"
 
     # Each environment gets a self-contained copy of its exact Nix closure.
     # Mounting that directory as /nix/store keeps absolute store references
@@ -118,17 +123,23 @@ build_env() {
         mkdir -p ~/.config/nix
         echo "experimental-features = nix-command flakes" > ~/.config/nix/nix.conf
 
-        # Copy source to a clean directory (avoids dirty git tree issues)
+        # Build from a disposable copy. generated/ also contains live runtime
+        # state, so copy only declarative Nix expressions that are present.
         /src/scripts/copy-nix-source.sh /src /workspace
+        for generated in skills.nix harness.nix; do
+            if [ -f "/src/generated/$generated" ]; then
+                cp "/src/generated/$generated" "/workspace/generated/$generated"
+            fi
+        done
         cd /workspace
 
-        # Initialize the disposable repository (flakes require git)
         git init -q
         git add -A 2>/dev/null || true
-        # Force-add generated/packages.nix even though generated/ is gitignored
-        git add -f generated/packages.nix 2>/dev/null || true
+        git add -f generated/*.nix 2>/dev/null || true
 
-        env_path=$(nix build .#sandbox-env --no-link --print-out-paths)
+        # Symbolic Git refs require impure evaluation. Full commit revisions
+        # remain exact, and the declared ref is part of the adev environment key.
+        env_path=$(nix build .#sandbox-env --impure --no-link --print-out-paths)
 
         private_store="/agent-creds-nix/envs/$AGENT_CREDS_ENV_KEY/nix/store"
         for source in $(nix-store -qR "$env_path"); do
@@ -160,6 +171,20 @@ build_env() {
             exit 1
         }
 
+        # Materialize the final harness layer outside the logical Nix store.
+        # Runtime state mounts hide the environment home, so adev projects each
+        # installed skill back into the harness-native location read-only.
+        private_root="/agent-creds-nix/envs/$AGENT_CREDS_ENV_KEY"
+        harness_layer="$private_root/harness-layer"
+        harness_layer_tmp="$private_root/harness-layer.tmp"
+        rm -rf -- "$harness_layer_tmp"
+        mkdir -p "$harness_layer_tmp"
+        if [ -d "$env_path/home" ]; then
+            cp -aL "$env_path/home/." "$harness_layer_tmp/"
+        fi
+        rm -rf -- "$harness_layer"
+        mv "$harness_layer_tmp" "$harness_layer"
+
         store_dir=/agent-creds-nix/var/nix/stores
         store_file="$store_dir/$(basename "$env_path").store"
         store_tmp="$store_file.tmp.$$"
@@ -167,7 +192,6 @@ build_env() {
         printf "%s\n" "$AGENT_CREDS_ENV_KEY" > "$store_tmp"
         chmod 0644 "$store_tmp"
         mv "$store_tmp" "$store_file"
-
         echo "$env_path"
       ')
 

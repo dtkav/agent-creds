@@ -63,6 +63,9 @@ func generateSandboxEnv(genDir string, tokens map[string]string, staticEnv map[s
 func shapeTokens(entries []TokenEntry, infos map[string]*CredentialInfo) map[string]string {
 	tokens := make(map[string]string)
 	for _, e := range entries {
+		if e.CredentialFile != "" {
+			continue
+		}
 		info := infos[e.Host]
 		if info == nil {
 			// Fallback: use the entry's env var directly

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -270,6 +271,98 @@ func TestBwrapArgsEnterSandboxEnvWithoutMountingWholeNixStore(t *testing.T) {
 	}
 	if strings.Contains(joined, "--ro-bind\x00/nix\x00/nix") {
 		t.Error("bwrap args expose the whole host Nix store")
+	}
+}
+
+func TestBwrapArgsMountOnlyCodexState(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(root, "work")
+	scriptDir := filepath.Join(root, "agent-creds")
+	if err := os.MkdirAll(workDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	envPath := "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-sandbox-env"
+	mount := NixStoreMount{
+		Source: filepath.Join(root, "store", filepath.Base(envPath)),
+		Target: envPath,
+	}
+	if err := os.MkdirAll(mount.Source, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	args, err := buildBwrapArgs(
+		workDir, scriptDir, "test",
+		ProjectConfig{Sandbox: SandboxConfig{Agent: "codex"}},
+		envPath, []NixStoreMount{mount}, 0, "", nil, nil,
+	)
+	if err != nil {
+		t.Fatalf("buildBwrapArgs: %v", err)
+	}
+	usr, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	homeDir := usr.HomeDir
+	if homeDir == "" {
+		homeDir = "/home/" + usr.Username
+	}
+	if indexArgSequence(
+		args, "--bind",
+		filepath.Join(scriptDir, "claude-dev", "codex-config"),
+		filepath.Join(homeDir, ".codex"),
+	) < 0 {
+		t.Fatalf("bwrap args do not mount Codex state: %q", args)
+	}
+	joined := strings.Join(args, "\x00")
+	for _, absent := range []string{
+		filepath.Join(homeDir, ".claude"),
+		filepath.Join(homeDir, ".claude.json"),
+		filepath.Join(homeDir, ".pi"),
+		"CLAUDE_CONFIG_DIR",
+		"CLAUDE_CODE_FORCE_SESSION_PERSISTENCE",
+	} {
+		if strings.Contains(joined, absent) {
+			t.Errorf("Codex bwrap args contain Claude/Pi state %q", absent)
+		}
+	}
+	for _, config := range []string{"claude-config", "pi-config"} {
+		path := filepath.Join(scriptDir, "claude-dev", config)
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("Codex initialization created %s: %v", config, err)
+		}
+	}
+}
+
+func TestBwrapArgsProjectCredentialDirectoryAtRunCredentials(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(root, "work")
+	scriptDir := filepath.Join(root, "agent-creds")
+	instanceDir := filepath.Join(scriptDir, "generated", "instances", "test")
+	for _, directory := range []string{workDir, credentialProjectionDir(instanceDir)} {
+		if err := os.MkdirAll(directory, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	envPath := "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-sandbox-env"
+	mount := NixStoreMount{
+		Source: filepath.Join(root, "store", filepath.Base(envPath)),
+		Target: envPath,
+	}
+	if err := os.MkdirAll(mount.Source, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	args, err := buildBwrapArgs(
+		workDir, scriptDir, "test", ProjectConfig{},
+		envPath, []NixStoreMount{mount}, 0, "", nil, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if indexArgSequence(
+		args, "--ro-bind", credentialProjectionDir(instanceDir), "/run/credentials",
+	) < 0 {
+		t.Fatalf("bwrap args do not mount /run/credentials: %q", args)
 	}
 }
 

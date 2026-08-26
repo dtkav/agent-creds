@@ -512,6 +512,10 @@ func cmdDischarge(sess ssh.Session, userID []byte, status string, args []string)
 		fmt.Fprintf(sess, "Error adding validity: %v\n", err)
 		return
 	}
+	if err := discharge.BindToParentMacaroon(m); err != nil {
+		fmt.Fprintf(sess, "Error binding discharge: %v\n", err)
+		return
+	}
 
 	// Encode and print
 	token, err := tfmac.EncodeToken(discharge)

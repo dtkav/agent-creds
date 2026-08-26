@@ -23,6 +23,7 @@ type SandboxConfig struct {
 	Agent             string   `toml:"agent"`                // agent to use (e.g., "claude")
 	Entrypoint        string   `toml:"entrypoint"`           // console session command; outranks the agent profile's
 	Plugins           []string `toml:"plugins"`              // additional plugins to enable
+	Skills            []string `toml:"skills"`               // registered Agent Skills to install
 	DisabledPlugins   []string `toml:"disabled_plugins"`     // plugins to disable
 }
 
@@ -89,17 +90,18 @@ func (v VaultConfig) IsRemote() bool {
 }
 
 type UpstreamConfig struct {
-	Credential   string   `toml:"credential,omitempty"`    // vault credential path (e.g., /stripe/live)
-	Env          string   `toml:"env,omitempty"`           // client-facing env var override for the minted capability
-	Policy       string   `toml:"policy,omitempty"`        // vault upstream policy path
-	Mode         string   `toml:"mode,omitempty"`          // "credential" (default) or "identity"
-	Scheme       string   `toml:"scheme,omitempty"`        // "https" (default) or "http"
-	Port         int      `toml:"port,omitempty"`          // defaults to 443 for https, 80 for http
-	Address      string   `toml:"address,omitempty"`       // fixed upstream origin (default: public host)
-	Network      string   `toml:"network,omitempty"`       // extra Docker network attached to Envoy only
-	ForwardToken bool     `toml:"forward_token,omitempty"` // caller supplies macaroon; do not mint/expose env token
-	Methods      []string `toml:"methods"`                 // allowed HTTP methods (empty = all)
-	Paths        []string `toml:"paths"`                   // allowed path patterns with glob support (empty = all)
+	Credential     string   `toml:"credential,omitempty"`      // vault credential path (e.g., /stripe/live)
+	Env            string   `toml:"env,omitempty"`             // client-facing env var override for the minted capability
+	CredentialFile string   `toml:"credential_file,omitempty"` // basename projected under /run/credentials instead of an env var
+	Policy         string   `toml:"policy,omitempty"`          // vault upstream policy path
+	Mode           string   `toml:"mode,omitempty"`            // "credential" (default) or "identity"
+	Scheme         string   `toml:"scheme,omitempty"`          // "https" (default) or "http"
+	Port           int      `toml:"port,omitempty"`            // defaults to 443 for https, 80 for http
+	Address        string   `toml:"address,omitempty"`         // fixed upstream origin (default: public host)
+	Network        string   `toml:"network,omitempty"`         // extra Docker network attached to Envoy only
+	ForwardToken   bool     `toml:"forward_token,omitempty"`   // caller supplies macaroon; do not mint/expose env token
+	Methods        []string `toml:"methods"`                   // allowed HTTP methods (empty = all)
+	Paths          []string `toml:"paths"`                     // allowed path patterns with glob support (empty = all)
 
 	// Authorization is populated after named [authorization.<name>] sections
 	// are bound to their upstreams. These fields are runtime policy, not part
@@ -195,6 +197,7 @@ type PluginConfig struct {
 	Name           string                    `toml:"name"`
 	Description    string                    `toml:"description"`
 	Nix            string                    `toml:"nix"` // inline nix expression (list of derivations, pkgs in scope)
+	Skills         []string                  `toml:"skills"`
 	NixPkgFields                             // embedded Nix package set fields ([packages], [python3Packages], etc.)
 	Upstream       map[string]UpstreamConfig `toml:"upstream"`
 	BrowserTargets []BrowserTargetConfig     `toml:"browser_target"`
@@ -211,6 +214,8 @@ type AgentConfig struct {
 	Entrypoint     string                    `toml:"entrypoint"` // command to run
 	Nix            string                    `toml:"nix"`        // inline nix expression (list of derivations, pkgs in scope)
 	Plugins        []string                  `toml:"plugins"`    // plugins this agent requires
+	Skills         []string                  `toml:"skills"`     // registered skills this agent requires
+	SkillDir       string                    `toml:"skill_dir"`  // agent-native skill directory, relative to home
 	NixPkgFields                             // embedded Nix package set fields ([packages], [python3Packages], etc.)
 	Upstream       map[string]UpstreamConfig `toml:"upstream"`
 	BrowserTargets []BrowserTargetConfig     `toml:"browser_target"`
@@ -225,6 +230,9 @@ type ProjectConfig struct {
 	TapEnabled     bool                           `toml:"-"` // derived from the global tap config
 	Entrypoint     string                         // set by agent
 	NixExprs       []string                       // inline nix expressions from plugins/agents
+	SkillNames     []string                       `toml:"-"` // unresolved names requested by sandbox/plugins/agent
+	Skills         map[string]SkillConfig         `toml:"-"` // selected registered skills
+	SkillDir       string                         `toml:"-"` // agent-native skill directory, relative to home
 	NixPkgFields                                  // embedded Nix package set fields
 	Upstream       map[string]UpstreamConfig      `toml:"upstream"`
 	Authorization  map[string]AuthorizationConfig `toml:"-"`
@@ -240,20 +248,22 @@ type ProjectConfig struct {
 // fields and is validated by Vault against the selected credential type's
 // registered authorization schema before a discharge is issued.
 type AuthorizationConfig struct {
-	Upstreams  []string
-	Credential string
-	Env        string
-	Methods    []string
-	Paths      []string
-	Constraint map[string]any
+	Upstreams      []string
+	Credential     string
+	Env            string
+	CredentialFile string
+	Methods        []string
+	Paths          []string
+	Constraint     map[string]any
 }
 
 type authorizationCommonFields struct {
-	Upstreams  []string `toml:"upstreams"`
-	Credential string   `toml:"credential"`
-	Env        string   `toml:"env"`
-	Methods    []string `toml:"methods"`
-	Paths      []string `toml:"paths"`
+	Upstreams      []string `toml:"upstreams"`
+	Credential     string   `toml:"credential"`
+	Env            string   `toml:"env"`
+	CredentialFile string   `toml:"credential_file"`
+	Methods        []string `toml:"methods"`
+	Paths          []string `toml:"paths"`
 }
 
 // NixPkgFields holds Nix package set fields shared by PluginConfig, AgentConfig, and ProjectConfig.
@@ -354,6 +364,7 @@ func MatchGlob(pattern, value string) bool {
 // Returns an error for invalid credential paths, and prints warnings to stderr
 // for upstreams that have methods/paths caveats but no credential.
 func ValidateUpstreams(upstreams map[string]UpstreamConfig) error {
+	credentialFiles := make(map[string]string)
 	for host, u := range upstreams {
 		if mode := u.ModeValue(); mode != "credential" && mode != "identity" {
 			return fmt.Errorf("upstream %q: mode %q must be credential or identity", host, mode)
@@ -363,6 +374,21 @@ func ValidateUpstreams(upstreams map[string]UpstreamConfig) error {
 		}
 		if u.ForwardToken && u.Credential == "" {
 			return fmt.Errorf("upstream %q: forward_token requires a credential path", host)
+		}
+		if u.CredentialFile != "" {
+			if u.Env != "" {
+				return fmt.Errorf("upstream %q: env and credential_file are mutually exclusive", host)
+			}
+			if !u.MintsToken() {
+				return fmt.Errorf("upstream %q: credential_file requires a minted credential", host)
+			}
+			if !validCredentialFilename(u.CredentialFile) {
+				return fmt.Errorf("upstream %q: credential_file %q must be a safe basename", host, u.CredentialFile)
+			}
+			if existingHost, duplicate := credentialFiles[u.CredentialFile]; duplicate {
+				return fmt.Errorf("upstreams %q and %q use the same credential_file %q", existingHost, host, u.CredentialFile)
+			}
+			credentialFiles[u.CredentialFile] = host
 		}
 		if scheme := u.SchemeValue(); scheme != "http" && scheme != "https" {
 			return fmt.Errorf("upstream %q: scheme %q must be http or https", host, scheme)
@@ -406,19 +432,20 @@ func decodeAuthorizations(md toml.MetaData, encoded map[string]toml.Primitive) (
 		if err := md.PrimitiveDecode(primitive, &raw); err != nil {
 			return nil, fmt.Errorf("decoding authorization.%s provider fields: %w", name, err)
 		}
-		for _, key := range []string{"upstreams", "credential", "env", "methods", "paths"} {
+		for _, key := range []string{"upstreams", "credential", "env", "credential_file", "methods", "paths"} {
 			delete(raw, key)
 		}
 		if _, err := json.Marshal(raw); err != nil {
 			return nil, fmt.Errorf("authorization.%s provider fields must be JSON-compatible: %w", name, err)
 		}
 		result[name] = AuthorizationConfig{
-			Upstreams:  common.Upstreams,
-			Credential: common.Credential,
-			Env:        common.Env,
-			Methods:    common.Methods,
-			Paths:      common.Paths,
-			Constraint: raw,
+			Upstreams:      common.Upstreams,
+			Credential:     common.Credential,
+			Env:            common.Env,
+			CredentialFile: common.CredentialFile,
+			Methods:        common.Methods,
+			Paths:          common.Paths,
+			Constraint:     raw,
 		}
 	}
 	return result, nil
@@ -460,11 +487,12 @@ func BindAuthorizations(cfg *ProjectConfig) error {
 			if upstream.Authorization != "" {
 				return fmt.Errorf("upstream %q is claimed by both authorization.%s and authorization.%s", host, upstream.Authorization, name)
 			}
-			if upstream.Credential != "" || upstream.ForwardToken || len(upstream.Methods) > 0 || len(upstream.Paths) > 0 || upstream.Env != "" {
-				return fmt.Errorf("authorization.%s: upstream %q also declares credential authorization fields; keep credential, env, methods, and paths in the authorization table", name, host)
+			if upstream.Credential != "" || upstream.ForwardToken || len(upstream.Methods) > 0 || len(upstream.Paths) > 0 || upstream.Env != "" || upstream.CredentialFile != "" {
+				return fmt.Errorf("authorization.%s: upstream %q also declares credential authorization fields; keep credential, env, credential_file, methods, and paths in the authorization table", name, host)
 			}
 			upstream.Credential = authorization.Credential
 			upstream.Env = authorization.Env
+			upstream.CredentialFile = authorization.CredentialFile
 			upstream.Methods = append([]string(nil), authorization.Methods...)
 			upstream.Paths = append([]string(nil), authorization.Paths...)
 			upstream.Authorization = name
@@ -574,6 +602,7 @@ func LoadProjectConfigWithPlugins(projectDir, scriptDir string) (ProjectConfig, 
 	if err != nil {
 		return cfg, err
 	}
+	cfg.SkillNames = append(cfg.SkillNames, cfg.Sandbox.Skills...)
 
 	// Collect plugins to enable (agent plugins + explicit plugins)
 	var agentPlugins []string
@@ -633,6 +662,9 @@ func LoadProjectConfigWithPlugins(projectDir, scriptDir string) (ProjectConfig, 
 
 	// Merge enabled plugins
 	if err := MergePlugins(&cfg, discovered, enabled, projectDir); err != nil {
+		return cfg, err
+	}
+	if err := ResolveSkills(&cfg, DiscoverSkills(projectDir, scriptDir)); err != nil {
 		return cfg, err
 	}
 	if err := BindAuthorizations(&cfg); err != nil {

@@ -134,7 +134,25 @@
             file
           ];
 
-        allPackages = basePackages ++ pluginPackages;
+        # Skill repositories are fetched into a provider-neutral location.
+        # The final harness layer owns provider-specific installation.
+        skills =
+          if builtins.pathExists ./generated/skills.nix
+          then import ./generated/skills.nix { inherit pkgs; }
+          else pkgs.runCommand "sandbox-skills-empty" {} ''
+            mkdir -p "$out/skills"
+          '';
+
+        harnessLayer =
+          if builtins.pathExists ./generated/harness.nix
+          then import ./generated/harness.nix { inherit pkgs skills; }
+          else pkgs.runCommand "sandbox-harness-empty" {} ''
+            mkdir -p "$out/home"
+          '';
+
+        # The harness layer is deliberately last. Its dependency on `skills`
+        # also makes the neutral skill source layer precede harness setup.
+        allPackages = basePackages ++ pluginPackages ++ [ harnessLayer ];
 
         # --- sandbox-base: thin Docker image, no Nix packages ---
         # Only busybox (for /bin/sh), user setup, scripts, config placeholders.

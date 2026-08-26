@@ -667,6 +667,12 @@ func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig, att
 		cleanup()
 		os.Exit(1)
 	}
+	if err := materializeCredentialFiles(instanceGenDir, tokenEntries); err != nil {
+		spinner.Stop()
+		fmt.Fprintf(os.Stderr, "Error materializing sandbox credentials: %v\n", err)
+		cleanup()
+		os.Exit(1)
+	}
 	shaped := shapeTokens(tokenEntries, infos)
 	staticResolved, err := resolveStaticEnvForConsole(cfg.StaticEnv, vaultConfigYAML, scriptDir)
 	if err != nil {
@@ -906,7 +912,7 @@ func createBwrapInstance(workDir, scriptDir, slug string, cfg ProjectConfig, att
 	// is hosted beside the bwrap process so detaching cannot stop it.
 	refreshCtx, refreshCancel := context.WithCancel(context.Background())
 	defer refreshCancel()
-	startDenialMonitor(refreshCtx, cfg.Vault)
+	startDenialMonitor(refreshCtx, cfg.Vault, cfg.Upstream)
 
 	// Session command: scope-wrapped launcher, hosted by zmx.
 	sessionCmd := append(systemdScopeArgs(slug, cfg), "/bin/bash", launchScript)
@@ -1079,29 +1085,19 @@ func buildBwrapArgs(
 		"--bind", filepath.Join(instanceGenDir, "home"), homeDir,
 	)
 
-	// Agent config dirs: same persisted dirs the container runtimes mount,
-	// so login state carries across runtimes and instances.
-	claudeConfigDir := filepath.Join(scriptDir, "claude-dev", "claude-config")
-	os.MkdirAll(claudeConfigDir, 0755)
-	claudeJSON := filepath.Join(claudeConfigDir, ".claude.json")
-	if _, err := os.Stat(claudeJSON); os.IsNotExist(err) {
-		os.WriteFile(claudeJSON, []byte("{}"), 0600)
-	}
-	instanceClaudeJSON, err := prepareClaudeProjectState(
-		scriptDir, instanceGenDir, workDir, cfg)
+	// Mount only the configured agent's persistent state. State is shared
+	// across runtimes and instances, but never across agent identities.
+	agentState, err := prepareAgentState(
+		scriptDir, instanceGenDir, workDir, homeDir, cfg)
 	if err != nil {
 		return nil, err
 	}
-	codexConfigDir := filepath.Join(scriptDir, "claude-dev", "codex-config")
-	os.MkdirAll(codexConfigDir, 0755)
-	piConfigDir := filepath.Join(scriptDir, "claude-dev", "pi-config")
-	os.MkdirAll(piConfigDir, 0755)
-	args = append(args,
-		"--bind", claudeConfigDir, filepath.Join(homeDir, ".claude"),
-		"--bind", instanceClaudeJSON, filepath.Join(homeDir, ".claude.json"),
-		"--bind", codexConfigDir, filepath.Join(homeDir, ".codex"),
-		"--bind", piConfigDir, filepath.Join(homeDir, ".pi"),
-	)
+	args = append(args, agentState.bwrapArgs()...)
+	skillMounts, err := prepareSkillMounts(cfg, sandboxEnv, homeDir, agentState)
+	if err != nil {
+		return nil, fmt.Errorf("preparing skills: %w", err)
+	}
+	args = append(args, skillBwrapArgs(skillMounts)...)
 	if gitConfig := filepath.Join(homeDir, ".gitconfig"); fileExists(gitConfig) {
 		args = append(args, "--ro-bind", gitConfig, filepath.Join(homeDir, ".gitconfig"))
 	}
@@ -1109,6 +1105,9 @@ func buildBwrapArgs(
 	// Project rw at its real path; instance gen dir ro (CA, tokens, configs).
 	args = append(args, bwrapDirMountArgs(workDir, workDir, false)...)
 	args = append(args, "--ro-bind", instanceGenDir, "/run/adev-instance")
+	if fileExists(credentialProjectionDir(instanceGenDir)) {
+		args = append(args, "--ro-bind", credentialProjectionDir(instanceGenDir), "/run/credentials")
+	}
 	args = append(args, bwrapResolvMountArgs(filepath.Join(instanceGenDir, "bwrap-resolv.conf"))...)
 	if browserForwardPort > 0 {
 		// The bridge owns this directory outside bwrap. Exposing it read-only
@@ -1178,7 +1177,7 @@ func buildBwrapArgs(
 		[2]string{"TERMINFO_DIRS", filepath.Join(sandboxEnv, "share", "terminfo") + ":/usr/share/terminfo"},
 		[2]string{"XDG_DATA_DIRS", filepath.Join(sandboxEnv, "share") + ":/usr/share:/share"},
 	)
-	if cfg.Sandbox.Agent == "claude" || cfg.Sandbox.Agent == "" {
+	if cfg.Sandbox.Agent == "claude" {
 		env = append(env,
 			[2]string{"CLAUDE_CONFIG_DIR", filepath.Join(homeDir, ".claude")},
 			[2]string{"CLAUDE_CODE_FORCE_SESSION_PERSISTENCE", "1"},

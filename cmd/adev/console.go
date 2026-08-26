@@ -231,6 +231,11 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		fmt.Fprintf(os.Stderr, "Error minting sandbox credentials: %v\n", err)
 		os.Exit(1)
 	}
+	if err := materializeCredentialFiles(instanceGenDir, tokenEntries); err != nil {
+		spinner.Stop()
+		fmt.Fprintf(os.Stderr, "Error materializing sandbox credentials: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Generate sandbox.env if there are credentialed upstreams or static env vars
 	sandboxEnvGenerated := false
@@ -307,7 +312,7 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	}
 
 	// Get sandbox image. The public default builds locally; deployments can
-	// select a prebuilt image in agent-creds.toml.
+	// select a prebuilt image in the project sandbox policy.
 	sandboxImage := cfg.Sandbox.Image
 	var envPath string // Nix store path for sandbox-env (only for local builds)
 	if sandboxImage == "" {
@@ -351,29 +356,24 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 		gitConfigMounts = []string{"-v", gitConfig + ":/home/devuser/.gitconfig:ro"}
 	}
 
-	// Create claude config dir (namespaced per project)
-	claudeConfigDir := filepath.Join(scriptDir, "claude-dev/claude-config")
-	os.MkdirAll(claudeConfigDir, 0755)
-	// Ensure .claude.json exists (Claude Code reads it from $HOME/.claude.json)
-	claudeJSON := filepath.Join(claudeConfigDir, ".claude.json")
-	if _, err := os.Stat(claudeJSON); os.IsNotExist(err) {
-		os.WriteFile(claudeJSON, []byte("{}"), 0600)
-	}
-	instanceClaudeJSON, err := prepareClaudeProjectState(
-		scriptDir, instanceGenDir, "/workspace", cfg)
+	agentState, err := prepareAgentState(
+		scriptDir, instanceGenDir, "/workspace", "/home/devuser", cfg)
 	if err != nil {
 		spinner.Stop()
-		fmt.Fprintf(os.Stderr, "Error preparing Claude project state: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error preparing agent state: %v\n", err)
 		os.Exit(1)
 	}
-
-	// Create codex config dir (persisted across sandbox restarts)
-	codexConfigDir := filepath.Join(scriptDir, "claude-dev/codex-config")
-	os.MkdirAll(codexConfigDir, 0755)
-
-	// Create Pi config dir (persisted across sandbox restarts)
-	piConfigDir := filepath.Join(scriptDir, "claude-dev/pi-config")
-	os.MkdirAll(piConfigDir, 0755)
+	if len(cfg.Skills) > 0 && envPath == "" {
+		spinner.Stop()
+		fmt.Fprintln(os.Stderr, "Error preparing skills: registered skills require image = \"sandbox-local\"")
+		os.Exit(1)
+	}
+	skillMounts, err := prepareSkillMounts(cfg, envPath, "/home/devuser", agentState)
+	if err != nil {
+		spinner.Stop()
+		fmt.Fprintf(os.Stderr, "Error preparing skills: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Create per-sandbox network (remove stale one first if it exists without containers)
 	spinner.Status("creating network...")
@@ -656,13 +656,13 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	} else {
 		args = append(args, "--network=container:"+containerName)
 	}
+	args = append(args, "-v", workDir+":/workspace")
+	if cfg.Sandbox.Agent == "claude" {
+		args = append(args, "-e", "CLAUDE_CONFIG_DIR=/home/devuser/.claude")
+	}
+	args = append(args, agentState.dockerArgs()...)
+	args = append(args, skillDockerArgs(skillMounts)...)
 	args = append(args,
-		"-e", "CLAUDE_CONFIG_DIR=/home/devuser/.claude",
-		"-v", workDir+":/workspace",
-		"-v", claudeConfigDir+":/home/devuser/.claude",
-		"-v", instanceClaudeJSON+":/home/devuser/.claude.json",
-		"-v", codexConfigDir+":/home/devuser/.codex",
-		"-v", piConfigDir+":/home/devuser/.pi",
 		// Mount agent-creds CA so proxy TLS is trusted system-wide
 		"-v", scriptDir+"/generated/certs/ca.crt:/etc/ssl/agent-creds-ca.crt:ro",
 		// Mount entrypoint and binaries so changes take effect without image rebuild
@@ -679,6 +679,9 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	if sandboxEnvGenerated {
 		sandboxEnvPath := filepath.Join(instanceGenDir, "sandbox.env")
 		args = append(args, "-v", sandboxEnvPath+":/workspace/.env:ro")
+	}
+	if hasCredentialFileEntries(tokenEntries) {
+		args = append(args, "-v", credentialProjectionDir(instanceGenDir)+":/run/credentials:ro")
 	}
 	// Mount host Nix store for sandbox-env (local builds only)
 	if envPath != "" {
@@ -842,11 +845,11 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	refreshCtx, refreshCancel := context.WithCancel(context.Background())
 	defer refreshCancel()
 	if len(tokenEntries) > 0 {
-		startDischargeRefresh(refreshCtx, cfg, scriptDir, instanceGenDir, vaultConfigYAML)
+		startDischargeRefresh(refreshCtx, workDir, scriptDir, instanceGenDir)
 	}
 
 	// Start denial monitoring
-	startDenialMonitor(refreshCtx, cfg.Vault)
+	startDenialMonitor(refreshCtx, cfg.Vault, cfg.Upstream)
 
 	// SSH into the sandbox (dropbear runs as devuser on port 2222)
 	sshArgs := []string{
@@ -872,11 +875,12 @@ func createInstance(workDir, scriptDir, slug string, cfg ProjectConfig) {
 	// No cleanup: use 'adev stop' to stop.
 }
 
-// TokenEntry holds a minted combined token (authz,discharge) for one env var.
+// TokenEntry holds a minted combined token for one sandbox delivery target.
 type TokenEntry struct {
-	EnvVar   string // e.g., STRIPE_API_KEY
-	Combined string // authz,discharge combined token
-	Host     string // upstream host
+	EnvVar         string // legacy environment-variable delivery
+	CredentialFile string // basename projected under /run/credentials
+	Combined       string // authz,discharge combined token
+	Host           string // upstream host
 }
 
 func upstreamTokenEnv(upstream UpstreamConfig, info *CredentialInfo) string {
@@ -893,9 +897,9 @@ func upstreamTokenEnv(upstream UpstreamConfig, info *CredentialInfo) string {
 // It returns an error instead of a partial result: all sandbox engines share
 // the same fail-closed credential bootstrap.
 func mintTokens(cfg ProjectConfig, instanceGenDir string, spinner *Spinner) ([]TokenEntry, map[string]*CredentialInfo, error) {
-	authzDir := filepath.Join(instanceGenDir, "authz")
-	if err := os.MkdirAll(authzDir, 0755); err != nil {
-		return nil, nil, fmt.Errorf("creating token cache: %w", err)
+	authzDir, err := prepareCredentialAuthzDir(instanceGenDir)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	var tokens []TokenEntry
@@ -922,7 +926,7 @@ func mintTokens(cfg ProjectConfig, instanceGenDir string, spinner *Spinner) ([]T
 
 		// Determine primary env var name
 		envVar := upstreamTokenEnv(upstream, info)
-		if envVar == "" {
+		if upstream.CredentialFile == "" && envVar == "" {
 			return nil, nil, fmt.Errorf("credential for %s declares no environment variable", host)
 		}
 
@@ -965,9 +969,13 @@ func mintTokens(cfg ProjectConfig, instanceGenDir string, spinner *Spinner) ([]T
 
 		// Step 6: Store combined token
 		combined := authzToken + "," + discharge
-		tokens = append(tokens, TokenEntry{EnvVar: envVar, Combined: combined, Host: host})
+		entry, err := newTokenEntry(host, upstream, envVar, combined, time.Now())
+		if err != nil {
+			return nil, nil, fmt.Errorf("materializing %s: %w", host, err)
+		}
+		tokens = append(tokens, entry)
 
-		fmt.Fprintf(os.Stderr, "  %s → %s ✓\n", host, envVar)
+		fmt.Fprintf(os.Stderr, "  %s → %s ✓\n", host, entry.deliveryName())
 	}
 
 	return tokens, infos, nil
@@ -982,10 +990,10 @@ func sortedUpstreamKeys(m map[string]UpstreamConfig) []string {
 	return keys
 }
 
-// startDischargeRefresh launches a background goroutine that refreshes discharge
-// tokens every 45 minutes. It re-discharges cached authz tokens and regenerates
-// sandbox.env atomically. Stops when ctx is cancelled.
-func startDischargeRefresh(ctx context.Context, cfg ProjectConfig, scriptDir, instanceGenDir string, vaultConfigYAML []byte) {
+// startDischargeRefresh launches a background goroutine that refreshes all
+// sandbox credentials every 45 minutes. Each pass reloads project config and
+// atomically replaces each file- and environment-delivered capability.
+func startDischargeRefresh(ctx context.Context, workDir, scriptDir, instanceGenDir string) {
 	go func() {
 		for {
 			select {
@@ -994,63 +1002,8 @@ func startDischargeRefresh(ctx context.Context, cfg ProjectConfig, scriptDir, in
 			case <-time.After(45 * time.Minute):
 			}
 
-			// Refresh discharge for each credentialed upstream
-			authzDir := filepath.Join(instanceGenDir, "authz")
-			var tokens []TokenEntry
-			for host, upstream := range cfg.Upstream {
-				if !upstream.MintsToken() {
-					continue
-				}
-
-				info, err := vaultSSHInfo(cfg.Vault, upstream.Credential)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: discharge refresh info %s failed: %v (old tokens valid for ~15 more minutes)\n", host, err)
-					continue
-				}
-				envVar := upstreamTokenEnv(upstream, info)
-				if envVar == "" {
-					continue
-				}
-
-				// Read cached authz token
-				cachePath := filepath.Join(authzDir, host+".token")
-				data, err := os.ReadFile(cachePath)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: discharge refresh %s: no cached authz token (old tokens valid for ~15 more minutes)\n", host)
-					continue
-				}
-				authzToken := strings.TrimSpace(string(data))
-
-				discharge, err := vaultSSHDischarge(cfg.Vault, authzToken, upstream.AuthorizationConstraint)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: discharge refresh %s failed: %v (old tokens valid for ~15 more minutes)\n", host, err)
-					continue
-				}
-
-				combined := authzToken + "," + discharge
-				tokens = append(tokens, TokenEntry{EnvVar: envVar, Combined: combined, Host: host})
-			}
-
-			if len(tokens) == 0 {
-				continue
-			}
-
-			// Reshape and regenerate sandbox.env
-			infos := make(map[string]*CredentialInfo)
-			for _, e := range tokens {
-				if info, err := vaultSSHInfo(cfg.Vault, cfg.Upstream[e.Host].Credential); err == nil {
-					infos[e.Host] = info
-				}
-			}
-			shaped := shapeTokens(tokens, infos)
-
-			staticResolved, err := resolveStaticEnvForConsole(cfg.StaticEnv, vaultConfigYAML, scriptDir)
-			if err != nil {
-				staticResolved = make(map[string]string)
-			}
-
-			if err := generateSandboxEnv(instanceGenDir, shaped, staticResolved); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: discharge refresh env update failed: %v (old tokens valid for ~15 more minutes)\n", err)
+			if err := refreshSandboxCredentialEnv(workDir, scriptDir, instanceGenDir); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: credential refresh failed: %v (current credentials remain usable until expiry)\n", err)
 			}
 		}
 	}()
@@ -1067,6 +1020,9 @@ func refreshSandboxCredentialEnv(workDir, scriptDir, instanceGenDir string) erro
 	}
 	tokens, infos, err := mintTokens(cfg, instanceGenDir, nil)
 	if err != nil {
+		return err
+	}
+	if err := materializeCredentialFiles(instanceGenDir, tokens); err != nil {
 		return err
 	}
 	var vaultConfigYAML []byte
@@ -1147,7 +1103,7 @@ func copyUpstreamMap(m map[string]UpstreamConfig) map[string]UpstreamConfig {
 
 // upstreamChanged returns true if the transport, credential, or caveats differ.
 func upstreamChanged(old, new UpstreamConfig) bool {
-	if old.Mode != new.Mode || old.Scheme != new.Scheme || old.Port != new.Port || old.Address != new.Address || old.Network != new.Network || old.ForwardToken != new.ForwardToken || old.Env != new.Env {
+	if old.Mode != new.Mode || old.Scheme != new.Scheme || old.Port != new.Port || old.Address != new.Address || old.Network != new.Network || old.ForwardToken != new.ForwardToken || old.Env != new.Env || old.CredentialFile != new.CredentialFile {
 		return true
 	}
 	if old.Credential != new.Credential || old.Policy != new.Policy {
@@ -1168,27 +1124,33 @@ func upstreamChanged(old, new UpstreamConfig) bool {
 // remintTokens detects credential/caveat changes and re-mints tokens for affected upstreams.
 // Unchanged upstreams retain their existing tokens.
 func remintTokens(newCfg ProjectConfig, scriptDir, instanceGenDir string, oldUpstreams map[string]UpstreamConfig) {
-	authzDir := filepath.Join(instanceGenDir, "authz")
+	authzDir := credentialAuthzDir(instanceGenDir)
 
 	// Determine which hosts need re-minting
-	var remintHosts []string
+	remintSet := make(map[string]struct{})
 	for host, newUp := range newCfg.Upstream {
 		if !newUp.MintsToken() {
 			continue
 		}
 		oldUp, existed := oldUpstreams[host]
 		if !existed || upstreamChanged(oldUp, newUp) {
-			remintHosts = append(remintHosts, host)
+			remintSet[host] = struct{}{}
+		}
+	}
+	for host, oldUp := range oldUpstreams {
+		newUp, exists := newCfg.Upstream[host]
+		if oldUp.MintsToken() && (!exists || !newUp.MintsToken() || upstreamChanged(oldUp, newUp)) {
+			remintSet[host] = struct{}{}
 		}
 	}
 
-	if len(remintHosts) == 0 {
+	if len(remintSet) == 0 {
 		// No credential changes — check if we still have credentialed upstreams for env regen
 		return
 	}
 
 	// Delete old cache and re-mint for changed hosts
-	for _, host := range remintHosts {
+	for host := range remintSet {
 		cachePath := filepath.Join(authzDir, host+".token")
 		os.Remove(cachePath)
 		fmt.Fprintf(os.Stderr, "  re-minting %s (config changed)\n", host)
@@ -1206,7 +1168,7 @@ func remintTokens(newCfg ProjectConfig, scriptDir, instanceGenDir string, oldUps
 			continue
 		}
 		envVar := upstreamTokenEnv(upstream, info)
-		if envVar == "" {
+		if upstream.CredentialFile == "" && envVar == "" {
 			continue
 		}
 
@@ -1232,11 +1194,16 @@ func remintTokens(newCfg ProjectConfig, scriptDir, instanceGenDir string, oldUps
 			continue
 		}
 
-		tokens = append(tokens, TokenEntry{EnvVar: envVar, Combined: authzToken + "," + discharge, Host: host})
+		entry, err := newTokenEntry(host, upstream, envVar, authzToken+","+discharge, time.Now())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: materializing %s failed: %v\n", host, err)
+			continue
+		}
+		tokens = append(tokens, entry)
 	}
 
-	if len(tokens) == 0 {
-		return
+	if err := materializeCredentialFiles(instanceGenDir, tokens); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: hot-reload credential file update failed: %v\n", err)
 	}
 
 	// Regenerate sandbox.env
@@ -1269,7 +1236,7 @@ type denialEntry struct {
 
 // startDenialMonitor polls the vault HTTP API every 30 seconds for new denials
 // and prints a warning when denials are detected. Stops when ctx is cancelled.
-func startDenialMonitor(ctx context.Context, vault VaultConfig) {
+func startDenialMonitor(ctx context.Context, vault VaultConfig, upstreams map[string]UpstreamConfig) {
 	baseURL := vault.HTTP
 	if baseURL == "" {
 		if vault.IsRemote() {
@@ -1308,10 +1275,17 @@ func startDenialMonitor(ctx context.Context, vault VaultConfig) {
 			json.NewDecoder(resp.Body).Decode(&denials)
 			resp.Body.Close()
 
-			if len(denials) > 0 {
+			visible := denials[:0]
+			for _, denial := range denials {
+				if _, ok := upstreams[denial.Host]; ok {
+					visible = append(visible, denial)
+				}
+			}
+
+			if len(visible) > 0 {
 				// Group by host+path+reason for concise output
-				fmt.Fprintf(os.Stderr, "\n⚠ %d access denial(s):\n", len(denials))
-				for _, d := range denials {
+				fmt.Fprintf(os.Stderr, "\n⚠ %d access denial(s):\n", len(visible))
+				for _, d := range visible {
 					reason := ""
 					if d.Reason != nil {
 						reason = " -- " + *d.Reason

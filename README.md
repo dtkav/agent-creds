@@ -257,6 +257,53 @@ A `bwrap` agent runs in a zmx-hosted session, so it can detach and resume
 without losing the process. Multiple agents can run concurrently; they share
 Vault but not Envoy, tokens, generated configuration, or network namespaces.
 
+### Install registered Agent Skills
+
+Skills are named capabilities backed by repositories, independent of a model
+provider. Register each skill in a TOML file whose filename matches its name:
+
+```toml
+# skills/service-observability.toml
+name = "service-observability"
+description = "Query an observability service"
+repo = "https://github.com/example/capabilities.git"
+ref = "main" # a branch, tag, or full revision
+path = "skills/service-observability"
+
+# Optional: packages required by the skill. Like plugin `nix`, this expression
+# evaluates to a list of derivations with `pkgs` in scope.
+nix = "[ pkgs.jq ]"
+```
+
+`repo` is a literal Git URL. `ref` is an ordinary Git branch, tag, or full
+revision. `path` defaults to the repository root, and `nix` is optional. A
+full commit revision is an exact source pin; a branch or tag is resolved by
+Git when the environment is built. The declared `ref` is part of the sandbox
+environment cache key, so changing it selects and builds a new environment.
+There is no adev-specific version, lock, or repository protocol.
+
+Registrations use the same precedence model as plugins: bundled
+`<agent-creds>/skills/`, global `~/.config/agent-creds/skills/`, then the
+project's `skills/`. A later registration with the same filename overrides an
+earlier one. Registration does not enable a skill. Refer to it by name from
+the sandbox:
+
+```toml
+[sandbox]
+agent = "codex"
+skills = ["service-observability"]
+```
+
+Plugin and agent profiles may also declare `skills = [...]` as dependencies.
+The selected agent profile supplies the harness's native `skill_dir`. Nix
+first fetches the registered repositories into a provider-neutral skills
+output; the final harness layer copies the selected skills from there into
+that native layout.
+At launch, `adev` mounts each installed skill read-only over the harness's
+persistent state, so Claude, Codex, and Pi consume the same sovereign source
+repositories without symlinks. Registered skills currently require the local
+Nix-backed sandbox image (`image = "sandbox-local"`, the default).
+
 ### Collect GenAI operation metrics
 
 Enable the system-wide collector once:
@@ -317,6 +364,8 @@ The main upstream fields are:
 | Field | Meaning |
 | --- | --- |
 | `credential` | Vault credential path, such as `/service/read` |
+| `env` | Override the legacy environment variable used to deliver the minted capability |
+| `credential_file` | Deliver a one-hour hot capability at `/run/credentials/<basename>`; mutually exclusive with `env` |
 | `policy` | Trusted Vault policy path; selecting one requires a valid macaroon |
 | `methods` | Allowed HTTP methods; empty means all |
 | `paths` | Allowed path patterns; `*` matches one segment and `**` matches many |
@@ -327,6 +376,29 @@ The main upstream fields are:
 
 Changes to upstreams are watched. Envoy configuration and credential tokens
 are refreshed without rebuilding the entire environment when possible.
+
+Service wrappers should prefer file delivery when they can reread a credential
+for each operation:
+
+```toml
+[upstream."api.example.com"]
+credential = "/service/read"
+credential_file = "service-read"
+methods = ["GET", "POST"]
+paths = ["/v1/observability/**"]
+```
+
+The wrapper reads `/run/credentials/service-read` for each operation. Each
+projected `acm_` value has a short validity window and is replaced atomically
+before expiry. The stable authorization primary remains in broker-private host
+state outside the sandbox mount; only a short-lived descendant and discharge
+are projected.
+
+Wrappers may expose a credential-path environment variable while retaining the
+`/run/credentials/<name>` default. This makes local tests portable and lets two
+services routed through one upstream host point at a shared credential file.
+Token-valued environment variables are compatibility fallbacks, not the
+primary delivery mechanism.
 
 See [`sandbox.example.toml`](sandbox.example.toml) for browser, CDP,
 identity-route, and plugin examples.
@@ -357,12 +429,12 @@ Use `header` for static credentials that need an exact header value:
 
 ```yaml
 credentials:
-  fly/observability:
+  service/observability:
     type: header
     header: Authorization
     value:
-      $secret: fly#OBSERVABILITY_AUTHORIZATION
-    env: FLY_OBSERVABILITY_TOKEN
+      $secret: service#OBSERVABILITY_AUTHORIZATION
+    env: SERVICE_OBSERVABILITY_TOKEN
 ```
 
 The standard GitHub adapter handles the client framing used by both `gh`
@@ -830,6 +902,7 @@ cmd/adev/               sandbox orchestrator
 docs/guides/            end-to-end service guides
 examples/               trusted JavaScript extension examples
 plugins/                composable development-tool profiles
+skills/                 bundled named Agent Skill registrations
 vault/                  credential service, providers, policies, and token code
 vault/providers.d/      local trusted JavaScript extensions (ignored)
 sandbox.example.toml

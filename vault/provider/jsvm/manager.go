@@ -1527,7 +1527,7 @@ func (r *scriptRuntime) execRun(call goja.FunctionCall) goja.Value {
 			panic(r.vm.NewTypeError("$exec.run arguments must be an array"))
 		}
 	}
-	inheritEnv, environment := r.execOptions(call)
+	inheritEnv, environment, stdin := r.execOptions(call)
 
 	ctx := r.callContext
 	if ctx == nil {
@@ -1536,6 +1536,9 @@ func (r *scriptRuntime) execRun(call goja.FunctionCall) goja.Value {
 	cmd := exec.CommandContext(ctx, command, args...)
 	if !inheritEnv || len(environment) > 0 {
 		cmd.Env = mergedEnvironment(inheritEnv, environment)
+	}
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
 	}
 	stdout := &cappedBuffer{limit: maxExecOutputBytes}
 	stderr := &cappedBuffer{limit: maxExecStderrBytes}
@@ -1558,11 +1561,12 @@ func (r *scriptRuntime) execRun(call goja.FunctionCall) goja.Value {
 	return r.vm.ToValue(strings.TrimSpace(stdout.String()))
 }
 
-func (r *scriptRuntime) execOptions(call goja.FunctionCall) (bool, map[string]string) {
+func (r *scriptRuntime) execOptions(call goja.FunctionCall) (bool, map[string]string, string) {
 	inheritEnv := true
 	environment := make(map[string]string)
+	var stdin string
 	if len(call.Arguments) < 3 || isNullish(call.Arguments[2]) {
-		return inheritEnv, environment
+		return inheritEnv, environment, stdin
 	}
 
 	exported, ok := call.Arguments[2].Export().(map[string]any)
@@ -1570,7 +1574,7 @@ func (r *scriptRuntime) execOptions(call goja.FunctionCall) (bool, map[string]st
 		panic(r.vm.NewTypeError("$exec.run options must be an object"))
 	}
 	for key := range exported {
-		if key != "inheritEnv" && key != "env" {
+		if key != "inheritEnv" && key != "env" && key != "stdin" {
 			panic(r.vm.NewTypeError("$exec.run unknown option %q", key))
 		}
 	}
@@ -1600,7 +1604,17 @@ func (r *scriptRuntime) execOptions(call goja.FunctionCall) (bool, map[string]st
 			environment[key] = text
 		}
 	}
-	return inheritEnv, environment
+	if value, exists := exported["stdin"]; exists {
+		text, ok := value.(string)
+		if !ok {
+			panic(r.vm.NewTypeError("$exec.run stdin must be a string"))
+		}
+		if len(text) > maxExecOutputBytes {
+			panic(r.vm.NewTypeError("$exec.run stdin exceeded %d bytes", maxExecOutputBytes))
+		}
+		stdin = text
+	}
+	return inheritEnv, environment, stdin
 }
 
 func mergedEnvironment(inherit bool, overrides map[string]string) []string {

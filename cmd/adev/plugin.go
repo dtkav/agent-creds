@@ -55,6 +55,18 @@ func DiscoverAgents(projectDir, scriptDir string) map[string]string {
 	return discoverTOMLFiles(dirs)
 }
 
+// DiscoverSkills finds registered Agent Skills from bundled, global, and
+// project directories. A registration describes one named skill source;
+// later scopes override earlier ones by filename, just like plugins.
+func DiscoverSkills(projectDir, scriptDir string) map[string]string {
+	dirs := []string{
+		filepath.Join(scriptDir, "skills"),         // bundled
+		expandPath("~/.config/agent-creds/skills"), // global
+		filepath.Join(projectDir, "skills"),        // project
+	}
+	return discoverTOMLFiles(dirs)
+}
+
 // LoadPlugin parses a plugin TOML file.
 func LoadPlugin(path string) (PluginConfig, error) {
 	var plugin PluginConfig
@@ -79,6 +91,22 @@ func LoadAgent(path string) (AgentConfig, error) {
 		return agent, err
 	}
 	return agent, nil
+}
+
+// LoadSkill parses and validates a registered Agent Skill.
+func LoadSkill(path string) (SkillConfig, error) {
+	var skill SkillConfig
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return skill, err
+	}
+	if err := toml.Unmarshal(data, &skill); err != nil {
+		return skill, err
+	}
+	if err := skill.Validate(); err != nil {
+		return skill, err
+	}
+	return skill, nil
 }
 
 // FilterPlugins returns the list of plugins to enable based on config settings.
@@ -140,6 +168,7 @@ func MergePlugins(cfg *ProjectConfig, discovered map[string]string, enabled []st
 		if nix := strings.TrimSpace(plugin.Nix); nix != "" {
 			cfg.NixExprs = append(cfg.NixExprs, nix)
 		}
+		cfg.SkillNames = append(cfg.SkillNames, plugin.Skills...)
 
 		// Merge upstream
 		if cfg.Upstream == nil {
@@ -181,6 +210,10 @@ func MergeAgent(cfg *ProjectConfig, agent AgentConfig, projectDir string) {
 	if agent.Entrypoint != "" {
 		cfg.Entrypoint = agent.Entrypoint
 	}
+	if agent.SkillDir != "" {
+		cfg.SkillDir = agent.SkillDir
+	}
+	cfg.SkillNames = append(cfg.SkillNames, agent.Skills...)
 
 	// Collect Nix package sets
 	agent.NixPackageSets = make(map[string]map[string]bool)

@@ -5,6 +5,11 @@ name = "claude"
 description = "Claude Code AI assistant"
 entrypoint = "claude --permission-mode bypassPermissions --dangerously-skip-permissions"
 plugins = ["python", "nodejs", "go", "rust", "cli-tools", "build-tools", "github"]
+skill_dir = ".claude/skills"
+
+[[env]]
+name = "CLAUDE_CODE_DISABLE_AUTO_MEMORY"
+value = "1"
 
 [packages]
 claude-code = true

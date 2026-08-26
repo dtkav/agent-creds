@@ -183,7 +183,6 @@ func envHash(cfg ProjectConfig, scriptDir string) string {
 	if data, err := os.ReadFile(filepath.Join(scriptDir, "flake.nix")); err == nil {
 		h.Write(data)
 	}
-
 	// Hash agent name
 	h.Write([]byte(cfg.Sandbox.Agent))
 
@@ -191,6 +190,11 @@ func envHash(cfg ProjectConfig, scriptDir string) string {
 	// package composition itself (for example, Python withPackages semantics),
 	// even when the declarative package names did not change.
 	h.Write([]byte(renderPackagesNix(cfg)))
+
+	// Skill sources and the final harness-specific installation are separate
+	// generated Nix expressions in the same sandbox environment.
+	h.Write([]byte(renderSkillsNix(cfg)))
+	h.Write([]byte(renderHarnessNix(cfg)))
 
 	// Hash Nix package sets (sorted for determinism)
 	for prefix, pkgSet := range cfg.NixPackageSets {
@@ -252,6 +256,9 @@ func cachedSandboxEnv(cfg ProjectConfig, scriptDir string) (string, bool) {
 	}
 	envPath := strings.TrimSpace(string(data))
 	if envPath == "" || !sandboxEnvAvailable(envPath) {
+		return "", false
+	}
+	if !sandboxSkillsAvailable(cfg, envPath) {
 		return "", false
 	}
 	return envPath, true
@@ -329,12 +336,20 @@ func ensureSandboxEnv(cfg ProjectConfig, scriptDir string, spinner *Spinner) (st
 		return envPath, nil
 	}
 
-	spinner.Status("generating packages.nix...")
+	spinner.Status("generating sandbox Nix expressions...")
 
 	// Generate packages.nix
 	outputPath := filepath.Join(scriptDir, "generated", "packages.nix")
 	if err := GeneratePackagesNix(cfg, outputPath); err != nil {
 		return "", fmt.Errorf("generating packages.nix: %w", err)
+	}
+	skillsPath := filepath.Join(scriptDir, "generated", "skills.nix")
+	if err := GenerateSkillsNix(cfg, skillsPath); err != nil {
+		return "", fmt.Errorf("generating skills.nix: %w", err)
+	}
+	harnessPath := filepath.Join(scriptDir, "generated", "harness.nix")
+	if err := GenerateHarnessNix(cfg, harnessPath); err != nil {
+		return "", fmt.Errorf("generating harness.nix: %w", err)
 	}
 
 	spinner.Status("building sandbox env (this may take a while on first run)...")
@@ -360,6 +375,9 @@ func ensureSandboxEnv(cfg ProjectConfig, scriptDir string, spinner *Spinner) (st
 	}
 	if _, err := sandboxEnvClosureMounts(envPath); err != nil {
 		return "", fmt.Errorf("sandbox env store was not exported: %w", err)
+	}
+	if !sandboxSkillsAvailable(cfg, envPath) {
+		return "", fmt.Errorf("sandbox harness skill layer was not exported")
 	}
 
 	if err := saveEnvHash(cfg, scriptDir, envPath); err != nil {

@@ -5,6 +5,7 @@ name = "pi"
 description = "Pi multi-provider coding agent"
 entrypoint = "pi"
 plugins = ["python", "nodejs", "go", "rust", "cli-tools", "build-tools", "github", "openrouter"]
+skill_dir = ".pi/agent/skills"
 
 nix = """
 let

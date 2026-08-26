@@ -934,9 +934,44 @@ registerCredentialProvider({
 	}
 }
 
+func TestExecRunCanPassStandardInput(t *testing.T) {
+	directory := t.TempDir()
+	writeScript(t, directory, "exec.provider.js", fmt.Sprintf(`
+registerCredentialProvider({
+  name: "exec",
+  credentialType: "exec-test",
+  resolve: function () {
+    var output = $exec.run(%q, ["-test.run=TestExecRunHelperProcess", "--"], {
+      inheritEnv: false,
+      env: {AGENT_CREDS_EXEC_HELPER: "1"},
+      stdin: "secret on standard input"
+    });
+    return {headers: {"x-exec-output": output}};
+  }
+});
+`, os.Args[0]))
+
+	manager, err := NewManager([]string{directory}, 1, []Spec{{
+		Name: "configured",
+		Type: "exec-test",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	configured := manager.Provider(Spec{Name: "configured", Type: "exec-test"})
+	got := resolveForTest(t, configured, provider.Request{}).Headers["x-exec-output"]
+	if got != "stdin=secret on standard input" {
+		t.Fatalf("standard input = %q", got)
+	}
+}
+
 func TestExecRunHelperProcess(t *testing.T) {
 	if os.Getenv("AGENT_CREDS_EXEC_HELPER") != "1" {
 		return
+	}
+	if input, err := io.ReadAll(os.Stdin); err == nil && len(input) > 0 {
+		fmt.Printf("stdin=%s", input)
+		os.Exit(0)
 	}
 	fmt.Printf("explicit=%s;parent=%s", os.Getenv("AGENT_CREDS_EXEC_EXPLICIT"), os.Getenv("AGENT_CREDS_EXEC_PARENT"))
 	os.Exit(0)

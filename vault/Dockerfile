@@ -8,6 +8,16 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 
+# Deployment overlays may supply standalone Go helper modules beside provider scripts.
+# Build each helper into a private runtime directory without teaching the
+# public image about any provider-specific implementation.
+RUN mkdir -p /provider-bin && \
+    for helper in providers.d/*.helper; do \
+      [ -d "$helper" ] || continue; \
+      name="$(basename "$helper" .helper)"; \
+      (cd "$helper" && CGO_ENABLED=0 go build -mod=readonly -o "/provider-bin/$name" .); \
+    done
+
 # Build with CGO enabled for sqlite3
 RUN CGO_ENABLED=1 go build -o vault .
 RUN CGO_ENABLED=1 go build -o mint ./cmd/mint
@@ -25,11 +35,12 @@ COPY --from=builder /app/mintfs .
 COPY --from=builder /app/vault-admin .
 COPY --from=builder /app/vault-ssh .
 COPY --from=builder /app/vaultctl .
+COPY --from=builder /provider-bin/ /app/provider-bin/
 COPY entrypoint.sh .
 
 # Provider search paths always exist even when the public image ships without
 # service-specific adapters. Compose mounts deployment extensions separately.
-RUN mkdir -p /data /app/providers /app/providers.d
+RUN mkdir -p /data /app/providers /app/providers.d /app/provider-bin
 
 # wish generates an Ed25519 keypair here on first start. /data is persistent.
 ENV SSH_HOST_KEY=/data/vault_host_key

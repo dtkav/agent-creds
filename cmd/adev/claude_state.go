@@ -31,7 +31,10 @@ func prepareClaudeProjectState(
 	// clone them from another identity into a new sandbox.
 	delete(shared, "projects")
 
-	instancePath := filepath.Join(instanceGenDir, "home", ".claude.json")
+	instancePath, err := migrateLegacyClaudeProjectState(scriptDir, instanceGenDir)
+	if err != nil {
+		return "", err
+	}
 	instance := map[string]any{}
 	if data, err := os.ReadFile(instancePath); err == nil {
 		if len(bytes.TrimSpace(data)) > 0 {
@@ -83,6 +86,50 @@ func prepareClaudeProjectState(
 	}
 	if err := os.Rename(temporary, instancePath); err != nil {
 		return "", fmt.Errorf("publishing instance Claude project state: %w", err)
+	}
+	return instancePath, nil
+}
+
+func claudeProjectStatePath(scriptDir, instanceGenDir string) string {
+	return filepath.Join(
+		scriptDir, "claude-dev", "instance-state",
+		filepath.Base(instanceGenDir), "claude.json",
+	)
+}
+
+// migrateLegacyClaudeProjectState removes Claude's per-instance project state
+// from the generic bwrap home while preserving it at its agent-scoped path.
+// The legacy location was briefly written for every agent, which made that
+// state visible even after the unconditional Claude bind was removed.
+func migrateLegacyClaudeProjectState(scriptDir, instanceGenDir string) (string, error) {
+	instancePath := claudeProjectStatePath(scriptDir, instanceGenDir)
+	legacyPath := filepath.Join(instanceGenDir, "home", ".claude.json")
+	if _, err := os.Lstat(legacyPath); os.IsNotExist(err) {
+		return instancePath, nil
+	} else if err != nil {
+		return "", fmt.Errorf("checking legacy Claude project state: %w", err)
+	}
+	if _, err := os.Lstat(instancePath); err == nil {
+		legacy, statErr := os.Stat(legacyPath)
+		if statErr == nil && legacy.Mode().IsRegular() && legacy.Size() == 0 {
+			if err := os.Remove(legacyPath); err != nil {
+				return "", fmt.Errorf(
+					"removing empty legacy Claude state placeholder: %w", err)
+			}
+			return instancePath, nil
+		}
+		return "", fmt.Errorf(
+			"both legacy and agent-scoped Claude project state exist: %s and %s",
+			legacyPath, instancePath,
+		)
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("checking agent-scoped Claude project state: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(instancePath), 0700); err != nil {
+		return "", fmt.Errorf("creating agent-scoped Claude state directory: %w", err)
+	}
+	if err := os.Rename(legacyPath, instancePath); err != nil {
+		return "", fmt.Errorf("migrating legacy Claude project state: %w", err)
 	}
 	return instancePath, nil
 }

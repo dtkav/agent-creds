@@ -9,7 +9,7 @@ mkdir -p "$workspace_dir"
 # generated/ contains live runtime state (including Unix sockets, logs, and
 # credentials) that is neither a valid Nix flake input nor needed to build the
 # sandbox environment. Preserve dirty source files, but exclude Git metadata
-# and copy only the generated package expression consumed by flake.nix.
+# and copy only the generated package expression consumed by the base flake.
 find "$source_dir" -mindepth 1 -maxdepth 1 \
     ! -name .git \
     ! -name generated \

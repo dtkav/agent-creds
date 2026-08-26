@@ -418,13 +418,16 @@ const assertion = $exec.run(
       HOME: "/tmp",
       SERVICE_ACCESS_TOKEN: config.access_token,
     },
+    stdin: JSON.stringify({challenge: config.challenge}),
   },
 );
 ```
 
 Arguments and environment values must be strings. `inheritEnv` defaults to
-`true`; `env` adds or overrides variables. With `inheritEnv: false`, the child
-receives only the supplied `env`. Unknown option names are rejected.
+`true`; `env` adds or overrides variables. `stdin` supplies a string directly
+to the child's standard input, which keeps secret material out of argv and the
+child environment. With `inheritEnv: false`, the child receives only the
+supplied `env`. Unknown option names are rejected.
 
 Standard output is limited to 4 MiB and standard error to 64 KiB. A non-zero
 exit raises an exception and includes captured standard error. Use an absolute

@@ -7,6 +7,8 @@ name = "myproject"
 # runtime = "bwrap"  # or "gvisor" / "runc"
 # Bundled agents: "claude", "codex", or "pi"
 # agent = "claude"
+# Named registrations from bundled, global, or project skills/*.toml
+# skills = ["observability-query", "service-admin"]
 
 # Browser forwarding: allow sandbox to open URLs in host browser
 # use_host_browser = true  # default
@@ -25,6 +27,7 @@ name = "myproject"
 
 [upstream."api.stripe.com"]
 # credential = "/stripe/prod"
+# credential_file = "stripe"       # projected at /run/credentials/stripe; mutually exclusive with env
 # policy = "/stripe/write"
 # methods = ["GET", "POST"]       # restrict to specific HTTP methods
 # paths = ["/v1/customers/*"]     # restrict to specific path patterns (* = segment, ** = multi-segment)

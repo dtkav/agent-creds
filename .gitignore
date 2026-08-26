@@ -39,6 +39,7 @@ agent-creds.toml
 claude-dev/claude-config/
 claude-dev/codex-config/
 claude-dev/pi-config/
+claude-dev/instance-state/
 
 # Local sandbox customizations
 local/

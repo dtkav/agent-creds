@@ -21,5 +21,8 @@ func TestBundledAgentsLoad(t *testing.T) {
 		if agent.Name != name {
 			t.Fatalf("agent %q loaded with name %q", name, agent.Name)
 		}
+		if agent.SkillDir == "" {
+			t.Fatalf("agent %q does not declare its native skill directory", name)
+		}
 	}
 }

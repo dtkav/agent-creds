@@ -5,6 +5,7 @@ name = "codex"
 description = "OpenAI Codex CLI coding agent"
 entrypoint = "codex --dangerously-bypass-approvals-and-sandbox"
 plugins = ["python", "nodejs", "go", "rust", "cli-tools", "build-tools", "github"]
+skill_dir = ".codex/skills"
 
 nix = """
 let

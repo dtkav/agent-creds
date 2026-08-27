@@ -16,9 +16,7 @@ const (
 	controlReloadPath         = "/v1/config/reload"
 	controlCredentialsPath    = "/v1/credentials"
 	controlCredentialInfoPath = "/v1/credentials/info"
-	controlAuthorizationPath  = "/v1/credentials/authorization"
 	maxReloadConfigBytes      = 4 << 20
-	maxAuthorizationBytes     = 64 << 10
 )
 
 type credentialEndpointInfo struct {
@@ -28,15 +26,15 @@ type credentialEndpointInfo struct {
 }
 
 type credentialInfoResponse struct {
-	Type          string                       `json:"type"`
-	EnvVars       []string                     `json:"env_vars,omitempty"`
-	Hosts         []string                     `json:"hosts,omitempty"`
-	Endpoints     []credentialEndpointInfo     `json:"endpoints,omitempty"`
-	Constraints   []credentialConstraintInfo   `json:"constraints,omitempty"`
-	Authorization *credentialAuthorizationInfo `json:"authorization,omitempty"`
+	Type        string                     `json:"type"`
+	EnvVars     []string                   `json:"env_vars,omitempty"`
+	Hosts       []string                   `json:"hosts,omitempty"`
+	Endpoints   []credentialEndpointInfo   `json:"endpoints,omitempty"`
+	Constraints []credentialConstraintInfo `json:"constraints,omitempty"`
+	Caveat      *credentialCaveatInfo      `json:"caveat,omitempty"`
 }
 
-type credentialAuthorizationInfo struct {
+type credentialCaveatInfo struct {
 	Namespace string         `json:"namespace"`
 	Schema    map[string]any `json:"schema"`
 }
@@ -119,46 +117,6 @@ func newControlHandler(store *runtimeStore) http.Handler {
 		}
 		writeControlJSON(w, http.StatusOK, info)
 	})
-	mux.HandleFunc("POST "+controlAuthorizationPath, func(w http.ResponseWriter, r *http.Request) {
-		var request struct {
-			Credential string         `json:"credential"`
-			Constraint map[string]any `json:"constraint"`
-		}
-		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAuthorizationBytes))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&request); err != nil {
-			writeControlError(w, http.StatusBadRequest, fmt.Sprintf("decoding authorization: %v", err))
-			return
-		}
-		path := strings.TrimPrefix(strings.TrimSpace(request.Credential), "/")
-		if path == "" {
-			writeControlError(w, http.StatusBadRequest, "credential path is required")
-			return
-		}
-		snapshot := store.Load()
-		if snapshot == nil {
-			writeControlError(w, http.StatusServiceUnavailable, "vault runtime is not initialized")
-			return
-		}
-		configured, ok := snapshot.credentials[path]
-		if !ok {
-			writeControlError(w, http.StatusNotFound, fmt.Sprintf("unknown credential path: /%s", path))
-			return
-		}
-		validator, ok := configured.macaroon.(credentialConstraintValidator)
-		if !ok {
-			writeControlError(w, http.StatusBadRequest, fmt.Sprintf("credential /%s does not accept provider authorization constraints", path))
-			return
-		}
-		if err := validator.ValidateConstraint(r.Context(), request.Constraint); err != nil {
-			writeControlError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		writeControlJSON(w, http.StatusOK, credentialConstraintInfo{
-			Namespace:  configured.macaroon.Namespace(),
-			Constraint: request.Constraint,
-		})
-	})
 	return mux
 }
 
@@ -190,13 +148,13 @@ func credentialInfo(ctx context.Context, credential vaultcfg.CredentialConfig, c
 				Constraint: constraint.Body,
 			})
 		}
-		if validator, ok := configured.macaroon.(credentialConstraintValidator); ok {
-			schema, err := validator.ConstraintSchema(ctx)
+		if metadata, ok := configured.macaroon.(credentialCaveatMetadata); ok {
+			schema, err := metadata.ConstraintSchema(ctx)
 			if err != nil {
 				return credentialInfoResponse{}, err
 			}
 			if schema != nil {
-				response.Authorization = &credentialAuthorizationInfo{
+				response.Caveat = &credentialCaveatInfo{
 					Namespace: configured.macaroon.Namespace(),
 					Schema:    schema,
 				}

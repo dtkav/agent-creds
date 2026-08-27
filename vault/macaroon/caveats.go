@@ -10,14 +10,13 @@ import (
 
 // Caveat type constants (using user-registerable range: 1<<32 to 1<<48-1)
 const (
-	CavAPIHost               macaroon.CaveatType = 1<<32 + 1
-	CavAPIMethod             macaroon.CaveatType = 1<<32 + 2
-	CavAPIPath               macaroon.CaveatType = 1<<32 + 3
-	CavAttestation           macaroon.CaveatType = 1<<32 + 4
-	CavApplication           macaroon.CaveatType = 1<<32 + 6
-	CavAuthorizationRequest  macaroon.CaveatType = 1<<32 + 7
-	CavApplicationRequired   macaroon.CaveatType = 1<<32 + 8
-	CavAuthorizedApplication macaroon.CaveatType = 1<<32 + 9
+	CavAPIHost                macaroon.CaveatType = 1<<32 + 1
+	CavAPIMethod              macaroon.CaveatType = 1<<32 + 2
+	CavAPIPath                macaroon.CaveatType = 1<<32 + 3
+	CavAttestation            macaroon.CaveatType = 1<<32 + 4
+	CavApplication            macaroon.CaveatType = 1<<32 + 6
+	CavApplicationRequired    macaroon.CaveatType = 1<<32 + 8
+	CavApplicationAttestation macaroon.CaveatType = 1<<32 + 9
 )
 
 func init() {
@@ -25,9 +24,8 @@ func init() {
 	macaroon.RegisterCaveatType(&MethodCaveat{})
 	macaroon.RegisterCaveatType(&PathCaveat{})
 	macaroon.RegisterCaveatType(&ApplicationConstraint{})
-	macaroon.RegisterCaveatType(&AuthorizationRequest{})
-	macaroon.RegisterCaveatType(&ApplicationConstraintRequirement{})
-	macaroon.RegisterCaveatType(&AuthorizedApplicationConstraint{})
+	macaroon.RegisterCaveatType(&ApplicationAttestationRequirement{})
+	macaroon.RegisterCaveatType(&ApplicationAttestation{})
 }
 
 // HostCaveat restricts token to specific API hosts

@@ -48,9 +48,8 @@ type credentialMacaroon interface {
 	Constraint(context.Context) (*policy.Constraint, error)
 }
 
-type credentialConstraintValidator interface {
+type credentialCaveatMetadata interface {
 	ConstraintSchema(context.Context) (map[string]any, error)
-	ValidateConstraint(context.Context, map[string]any) error
 }
 
 type authServer struct {
@@ -234,6 +233,32 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 	}
 
 	if !hasConfiguredCredential {
+		if routePolicy != "" {
+			decision, policyErr := s.authorizePoliciesWithRuntime(runtime, ctx, result, access, body, bodyPartial, nil, true, routePolicy)
+			if policyErr != nil {
+				reason := fmt.Sprintf("upstream policy failed: %v", policyErr)
+				log.Printf("%s", reason)
+				s.logAudit("deny", access.Method, host, access.Path, reason, tokenID)
+				return policyErrorResponse(), nil
+			}
+			if !decision.Allow {
+				log.Printf("Upstream policy denied %s %s: %s", access.Method, host, decision.Reason)
+				s.logAudit("deny", access.Method, host, access.Path, decision.Reason, tokenID)
+				return policyDeniedResponse(decision.Reason), nil
+			}
+
+			// Policy-only routes authenticate and authorize the caller without
+			// selecting a credential provider. Returning no header mutations
+			// leaves the caller's macaroon available to the upstream service.
+			log.Printf("Auth successful for policy-only route %s %s %s", access.Method, host, access.Path)
+			s.logAudit("allow", access.Method, host, access.Path, "", tokenID)
+			return &authv3.CheckResponse{
+				Status: &status.Status{Code: int32(codes.OK)},
+				HttpResponse: &authv3.CheckResponse_OkResponse{
+					OkResponse: &authv3.OkHttpResponse{},
+				},
+			}, nil
+		}
 		log.Printf("Auth failed: no credentials configured for %s", host)
 		s.logAudit("deny", access.Method, host, access.Path, "no credentials configured for host", tokenID)
 		return &authv3.CheckResponse{
@@ -332,11 +357,14 @@ func (s *authServer) authorizePoliciesWithRuntime(
 ) (policy.Decision, error) {
 	constraints := make([]policy.Constraint, 0, len(verified.ApplicationConstraints))
 	for _, caveat := range verified.ApplicationConstraints {
-		constraints = append(constraints, policy.Constraint{
-			Namespace:  caveat.Namespace,
-			Body:       caveat.Constraint,
-			Authorized: caveat.Authorized,
-		})
+		constraint := policy.Constraint{
+			Namespace: caveat.Namespace,
+			Body:      caveat.Constraint,
+		}
+		if caveat.ThirdParty != nil {
+			constraint.ThirdParty = &policy.ThirdParty{Location: caveat.ThirdParty.Location}
+		}
+		constraints = append(constraints, constraint)
 	}
 	remainingConstraints := constraints
 	request := policy.Request{

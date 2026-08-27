@@ -10,7 +10,13 @@ import (
 type Constraint struct {
 	Namespace  string         `json:"namespace"`
 	Body       map[string]any `json:"body"`
-	Authorized bool           `json:"authorized"`
+	ThirdParty *ThirdParty    `json:"thirdParty,omitempty"`
+}
+
+// ThirdParty identifies the trusted proof discharge that asserted a
+// constraint. It is nil for an ordinary bearer-attenuable constraint.
+type ThirdParty struct {
+	Location string `json:"location"`
 }
 
 // Request is the verified request context presented to an upstream policy.

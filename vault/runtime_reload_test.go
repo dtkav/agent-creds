@@ -220,7 +220,7 @@ func TestCredentialInfoIncludesPluginDerivedMacaroonConstraint(t *testing.T) {
 	}
 }
 
-func TestControlValidatesCredentialAuthorization(t *testing.T) {
+func TestCredentialInfoIncludesPluginCaveatMetadata(t *testing.T) {
 	store := newTestRuntimeStore(t, testRuntimeConfig("service/scoped", "secret-token"))
 	snapshot := store.Load()
 	credential := snapshot.credentials["service/scoped"]
@@ -242,23 +242,11 @@ func TestControlValidatesCredentialAuthorization(t *testing.T) {
 		t.Fatalf("credential info = %d %s", info.Code, info.Body.String())
 	}
 
-	valid := httptest.NewRecorder()
-	handler.ServeHTTP(valid, httptest.NewRequest(
-		http.MethodPost,
-		controlAuthorizationPath,
-		strings.NewReader(`{"credential":"/service/scoped","constraint":{"branches":["work"]}}`),
-	))
-	if valid.Code != http.StatusOK || !strings.Contains(valid.Body.String(), `"namespace":"example"`) {
-		t.Fatalf("valid authorization = %d %s", valid.Code, valid.Body.String())
+	var metadata credentialInfoResponse
+	if err := json.Unmarshal(info.Body.Bytes(), &metadata); err != nil {
+		t.Fatal(err)
 	}
-
-	invalid := httptest.NewRecorder()
-	handler.ServeHTTP(invalid, httptest.NewRequest(
-		http.MethodPost,
-		controlAuthorizationPath,
-		strings.NewReader(`{"credential":"/service/scoped","constraint":{}}`),
-	))
-	if invalid.Code != http.StatusBadRequest || !strings.Contains(invalid.Body.String(), "branches is required") {
-		t.Fatalf("invalid authorization = %d %s", invalid.Code, invalid.Body.String())
+	if metadata.Caveat == nil || metadata.Caveat.Namespace != "example" {
+		t.Fatalf("caveat metadata = %#v", metadata.Caveat)
 	}
 }

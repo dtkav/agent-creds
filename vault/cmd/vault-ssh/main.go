@@ -93,11 +93,11 @@ func handleCommand(sess ssh.Session, userID []byte, fingerprint, status string, 
 	case "whoami":
 		cmdWhoami(sess, fingerprint, status)
 	case "mint":
-		cmdMint(sess, userID, status, cmdArgs)
+		cmdMint(sess, status, cmdArgs)
 	case "keys":
 		cmdKeys(sess, userID, cmdArgs)
 	case "discharge":
-		cmdDischarge(sess, userID, status, cmdArgs)
+		cmdDischarge(sess, status, cmdArgs)
 	case "info":
 		cmdInfo(sess, status, cmdArgs)
 	case "list":
@@ -117,15 +117,16 @@ Commands:
   help              Show this help
   whoami            Show your identity and status
   mint <host>       Mint a token for the given host
-    --no-host              Omit host caveat (admin only; for isolated support sessions)
+    --no-host              Omit host caveat (admin only; for reverification across routed hosts)
     --credential           Include default caveats derived from a credential path
     --methods              Restrict HTTP methods (e.g., GET,POST)
     --paths                Restrict paths (e.g., /v1/*)
     --valid-for            Token validity (e.g., 1h, 24h)
-    --require-attestation  Require SSH attestation for discharge
-    --require-authorization Require a provider constraint in the discharge
-  discharge <token> [--constraint <base64url-json>]
-                    Discharge an SSH attestation or authorization caveat
+    --require-attestation  Require a proof from the SSH third party
+    --require-application-attestation <namespace>
+                          Require that proof to attest a namespace
+  discharge <token> [--attestation <namespace>=<base64url-json>]...
+                    Discharge the SSH caveat with arbitrary attestations
   list              List configured credential paths
   info <cred-path>  Show credential info (type, env vars, hosts)
   keys              List your SSH keys
@@ -144,14 +145,14 @@ func cmdWhoami(sess ssh.Session, fingerprint, status string) {
 	fmt.Fprintf(sess, "Status: %s\n", status)
 }
 
-func cmdMint(sess ssh.Session, userID []byte, status string, args []string) {
+func cmdMint(sess ssh.Session, status string, args []string) {
 	if status == UserStatusPending {
 		fmt.Fprintln(sess, "Error: Your account is pending approval.")
 		return
 	}
 
 	if len(args) == 0 {
-		fmt.Fprintln(sess, "Usage: mint <host> [--credential /path] [--no-host] [--methods GET,POST] [--paths /v1/*] [--constraint namespace=JSON] [--valid-for 1h]")
+		fmt.Fprintln(sess, "Usage: mint <host> [--credential /path] [--no-host] [--methods GET,POST] [--paths /v1/*] [--constraint namespace=JSON] [--require-attestation] [--require-application-attestation namespace] [--valid-for 1h]")
 		hosts := configuredCredentialHosts(vaultConfig)
 		if len(hosts) > 0 {
 			fmt.Fprintln(sess, "\nHosts declared by credential capabilities:")
@@ -168,18 +169,23 @@ func cmdMint(sess ssh.Session, userID []byte, status string, args []string) {
 	// Parse optional flags
 	var methods, paths, constraintSpecs []string
 	var configuredConstraints []credentialConstraintInfo
-	var credentialPath string
+	var credentialPath, requiredAttestationNamespace string
 	validFor := 24 * time.Hour
 	requireAttestation := false
-	requireAuthorization := false
 	noHost := false
 
 	for i := 1; i < len(args); i++ {
 		switch args[i] {
 		case "--require-attestation":
 			requireAttestation = true
-		case "--require-authorization":
-			requireAuthorization = true
+		case "--require-application-attestation":
+			if i+1 >= len(args) {
+				fmt.Fprintln(sess, "Error: --require-application-attestation requires a namespace")
+				return
+			}
+			requiredAttestationNamespace = args[i+1]
+			requireAttestation = true
+			i++
 		case "--no-host":
 			noHost = true
 		case "--credential":
@@ -227,27 +233,10 @@ func cmdMint(sess ssh.Session, userID []byte, status string, args []string) {
 		}
 	}
 
-	if requireAttestation && requireAuthorization {
-		fmt.Fprintln(sess, "Error: --require-attestation and --require-authorization are mutually exclusive")
-		return
-	}
 	// Check encryption key if a third-party discharge is required.
-	if (requireAttestation || requireAuthorization) && len(keyStore.EncryptionKey) == 0 {
-		fmt.Fprintln(sess, "Error: third-party authorization requires MACAROON_ENCRYPTION_KEY to be configured")
+	if requireAttestation && len(keyStore.EncryptionKey) == 0 {
+		fmt.Fprintln(sess, "Error: third-party caveat requires MACAROON_ENCRYPTION_KEY to be configured")
 		return
-	}
-	var authorizationInfo *credentialAuthorizationInfo
-	if requireAuthorization {
-		if credentialPath == "" {
-			fmt.Fprintln(sess, "Error: --require-authorization requires --credential")
-			return
-		}
-		var err error
-		authorizationInfo, err = fetchCredentialAuthorizationInfo(credentialPath)
-		if err != nil {
-			fmt.Fprintf(sess, "Error: reading credential authorization schema: %v\n", err)
-			return
-		}
 	}
 
 	// Create token
@@ -257,23 +246,25 @@ func cmdMint(sess ssh.Session, userID []byte, status string, args []string) {
 		return
 	}
 
-	if requireAuthorization {
-		if err := attestation.Add3PAuthorization(
-			m,
-			keyStore.EncryptionKey,
-			tfmac.SSHAuthorizationLocation,
-			credentialPath,
-			authorizationInfo.Namespace,
-			base64.RawURLEncoding.EncodeToString(userID),
-		); err != nil {
-			fmt.Fprintf(sess, "Error adding authorization caveat: %v\n", err)
-			return
-		}
-	} else if requireAttestation {
+	if requireAttestation {
 		// Add 3P caveat at SSH attestation location instead of validity window
-		if err := attestation.Add3PCaveatWithLocation(m, keyStore.EncryptionKey, tfmac.SSHAttestationLocation); err != nil {
+		if err := attestation.Add3PChallengeWithLocation(m, keyStore.EncryptionKey, tfmac.SSHAttestationLocation); err != nil {
 			fmt.Fprintf(sess, "Error adding attestation caveat: %v\n", err)
 			return
+		}
+		if requiredAttestationNamespace != "" {
+			requirement := &tfmac.ApplicationAttestationRequirement{
+				Namespace: requiredAttestationNamespace,
+				Location:  tfmac.SSHAttestationLocation,
+			}
+			if err := requirement.Prohibits(nil); err != nil {
+				fmt.Fprintf(sess, "Error: %v\n", err)
+				return
+			}
+			if err := m.Add(requirement); err != nil {
+				fmt.Fprintf(sess, "Error adding application attestation requirement: %v\n", err)
+				return
+			}
 		}
 	} else {
 		// Add validity window
@@ -355,25 +346,25 @@ func cmdMint(sess ssh.Session, userID []byte, status string, args []string) {
 	fmt.Fprintln(sess, token)
 }
 
-func cmdDischarge(sess ssh.Session, userID []byte, status string, args []string) {
+func cmdDischarge(sess ssh.Session, status string, args []string) {
 	if status == UserStatusPending {
 		fmt.Fprintln(sess, "Error: Your account is pending approval.")
 		return
 	}
 
 	if len(args) == 0 {
-		fmt.Fprintln(sess, "Usage: discharge <token> [--constraint <base64url-json>]")
+		fmt.Fprintln(sess, "Usage: discharge <token> [--attestation <namespace>=<base64url-json>]...")
 		return
 	}
-	var encodedConstraint string
+	var attestationSpecs []string
 	for i := 1; i < len(args); i++ {
 		switch args[i] {
-		case "--constraint":
+		case "--attestation":
 			if i+1 >= len(args) {
-				fmt.Fprintln(sess, "Error: --constraint requires base64url-encoded JSON")
+				fmt.Fprintln(sess, "Error: --attestation requires namespace=base64url-json")
 				return
 			}
-			encodedConstraint = args[i+1]
+			attestationSpecs = append(attestationSpecs, args[i+1])
 			i++
 		default:
 			fmt.Fprintf(sess, "Error: unknown discharge option %q\n", args[i])
@@ -393,28 +384,18 @@ func cmdDischarge(sess ssh.Session, userID []byte, status string, args []string)
 		return
 	}
 
-	// Prefer a provider authorization caveat, falling back to the existing
-	// presence-only SSH attestation flow.
+	// This endpoint discharges only the SSH third-party location. Other
+	// locations own their ticket validation and proof construction.
 	var found *macaroon.Caveat3P
 	for _, c := range m.UnsafeCaveats.Caveats {
-		if tp, ok := c.(*macaroon.Caveat3P); ok {
-			if tp.Location == tfmac.SSHAuthorizationLocation {
-				found = tp
-				break
-			}
-		}
-	}
-	if found == nil {
-		for _, c := range m.UnsafeCaveats.Caveats {
-			if tp, ok := c.(*macaroon.Caveat3P); ok && tp.Location == tfmac.SSHAttestationLocation {
-				found = tp
-				break
-			}
+		if tp, ok := c.(*macaroon.Caveat3P); ok && tp.Location == tfmac.SSHAttestationLocation {
+			found = tp
+			break
 		}
 	}
 
 	if found == nil {
-		fmt.Fprintln(sess, "Error: token has no SSH authorization or attestation caveat")
+		fmt.Fprintln(sess, "Error: token has no caveat for the SSH third party")
 		return
 	}
 
@@ -424,64 +405,41 @@ func cmdDischarge(sess ssh.Session, userID []byte, status string, args []string)
 		fmt.Fprintf(sess, "Error creating discharge: %v\n", err)
 		return
 	}
-	if found.Location == tfmac.SSHAuthorizationLocation {
-		if encodedConstraint == "" {
-			fmt.Fprintln(sess, "Error: authorization discharge requires --constraint")
+	if len(ticketCaveats) != 1 {
+		fmt.Fprintln(sess, "Error: SSH ticket must contain exactly one challenge")
+		return
+	}
+	challenge, ok := ticketCaveats[0].(*attestation.AttestationCaveat)
+	if !ok || strings.TrimSpace(challenge.Nonce) == "" {
+		fmt.Fprintln(sess, "Error: SSH ticket contains an unsupported caveat set")
+		return
+	}
+
+	for _, spec := range attestationSpecs {
+		namespace, encoded, ok := strings.Cut(spec, "=")
+		if !ok {
+			fmt.Fprintf(sess, "Error: attestation %q must use namespace=base64url-json\n", spec)
 			return
 		}
-		var request *tfmac.AuthorizationRequest
-		for _, caveat := range ticketCaveats {
-			if candidate, ok := caveat.(*tfmac.AuthorizationRequest); ok {
-				if request != nil {
-					fmt.Fprintln(sess, "Error: authorization ticket contains multiple requests")
-					return
-				}
-				request = candidate
-			}
-		}
-		if request == nil {
-			fmt.Fprintln(sess, "Error: authorization ticket contains no request")
-			return
-		}
-		if err := tfmac.ValidateAuthorizationRequest(request.Credential, request.Namespace, request.Authorizer); err != nil {
-			fmt.Fprintf(sess, "Error: invalid authorization ticket: %v\n", err)
-			return
-		}
-		if request.Authorizer != base64.RawURLEncoding.EncodeToString(userID) {
-			fmt.Fprintln(sess, "Error: authorization must be discharged by the identity that minted it")
-			return
-		}
-		constraintJSON, err := base64.RawURLEncoding.DecodeString(encodedConstraint)
+		bodyJSON, err := base64.RawURLEncoding.DecodeString(encoded)
 		if err != nil {
-			fmt.Fprintf(sess, "Error: decoding authorization constraint: %v\n", err)
+			fmt.Fprintf(sess, "Error: decoding application attestation: %v\n", err)
 			return
 		}
 		var body map[string]any
-		if err := json.Unmarshal(constraintJSON, &body); err != nil {
-			fmt.Fprintf(sess, "Error: decoding authorization constraint JSON: %v\n", err)
+		if err := json.Unmarshal(bodyJSON, &body); err != nil {
+			fmt.Fprintf(sess, "Error: decoding application attestation JSON: %v\n", err)
 			return
 		}
-		validated, err := validateCredentialAuthorization(request.Credential, body)
+		applicationAttestation, err := tfmac.NewApplicationAttestation(namespace, body)
 		if err != nil {
-			fmt.Fprintf(sess, "Error: %v\n", err)
+			fmt.Fprintf(sess, "Error: invalid application attestation: %v\n", err)
 			return
 		}
-		if validated.Namespace != request.Namespace {
-			fmt.Fprintln(sess, "Error: credential authorization namespace changed after minting")
+		if err := discharge.Add(applicationAttestation); err != nil {
+			fmt.Fprintf(sess, "Error adding application attestation: %v\n", err)
 			return
 		}
-		constraint, err := tfmac.NewAuthorizedApplicationConstraint(validated.Namespace, validated.Constraint)
-		if err != nil {
-			fmt.Fprintf(sess, "Error: invalid provider authorization: %v\n", err)
-			return
-		}
-		if err := discharge.Add(constraint); err != nil {
-			fmt.Fprintf(sess, "Error adding provider authorization: %v\n", err)
-			return
-		}
-	} else if encodedConstraint != "" {
-		fmt.Fprintln(sess, "Error: attestation discharge does not accept --constraint")
-		return
 	}
 
 	// Add 1-hour validity window
@@ -576,11 +534,6 @@ type credentialConstraintInfo struct {
 	Constraint map[string]any `json:"constraint"`
 }
 
-type credentialAuthorizationInfo struct {
-	Namespace string         `json:"namespace"`
-	Schema    map[string]any `json:"schema"`
-}
-
 func fetchCredentialConstraints(credentialPath string) ([]credentialConstraintInfo, error) {
 	body, err := fetchCredentialInfo(credentialPath)
 	if err != nil {
@@ -598,45 +551,6 @@ func fetchCredentialConstraints(credentialPath string) ([]credentialConstraintIn
 		}
 	}
 	return info.Constraints, nil
-}
-
-func fetchCredentialAuthorizationInfo(credentialPath string) (*credentialAuthorizationInfo, error) {
-	body, err := fetchCredentialInfo(credentialPath)
-	if err != nil {
-		return nil, err
-	}
-	var info struct {
-		Authorization *credentialAuthorizationInfo `json:"authorization"`
-	}
-	if err := json.Unmarshal(body, &info); err != nil {
-		return nil, fmt.Errorf("decoding live Vault credential authorization: %w", err)
-	}
-	if info.Authorization == nil || info.Authorization.Namespace == "" || info.Authorization.Schema == nil {
-		return nil, fmt.Errorf("credential %s does not declare an authorization schema", credentialPath)
-	}
-	return info.Authorization, nil
-}
-
-func validateCredentialAuthorization(credentialPath string, constraint map[string]any) (credentialConstraintInfo, error) {
-	payload, err := json.Marshal(map[string]any{
-		"credential": credentialPath,
-		"constraint": constraint,
-	})
-	if err != nil {
-		return credentialConstraintInfo{}, fmt.Errorf("encoding credential authorization: %w", err)
-	}
-	body, err := requestControl(http.MethodPost, "/v1/credentials/authorization", nil, payload)
-	if err != nil {
-		return credentialConstraintInfo{}, fmt.Errorf("validating credential authorization: %w", err)
-	}
-	var validated credentialConstraintInfo
-	if err := json.Unmarshal(body, &validated); err != nil {
-		return credentialConstraintInfo{}, fmt.Errorf("decoding validated credential authorization: %w", err)
-	}
-	if err := tfmac.ValidateApplicationConstraint(validated.Namespace, validated.Constraint); err != nil {
-		return credentialConstraintInfo{}, err
-	}
-	return validated, nil
 }
 
 func fetchControl(path string, query url.Values) ([]byte, error) {

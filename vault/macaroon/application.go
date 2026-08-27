@@ -16,9 +16,6 @@ import (
 type ApplicationConstraint struct {
 	Namespace  string         `json:"namespace" msgpack:"namespace"`
 	Constraint map[string]any `json:"constraint" msgpack:"constraint"`
-	// Authorized is set by the verifier when the constraint came from a
-	// trusted third-party discharge. It is not part of the caveat wire format.
-	Authorized bool `json:"-" msgpack:"-"`
 }
 
 func (c *ApplicationConstraint) CaveatType() macaroon.CaveatType { return CavApplication }
@@ -60,6 +57,62 @@ func NewApplicationConstraint(namespace string, constraint map[string]any) (*App
 		return nil, err
 	}
 	return &ApplicationConstraint{Namespace: namespace, Constraint: constraint}, nil
+}
+
+// ApplicationAttestation is an arbitrary namespaced value asserted by a
+// trusted third party. The macaroon library permits attestations only in a
+// proof discharge, finalizes that proof on encoding, and excludes attestations
+// from discharges whose location is not trusted by the verifier.
+type ApplicationAttestation struct {
+	Namespace   string         `json:"namespace" msgpack:"namespace"`
+	Attestation map[string]any `json:"attestation" msgpack:"attestation"`
+}
+
+func (c *ApplicationAttestation) CaveatType() macaroon.CaveatType {
+	return CavApplicationAttestation
+}
+func (c *ApplicationAttestation) Name() string        { return "ApplicationAttestation" }
+func (c *ApplicationAttestation) IsAttestation() bool { return true }
+func (c *ApplicationAttestation) Prohibits(macaroon.Access) error {
+	return ValidateApplicationConstraint(c.Namespace, c.Attestation)
+}
+func (c *ApplicationAttestation) EncodeMsgpack(encoder *msgpack.Encoder) error {
+	return encodeApplicationConstraint(encoder, c.Namespace, c.Attestation)
+}
+func (c *ApplicationAttestation) DecodeMsgpack(decoder *msgpack.Decoder) error {
+	return decodeApplicationConstraint(decoder, &c.Namespace, &c.Attestation)
+}
+
+func NewApplicationAttestation(namespace string, body map[string]any) (*ApplicationAttestation, error) {
+	if err := ValidateApplicationConstraint(namespace, body); err != nil {
+		return nil, err
+	}
+	return &ApplicationAttestation{Namespace: namespace, Attestation: body}, nil
+}
+
+// ApplicationAttestationRequirement is an attenuating first-party caveat. It
+// requires at least one application attestation with the given namespace from
+// the named third-party location. It says nothing about the attestation body;
+// the selected credential or policy owns those semantics.
+type ApplicationAttestationRequirement struct {
+	Namespace string `json:"namespace" msgpack:"namespace"`
+	Location  string `json:"location" msgpack:"location"`
+}
+
+func (c *ApplicationAttestationRequirement) CaveatType() macaroon.CaveatType {
+	return CavApplicationRequired
+}
+func (c *ApplicationAttestationRequirement) Name() string {
+	return "ApplicationAttestationRequirement"
+}
+func (c *ApplicationAttestationRequirement) Prohibits(macaroon.Access) error {
+	if strings.TrimSpace(c.Namespace) != c.Namespace || c.Namespace == "" {
+		return fmt.Errorf("required application attestation namespace must be non-empty without surrounding whitespace")
+	}
+	if strings.TrimSpace(c.Location) != c.Location || c.Location == "" {
+		return fmt.Errorf("required third-party location must be non-empty without surrounding whitespace")
+	}
+	return nil
 }
 
 func encodeApplicationConstraint(encoder *msgpack.Encoder, namespace string, constraint map[string]any) error {

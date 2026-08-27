@@ -143,8 +143,8 @@ without requiring a separately configured upstream policy:
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `namespace` | yes | Non-empty application-constraint namespace owned by this credential type. |
-| `constraintSchema` | no | JSON Schema for provider fields accepted from named `[authorization.*]` policies. Required before the credential can use that configuration form. |
-| `validateConstraint(constraint)` | no | Additional semantic validation for a schema-valid authorization body. Throw to reject discharge issuance. |
+| `constraintSchema` | no | Public JSON Schema for this credential type's application attestations. Required before the credential can use named `[authorization.*]` configuration. |
+| `validateConstraint(constraint)` | no | Additional semantic validation for a schema-valid third-party application attestation. Throw to deny the request. |
 | `constraint(config)` | yes | Returns a JSON object to add to newly minted capabilities, or `null` for no default caveat. |
 | `authorize(request, config)` | yes | Authorizes every verified request using the credential. |
 
@@ -169,13 +169,18 @@ selected upstream policy. Changing a configured credential type's macaroon
 namespace requires a Vault configuration reload; provider-only hot reloads
 that change it are rejected.
 
-`constraintSchema` is public provider metadata. Vault validates an
-authorization body against it immediately before issuing the third-party
-discharge, then embeds the validated body under `namespace`. It is independent
-of `configSchema`: the former describes authority supplied by an external
-authorizer, while the latter describes the stored credential itself. A primary
-macaroon minted for a named authorization also carries a requirement for the
-namespace, so a valid but constraint-free discharge fails verification.
+`constraintSchema` is public provider metadata. A named authorization uses its
+namespace when asking the SSH discharger to place the configured JSON body in
+a proof macaroon. During request authorization, Vault validates each trusted
+third-party attestation in the credential namespace against the schema and
+then calls `validateConstraint` when present. The credential's `authorize`
+callback remains responsible for interpreting the body and combining it with
+ordinary holder-added constraints. `constraintSchema` is independent of
+`configSchema`: the former describes a proof assertion, while the latter
+describes the stored credential itself. A primary macaroon minted for a named
+authorization requires an attestation in that namespace from the SSH
+third-party location, so a valid but assertion-free discharge fails
+verification.
 
 ## `registerCredentialProvider`
 
@@ -362,7 +367,7 @@ excluding `type`. The request object is:
     {
       namespace: "records",
       body: { scopes: ["records:read"] },
-      authorized: true,
+      thirdParty: { location: "workflow-authorizer" },
     },
   ],
 }
@@ -377,9 +382,10 @@ by source path and name until one denies. All registrations matching the
 selected policy type must allow the request. `false` uses a generic denial
 reason; an object can supply a specific reason.
 
-`authorized` is true only for a constraint carried by a verified third-party
-discharge. A policy that relies on an external authorizer, rather than ordinary
-holder-added attenuation, must require it.
+`thirdParty` is `null` for an ordinary holder-added constraint. For an
+attestation carried by a verified proof discharge from a trusted third party,
+it is `{ location }`. A policy that relies on an external assertion must check
+the exact location it trusts; the namespace and body remain application-owned.
 
 Credential type schemas do not apply to policy configuration. Use the policy
 registration's `validate(config)` callback for policy configuration checks.

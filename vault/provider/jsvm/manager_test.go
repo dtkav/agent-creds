@@ -542,10 +542,26 @@ registerCredentialProvider({
 		t.Fatal("authorization schema accepted an unknown field")
 	}
 
-	request := policy.Request{Constraints: []policy.Constraint{*constraint}}
+	request := policy.Request{Constraints: []policy.Constraint{*constraint, {
+		Namespace:  "example",
+		Body:       map[string]any{"scopes": []any{"read"}},
+		ThirdParty: &policy.ThirdParty{Location: "workflow-authorizer"},
+	}}}
 	decision, err := binding.Authorize(context.Background(), request)
 	if err != nil || !decision.Allow {
 		t.Fatalf("valid constraint decision = %#v, err = %v", decision, err)
+	}
+	invalidAttestation := policy.Request{Constraints: []policy.Constraint{{
+		Namespace:  "example",
+		Body:       map[string]any{"unknown": true},
+		ThirdParty: &policy.ThirdParty{Location: "workflow-authorizer"},
+	}}}
+	decision, err = binding.Authorize(context.Background(), invalidAttestation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Allow || !strings.Contains(decision.Reason, "validating application attestation") {
+		t.Fatalf("invalid attestation decision = %#v", decision)
 	}
 	request.Constraints = append(request.Constraints, policy.Constraint{
 		Namespace: "example",
@@ -1011,6 +1027,7 @@ registerUpstreamPolicy({
     if (config.service !== "records") throw new Error("service is required");
   },
   authorize: function (request, config) {
+	var trusted = false;
     for (var i = 0; i < request.constraints.length; i++) {
       var caveat = request.constraints[i];
       if (caveat.namespace !== "example") {
@@ -1019,10 +1036,12 @@ registerUpstreamPolicy({
       if (caveat.body.service.indexOf(config.service) === -1) {
         return {allow: false, reason: "service excluded"};
       }
-      if (caveat.authorized !== true) {
-        return {allow: false, reason: "third-party authorization required"};
-      }
+	  trusted = trusted || (
+		caveat.thirdParty !== null &&
+		caveat.thirdParty.location === "workflow-authorizer"
+	  );
     }
+	if (!trusted) return {allow: false, reason: "third-party attestation required"};
     return true;
   }
 });
@@ -1050,8 +1069,8 @@ registerUpstreamPolicy({
 		Method: "GET",
 		Path:   "/v1/records/1",
 		Constraints: []policy.Constraint{
-			{Namespace: "example", Body: map[string]any{"service": []string{"records", "files"}}, Authorized: true},
-			{Namespace: "example", Body: map[string]any{"service": []string{"records"}}, Authorized: true},
+			{Namespace: "example", Body: map[string]any{"service": []string{"records", "files"}}, ThirdParty: &policy.ThirdParty{Location: "workflow-authorizer"}},
+			{Namespace: "example", Body: map[string]any{"service": []string{"records"}}},
 		},
 	}
 	decision, err := authorizer.Authorize(context.Background(), request)
@@ -1065,7 +1084,6 @@ registerUpstreamPolicy({
 	request.Constraints = append(request.Constraints, policy.Constraint{
 		Namespace: "example",
 		Body:      map[string]any{"service": []string{"files"}},
-		Authorized: true,
 	})
 	decision, err = authorizer.Authorize(context.Background(), request)
 	if err != nil {

@@ -20,11 +20,11 @@ func TestGeneratedRuntimeArtifactsAreInstanceScoped(t *testing.T) {
 	}
 
 	serviceDir := filepath.Join(root, "generated", "instances", "service")
-	supportDir := filepath.Join(root, "generated", "instances", "support")
+	clientDir := filepath.Join(root, "generated", "instances", "client")
 	serviceCfg := ProjectConfig{
 		Upstream: map[string]UpstreamConfig{"telemetry.internal": {}},
 	}
-	supportCfg := ProjectConfig{
+	clientCfg := ProjectConfig{
 		Upstream: map[string]UpstreamConfig{"service.internal": {}},
 	}
 
@@ -35,11 +35,11 @@ func TestGeneratedRuntimeArtifactsAreInstanceScoped(t *testing.T) {
 	if err := service.Generate(); err != nil {
 		t.Fatal(err)
 	}
-	support, err := NewGenerator(root, supportDir, supportCfg)
+	client, err := NewGenerator(root, clientDir, clientCfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := support.Generate(); err != nil {
+	if err := client.Generate(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -47,7 +47,7 @@ func TestGeneratedRuntimeArtifactsAreInstanceScoped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	supportDomains, err := os.ReadFile(filepath.Join(supportDir, "domains.json"))
+	clientDomains, err := os.ReadFile(filepath.Join(clientDir, "domains.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,22 +55,22 @@ func TestGeneratedRuntimeArtifactsAreInstanceScoped(t *testing.T) {
 		strings.Contains(string(serviceDomains), "service.internal") {
 		t.Fatalf("service domains were overwritten: %s", serviceDomains)
 	}
-	if !strings.Contains(string(supportDomains), "service.internal") ||
-		strings.Contains(string(supportDomains), "telemetry.internal") {
-		t.Fatalf("support domains were overwritten: %s", supportDomains)
+	if !strings.Contains(string(clientDomains), "service.internal") ||
+		strings.Contains(string(clientDomains), "telemetry.internal") {
+		t.Fatalf("client domains were overwritten: %s", clientDomains)
 	}
 
 	if err := generateSandboxEnv(serviceDir, map[string]string{"SERVICE_TOKEN": "one"}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := generateSandboxEnv(supportDir, map[string]string{"SUPPORT_TOKEN": "two"}, nil); err != nil {
+	if err := generateSandboxEnv(clientDir, map[string]string{"CLIENT_TOKEN": "two"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	serviceEnv, err := os.ReadFile(filepath.Join(serviceDir, "sandbox.env"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(serviceEnv), "SUPPORT_TOKEN") {
-		t.Fatalf("support environment leaked into service environment: %s", serviceEnv)
+	if strings.Contains(string(serviceEnv), "CLIENT_TOKEN") {
+		t.Fatalf("client environment leaked into service environment: %s", serviceEnv)
 	}
 }

@@ -387,10 +387,10 @@ paths = ["/v1/observability/**"]
 ```
 
 The wrapper reads `/run/credentials/service-read` for each operation. Each
-projected `acm_` value has a short validity window and is replaced atomically
-before expiry. The stable authorization primary remains in broker-private host
-state outside the sandbox mount; only a short-lived descendant and discharge
-are projected.
+projected value combines a primary macaroon with a short-lived proof discharge
+and is replaced atomically before the discharge expires. The primary cannot be
+used by itself; the host-side broker retains its cached copy so it can refresh
+the proof without changing the credential path.
 
 Wrappers may expose a credential-path environment variable while retaining the
 `/run/credentials/<name>` default. This makes local tests portable and lets two
@@ -509,16 +509,37 @@ branches = ["queue/example"]
 ```
 
 The name (`github` above) is organizational and has no authorization meaning.
-The selected credential type publishes the schema for the remaining fields.
-`adev` asks the authenticated discharge service to validate those fields and
-place them in a signed discharge macaroon. The primary macaroon requires that
-provider constraint, so the primary token alone—or an empty discharge—cannot
-use the credential. Route fields may still carry transport settings, but
+The selected credential type publishes the namespace and schema for the
+remaining fields. `adev` asks the authenticated SSH discharger to place those
+fields in a proof macaroon. Vault preserves the proof's third-party location,
+validates the attestation against the credential schema, and leaves its
+meaning to the credential's macaroon authorizer. The primary macaroon requires
+an attestation in that namespace from the SSH location, so the primary token
+alone—or an assertion-free discharge—cannot use the credential. Route fields
+may still carry transport settings, but
 `credential`, `env`, `credential_file`, `host_caveat`, `methods`, and `paths`
 belong in the named authorization when this form is used. `host_caveat`
 defaults to `true`; set it to `false` only when the same capability must be
 reverified across multiple routed hosts and the Envoy allowlist is the domain
 boundary.
+
+A named authorization can also protect a policy-only route when the upstream
+consumes the macaroon itself. In that form there is no credential provider:
+the namespace is explicit, the selected policy interprets the arbitrary body,
+and Vault leaves the verified bearer header unchanged.
+
+```toml
+[upstream."records.internal"]
+policy = "/records/context"
+
+[authorization.context]
+upstreams = ["records.internal"]
+namespace = "records-context"
+credential_file = "records-context"
+methods = ["POST"]
+paths = ["/graphql"]
+subject = "user:usr_123"
+```
 
 GitHub also accepts a repository map when one workflow owns distinct branches
 in a product and a private overlay:

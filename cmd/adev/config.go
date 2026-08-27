@@ -105,12 +105,13 @@ type UpstreamConfig struct {
 	// are bound to their upstreams. These fields are runtime policy, not part
 	// of the legacy [upstream] TOML shape.
 	Authorization           string         `toml:"-"`
+	AuthorizationNamespace  string         `toml:"-"`
 	AuthorizationConstraint map[string]any `toml:"-"`
 	OmitHostCaveat          bool           `toml:"-"`
 }
 
 func (u UpstreamConfig) MintsToken() bool {
-	return u.Credential != ""
+	return u.Credential != "" || u.Authorization != ""
 }
 
 func (u UpstreamConfig) AddressValue(host string) string {
@@ -235,13 +236,14 @@ type ProjectConfig struct {
 	StaticEnv      map[string]interface{}         `toml:"-"`
 }
 
-// AuthorizationConfig is a named credential-use policy. The common fields
-// are interpreted by adev; Constraint contains the remaining provider-owned
-// fields and is validated by Vault against the selected credential type's
-// registered authorization schema before a discharge is issued.
+// AuthorizationConfig binds a named application attestation to one or more
+// routes. With a credential, its registered macaroon namespace and schema are
+// used. Without one, Namespace is explicit and the selected upstream policy
+// owns the arbitrary body semantics.
 type AuthorizationConfig struct {
 	Upstreams      []string
 	Credential     string
+	Namespace      string
 	Env            string
 	CredentialFile string
 	HostCaveat     bool
@@ -253,6 +255,7 @@ type AuthorizationConfig struct {
 type authorizationCommonFields struct {
 	Upstreams      []string `toml:"upstreams"`
 	Credential     string   `toml:"credential"`
+	Namespace      string   `toml:"namespace"`
 	Env            string   `toml:"env"`
 	CredentialFile string   `toml:"credential_file"`
 	HostCaveat     *bool    `toml:"host_caveat"`
@@ -411,13 +414,13 @@ func decodeAuthorizations(md toml.MetaData, encoded map[string]toml.Primitive) (
 		}
 		var raw map[string]any
 		if err := md.PrimitiveDecode(primitive, &raw); err != nil {
-			return nil, fmt.Errorf("decoding authorization.%s provider fields: %w", name, err)
+			return nil, fmt.Errorf("decoding authorization.%s application fields: %w", name, err)
 		}
-		for _, key := range []string{"upstreams", "credential", "env", "credential_file", "host_caveat", "methods", "paths"} {
+		for _, key := range []string{"upstreams", "credential", "namespace", "env", "credential_file", "host_caveat", "methods", "paths"} {
 			delete(raw, key)
 		}
 		if _, err := json.Marshal(raw); err != nil {
-			return nil, fmt.Errorf("authorization.%s provider fields must be JSON-compatible: %w", name, err)
+			return nil, fmt.Errorf("authorization.%s application fields must be JSON-compatible: %w", name, err)
 		}
 		hostCaveat := true
 		if common.HostCaveat != nil {
@@ -426,6 +429,7 @@ func decodeAuthorizations(md toml.MetaData, encoded map[string]toml.Primitive) (
 		result[name] = AuthorizationConfig{
 			Upstreams:      common.Upstreams,
 			Credential:     common.Credential,
+			Namespace:      common.Namespace,
 			Env:            common.Env,
 			CredentialFile: common.CredentialFile,
 			HostCaveat:     hostCaveat,
@@ -438,8 +442,8 @@ func decodeAuthorizations(md toml.MetaData, encoded map[string]toml.Primitive) (
 }
 
 // BindAuthorizations attaches each named authorization to its declared route.
-// Plugin and agent profiles may provide the route, but only the project policy
-// may attach a credential and provider-owned authorization constraint.
+// Plugin and harness profiles may provide the route, but only the project
+// policy may attach a credential or application attestation.
 func BindAuthorizations(cfg *ProjectConfig) error {
 	if len(cfg.Authorization) == 0 {
 		return nil
@@ -454,8 +458,20 @@ func BindAuthorizations(cfg *ProjectConfig) error {
 		if len(authorization.Upstreams) == 0 {
 			return fmt.Errorf("authorization.%s: upstreams must be a non-empty array", name)
 		}
-		if !strings.HasPrefix(authorization.Credential, "/") || authorization.Credential == "/" {
-			return fmt.Errorf("authorization.%s: credential path %q must name an absolute Vault credential", name, authorization.Credential)
+		if authorization.Credential == "" {
+			if strings.TrimSpace(authorization.Namespace) != authorization.Namespace || authorization.Namespace == "" {
+				return fmt.Errorf("authorization.%s: namespace must be non-empty without surrounding whitespace when credential is omitted", name)
+			}
+			if authorization.Env == "" && authorization.CredentialFile == "" {
+				return fmt.Errorf("authorization.%s: env or credential_file is required when credential is omitted", name)
+			}
+		} else {
+			if !strings.HasPrefix(authorization.Credential, "/") || authorization.Credential == "/" {
+				return fmt.Errorf("authorization.%s: credential path %q must name an absolute Vault credential", name, authorization.Credential)
+			}
+			if authorization.Namespace != "" {
+				return fmt.Errorf("authorization.%s: namespace is derived from credential %q and must be omitted", name, authorization.Credential)
+			}
 		}
 		seen := make(map[string]struct{}, len(authorization.Upstreams))
 		for _, host := range authorization.Upstreams {
@@ -474,7 +490,10 @@ func BindAuthorizations(cfg *ProjectConfig) error {
 				return fmt.Errorf("upstream %q is claimed by both authorization.%s and authorization.%s", host, upstream.Authorization, name)
 			}
 			if upstream.Credential != "" || len(upstream.Methods) > 0 || len(upstream.Paths) > 0 || upstream.Env != "" || upstream.CredentialFile != "" {
-				return fmt.Errorf("authorization.%s: upstream %q also declares credential authorization fields; keep credential, env, credential_file, methods, and paths in the authorization table", name, host)
+				return fmt.Errorf("authorization.%s: upstream %q also declares fields owned by the named authorization; keep credential, env, credential_file, methods, and paths in the authorization table", name, host)
+			}
+			if authorization.Credential == "" && upstream.Policy == "" {
+				return fmt.Errorf("authorization.%s: policy-only upstream %q must select a policy", name, host)
 			}
 			upstream.Credential = authorization.Credential
 			upstream.Env = authorization.Env
@@ -482,6 +501,7 @@ func BindAuthorizations(cfg *ProjectConfig) error {
 			upstream.Methods = append([]string(nil), authorization.Methods...)
 			upstream.Paths = append([]string(nil), authorization.Paths...)
 			upstream.Authorization = name
+			upstream.AuthorizationNamespace = authorization.Namespace
 			upstream.AuthorizationConstraint = cloneAnyMap(authorization.Constraint)
 			upstream.OmitHostCaveat = !authorization.HostCaveat
 			cfg.Upstream[host] = upstream

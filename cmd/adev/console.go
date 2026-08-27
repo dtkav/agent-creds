@@ -893,6 +893,25 @@ func upstreamTokenEnv(upstream UpstreamConfig, info *CredentialInfo) string {
 	return ""
 }
 
+func upstreamCredentialContext(cfg VaultConfig, upstream UpstreamConfig) (*CredentialInfo, string, error) {
+	namespace := upstream.AuthorizationNamespace
+	if upstream.Credential == "" {
+		return nil, namespace, nil
+	}
+
+	info, err := vaultSSHInfo(cfg, upstream.Credential)
+	if err != nil {
+		return nil, "", err
+	}
+	if upstream.Authorization != "" {
+		if info.Caveat == nil {
+			return nil, "", fmt.Errorf("credential %s does not publish application caveat metadata", upstream.Credential)
+		}
+		namespace = info.Caveat.Namespace
+	}
+	return info, namespace, nil
+}
+
 // mintTokens mints tokens for all credentialed upstreams.
 // It returns an error instead of a partial result: all sandbox engines share
 // the same fail-closed credential bootstrap.
@@ -911,17 +930,17 @@ func mintTokens(cfg ProjectConfig, instanceGenDir string, spinner *Spinner) ([]T
 			continue
 		}
 
-		// Step 1: Get credential metadata
+		// Step 1: Get optional credential metadata and the application
+		// attestation namespace selected by the named authorization.
 		if spinner != nil {
 			spinner.Status(fmt.Sprintf("minting tokens... %s", host))
 		}
-		info, err := vaultSSHInfo(cfg.Vault, upstream.Credential)
+		info, attestationNamespace, err := upstreamCredentialContext(cfg.Vault, upstream)
 		if err != nil {
-			return nil, nil, fmt.Errorf("reading credential metadata for %s: %w", host, err)
+			return nil, nil, fmt.Errorf("resolving credential context for %s: %w", host, err)
 		}
-		infos[host] = info
-		if upstream.Authorization != "" && info.Authorization == nil {
-			return nil, nil, fmt.Errorf("authorization.%s: credential %s does not publish a provider authorization schema", upstream.Authorization, upstream.Credential)
+		if info != nil {
+			infos[host] = info
 		}
 
 		// Determine primary env var name
@@ -939,7 +958,7 @@ func mintTokens(cfg ProjectConfig, instanceGenDir string, spinner *Spinner) ([]T
 
 		// Step 3: Mint if no cache
 		if authzToken == "" {
-			authzToken, err = vaultSSHMint(cfg.Vault, upstream.Credential, host, upstream.Methods, upstream.Paths, upstream.Authorization != "", upstream.OmitHostCaveat)
+			authzToken, err = vaultSSHMint(cfg.Vault, upstream.Credential, host, upstream.Methods, upstream.Paths, attestationNamespace, upstream.OmitHostCaveat)
 			if err != nil {
 				return nil, nil, fmt.Errorf("minting %s: %w", host, err)
 			}
@@ -950,18 +969,18 @@ func mintTokens(cfg ProjectConfig, instanceGenDir string, spinner *Spinner) ([]T
 		}
 
 		// Step 5: Get discharge (retry with fresh token if cached token fails)
-		discharge, err := vaultSSHDischarge(cfg.Vault, authzToken, upstream.AuthorizationConstraint)
+		discharge, err := vaultSSHDischarge(cfg.Vault, authzToken, attestationNamespace, upstream.AuthorizationConstraint)
 		if err != nil && fileExists(cachePath) {
 			// Cached token may be stale (e.g., vault key rotated) — delete and re-mint
 			os.Remove(cachePath)
-			authzToken, err = vaultSSHMint(cfg.Vault, upstream.Credential, host, upstream.Methods, upstream.Paths, upstream.Authorization != "", upstream.OmitHostCaveat)
+			authzToken, err = vaultSSHMint(cfg.Vault, upstream.Credential, host, upstream.Methods, upstream.Paths, attestationNamespace, upstream.OmitHostCaveat)
 			if err != nil {
 				return nil, nil, fmt.Errorf("re-minting %s: %w", host, err)
 			}
 			if err := os.WriteFile(cachePath, []byte(authzToken+"\n"), 0600); err != nil {
 				return nil, nil, fmt.Errorf("caching refreshed token for %s: %w", host, err)
 			}
-			discharge, err = vaultSSHDischarge(cfg.Vault, authzToken, upstream.AuthorizationConstraint)
+			discharge, err = vaultSSHDischarge(cfg.Vault, authzToken, attestationNamespace, upstream.AuthorizationConstraint)
 		}
 		if err != nil {
 			return nil, nil, fmt.Errorf("discharging %s: %w", host, err)
@@ -1109,7 +1128,7 @@ func upstreamChanged(old, new UpstreamConfig) bool {
 	if old.Credential != new.Credential || old.Policy != new.Policy {
 		return true
 	}
-	if old.Authorization != new.Authorization || old.OmitHostCaveat != new.OmitHostCaveat || !reflect.DeepEqual(old.AuthorizationConstraint, new.AuthorizationConstraint) {
+	if old.Authorization != new.Authorization || old.AuthorizationNamespace != new.AuthorizationNamespace || old.OmitHostCaveat != new.OmitHostCaveat || !reflect.DeepEqual(old.AuthorizationConstraint, new.AuthorizationConstraint) {
 		return true
 	}
 	if !slices.Equal(old.Methods, new.Methods) {
@@ -1163,7 +1182,7 @@ func remintTokens(newCfg ProjectConfig, scriptDir, instanceGenDir string, oldUps
 			continue
 		}
 
-		info, err := vaultSSHInfo(newCfg.Vault, upstream.Credential)
+		info, attestationNamespace, err := upstreamCredentialContext(newCfg.Vault, upstream)
 		if err != nil {
 			continue
 		}
@@ -1180,7 +1199,7 @@ func remintTokens(newCfg ProjectConfig, scriptDir, instanceGenDir string, oldUps
 		}
 
 		if authzToken == "" {
-			authzToken, err = vaultSSHMint(newCfg.Vault, upstream.Credential, host, upstream.Methods, upstream.Paths, upstream.Authorization != "", upstream.OmitHostCaveat)
+			authzToken, err = vaultSSHMint(newCfg.Vault, upstream.Credential, host, upstream.Methods, upstream.Paths, attestationNamespace, upstream.OmitHostCaveat)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: re-mint %s failed: %v\n", host, err)
 				continue
@@ -1188,7 +1207,7 @@ func remintTokens(newCfg ProjectConfig, scriptDir, instanceGenDir string, oldUps
 			os.WriteFile(cachePath, []byte(authzToken+"\n"), 0600)
 		}
 
-		discharge, err := vaultSSHDischarge(newCfg.Vault, authzToken, upstream.AuthorizationConstraint)
+		discharge, err := vaultSSHDischarge(newCfg.Vault, authzToken, attestationNamespace, upstream.AuthorizationConstraint)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: discharge %s failed: %v\n", host, err)
 			continue
@@ -1209,7 +1228,11 @@ func remintTokens(newCfg ProjectConfig, scriptDir, instanceGenDir string, oldUps
 	// Regenerate sandbox.env
 	infos := make(map[string]*CredentialInfo)
 	for _, e := range tokens {
-		if info, err := vaultSSHInfo(newCfg.Vault, newCfg.Upstream[e.Host].Credential); err == nil {
+		credential := newCfg.Upstream[e.Host].Credential
+		if credential == "" {
+			continue
+		}
+		if info, err := vaultSSHInfo(newCfg.Vault, credential); err == nil {
 			infos[e.Host] = info
 		}
 	}

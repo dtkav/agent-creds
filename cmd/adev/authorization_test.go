@@ -72,12 +72,12 @@ branches = ["queue/example"]
 
 func TestNamedAuthorizationCanOmitHostCaveat(t *testing.T) {
 	dir := writeAuthorizationConfig(t, `
-[upstream."support.internal"]
+[upstream."session.internal"]
 
-[authorization.support]
-upstreams = ["support.internal"]
-credential = "/support/internal"
-credential_file = "support"
+[authorization.session]
+upstreams = ["session.internal"]
+credential = "/session/internal"
+credential_file = "session"
 host_caveat = false
 subject = "user:usr_123"
 `)
@@ -85,12 +85,56 @@ subject = "user:usr_123"
 	if err != nil {
 		t.Fatal(err)
 	}
-	upstream := cfg.Upstream["support.internal"]
+	upstream := cfg.Upstream["session.internal"]
 	if !upstream.OmitHostCaveat {
 		t.Fatal("host_caveat = false was ignored")
 	}
 	if _, exists := upstream.AuthorizationConstraint["host_caveat"]; exists {
 		t.Fatalf("host_caveat leaked into provider constraint: %#v", upstream.AuthorizationConstraint)
+	}
+}
+
+func TestNamedAuthorizationCanBindPolicyOnlyRoute(t *testing.T) {
+	dir := writeAuthorizationConfig(t, `
+[upstream."records.internal"]
+policy = "/records/context"
+
+[authorization.context]
+upstreams = ["records.internal"]
+namespace = "records-context"
+credential_file = "records-context"
+methods = ["POST"]
+subject = "user:usr_123"
+`)
+	cfg, err := LoadProjectConfigWithPlugins(dir, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream := cfg.Upstream["records.internal"]
+	if upstream.Credential != "" || upstream.Policy != "/records/context" {
+		t.Fatalf("policy-only upstream = %#v", upstream)
+	}
+	if upstream.AuthorizationNamespace != "records-context" {
+		t.Fatalf("namespace = %q", upstream.AuthorizationNamespace)
+	}
+	if got := upstream.AuthorizationConstraint["subject"]; got != "user:usr_123" {
+		t.Fatalf("attestation body = %#v", upstream.AuthorizationConstraint)
+	}
+}
+
+func TestPolicyOnlyAuthorizationRequiresDeliveryTarget(t *testing.T) {
+	dir := writeAuthorizationConfig(t, `
+[upstream."records.internal"]
+policy = "/records/context"
+
+[authorization.context]
+upstreams = ["records.internal"]
+namespace = "records-context"
+subject = "user:usr_123"
+`)
+	_, err := LoadProjectConfigWithPlugins(dir, dir)
+	if err == nil || !strings.Contains(err.Error(), "env or credential_file is required") {
+		t.Fatalf("error = %v", err)
 	}
 }
 
@@ -125,7 +169,7 @@ credential = "/github/example/project/git"
 branches = ["queue/example"]
 `)
 	_, err := LoadProjectConfigWithPlugins(dir, dir)
-	if err == nil || !strings.Contains(err.Error(), "also declares credential authorization fields") {
+	if err == nil || !strings.Contains(err.Error(), "also declares fields owned by the named authorization") {
 		t.Fatalf("error = %v", err)
 	}
 }

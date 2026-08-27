@@ -18,9 +18,20 @@ type VerifyResult struct {
 	// Caveats contains the validated caveat set (for logging/auditing)
 	Caveats *macaroon.CaveatSet
 
-	// ApplicationConstraints are verified, deployment-owned restrictions.
-	// They are interpreted by the selected upstream policy, never by callers.
-	ApplicationConstraints []*ApplicationConstraint
+	// ApplicationConstraints are verified, deployment-owned restrictions and
+	// attestations. ThirdParty is present only for an attestation recovered from
+	// a proof discharge at a location trusted by this verifier.
+	ApplicationConstraints []VerifiedApplicationConstraint
+}
+
+type ThirdPartyProvenance struct {
+	Location string
+}
+
+type VerifiedApplicationConstraint struct {
+	Namespace  string
+	Constraint map[string]any
+	ThirdParty *ThirdPartyProvenance
 }
 
 // Verifier handles token verification
@@ -38,10 +49,6 @@ const AttestationLocation = "yubikey-local"
 // SSHAttestationLocation is the third-party location for SSH-based attestation
 const SSHAttestationLocation = "ssh-attestation"
 
-// SSHAuthorizationLocation identifies discharges that carry provider-owned
-// authorization constraints requested by an authenticated host-side client.
-const SSHAuthorizationLocation = "ssh-authorization"
-
 // NewVerifier creates a new token verifier
 func NewVerifier(ks *KeyStore) *Verifier {
 	v := &Verifier{
@@ -53,7 +60,6 @@ func NewVerifier(ks *KeyStore) *Verifier {
 	if len(ks.EncryptionKey) > 0 {
 		v.AddTrusted3P(AttestationLocation, ks.EncryptionKey)
 		v.AddTrusted3P(SSHAttestationLocation, ks.EncryptionKey)
-		v.AddTrusted3P(SSHAuthorizationLocation, ks.EncryptionKey)
 	}
 
 	return v
@@ -112,26 +118,46 @@ func (v *Verifier) VerifyRequest(authHeader string, access *Access) *VerifyResul
 		return &VerifyResult{Valid: false, Error: fmt.Sprintf("caveat validation failed: %v", err)}
 	}
 
-	applicationConstraints := macaroon.GetCaveats[*ApplicationConstraint](caveats)
-	authorizedConstraints := macaroon.GetCaveats[*AuthorizedApplicationConstraint](caveats)
-	for _, requirement := range macaroon.GetCaveats[*ApplicationConstraintRequirement](caveats) {
+	applicationConstraints := make([]VerifiedApplicationConstraint, 0)
+	for _, constraint := range macaroon.GetCaveats[*ApplicationConstraint](caveats) {
+		applicationConstraints = append(applicationConstraints, VerifiedApplicationConstraint{
+			Namespace:  constraint.Namespace,
+			Constraint: constraint.Constraint,
+		})
+	}
+
+	locations := make(map[*ApplicationAttestation]string)
+	for _, discharge := range dischargeTokens {
+		for _, attestation := range macaroon.GetCaveats[*ApplicationAttestation](&discharge.UnsafeCaveats) {
+			locations[attestation] = discharge.Location
+		}
+	}
+	attestations := macaroon.GetCaveats[*ApplicationAttestation](caveats)
+	for _, attestation := range attestations {
+		location, ok := locations[attestation]
+		if !ok {
+			return &VerifyResult{Valid: false, Error: "verified application attestation has no discharge provenance"}
+		}
+		applicationConstraints = append(applicationConstraints, VerifiedApplicationConstraint{
+			Namespace:  attestation.Namespace,
+			Constraint: attestation.Attestation,
+			ThirdParty: &ThirdPartyProvenance{Location: location},
+		})
+	}
+
+	for _, requirement := range macaroon.GetCaveats[*ApplicationAttestationRequirement](caveats) {
 		found := false
-		for _, constraint := range authorizedConstraints {
-			if constraint.Namespace == requirement.Namespace {
+		for _, constraint := range applicationConstraints {
+			if constraint.Namespace == requirement.Namespace &&
+				constraint.ThirdParty != nil &&
+				constraint.ThirdParty.Location == requirement.Location {
 				found = true
 				break
 			}
 		}
 		if !found {
-			return &VerifyResult{Valid: false, Error: fmt.Sprintf("required application constraint %q is missing", requirement.Namespace)}
+			return &VerifyResult{Valid: false, Error: fmt.Sprintf("required application attestation %q from %q is missing", requirement.Namespace, requirement.Location)}
 		}
-	}
-	for _, constraint := range authorizedConstraints {
-		applicationConstraints = append(applicationConstraints, &ApplicationConstraint{
-			Namespace:  constraint.Namespace,
-			Constraint: constraint.Constraint,
-			Authorized: true,
-		})
 	}
 
 	return &VerifyResult{

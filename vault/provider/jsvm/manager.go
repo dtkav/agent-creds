@@ -715,7 +715,7 @@ func (r *scriptRuntime) registerCredentialType(call goja.FunctionCall) goja.Valu
 			if err != nil {
 				panic(r.vm.NewTypeError("credential type %q has invalid macaroon.constraintSchema: %v", credentialType, err))
 			}
-			constraintSchema, err = compileCredentialConfigSchema(credentialType+"-authorization", constraintSchemaDocument)
+			constraintSchema, err = compileCredentialConfigSchema(credentialType+"-attestation", constraintSchemaDocument)
 			if err != nil {
 				panic(r.vm.NewTypeError("credential type %q has invalid macaroon.constraintSchema: %v", credentialType, err))
 			}
@@ -1221,7 +1221,7 @@ func (r *scriptRuntime) validateCredentialConstraint(ctx context.Context, spec S
 		return fmt.Errorf("credential type %q does not declare macaroon.constraintSchema", spec.Type)
 	}
 	if err := registeredType.macaroon.constraintSchema.Validate(cloneMap(body)); err != nil {
-		return fmt.Errorf("validating authorization for credential %q with type %q: %s", spec.Name, spec.Type, safeSchemaValidationError(err))
+		return fmt.Errorf("validating application attestation for credential %q with type %q: %s", spec.Name, spec.Type, safeSchemaValidationError(err))
 	}
 	if registeredType.macaroon.validateConstraint != nil {
 		validationContext, cancel := context.WithTimeout(ctx, providerExecutionTimeout)
@@ -1234,13 +1234,24 @@ func (r *scriptRuntime) validateCredentialConstraint(ctx context.Context, spec S
 			)
 			return validateErr
 		}); err != nil {
-			return fmt.Errorf("validating authorization for credential %q with type %q: %w", spec.Name, spec.Type, err)
+			return fmt.Errorf("validating application attestation for credential %q with type %q: %w", spec.Name, spec.Type, err)
 		}
 	}
 	return nil
 }
 
 func (r *scriptRuntime) authorizeCredential(ctx context.Context, request policy.Request, spec Spec, namespace string) (policy.Decision, error) {
+	for _, constraint := range request.Constraints {
+		if constraint.Namespace != namespace {
+			return policy.Deny(fmt.Sprintf("credential type %s cannot consume macaroon constraint namespace %q", spec.Type, constraint.Namespace)), nil
+		}
+		if constraint.ThirdParty != nil {
+			if err := r.validateCredentialConstraint(ctx, spec, namespace, constraint.Body); err != nil {
+				return policy.Deny(err.Error()), nil
+			}
+		}
+	}
+
 	policyContext, cancel := context.WithTimeout(ctx, providerExecutionTimeout)
 	defer cancel()
 	r.callContext = policyContext
@@ -1253,12 +1264,6 @@ func (r *scriptRuntime) authorizeCredential(ctx context.Context, request policy.
 		}
 		if registeredType.macaroon.namespace != namespace {
 			return fmt.Errorf("credential type %q changed macaroon namespace from %q to %q", spec.Type, namespace, registeredType.macaroon.namespace)
-		}
-		for _, constraint := range request.Constraints {
-			if constraint.Namespace != namespace {
-				decision = policy.Deny(fmt.Sprintf("credential type %s cannot consume macaroon constraint namespace %q", spec.Type, constraint.Namespace))
-				return nil
-			}
 		}
 		value, callErr := registeredType.macaroon.authorize(
 			goja.Undefined(),
@@ -1278,10 +1283,14 @@ func (r *scriptRuntime) authorizeCredential(ctx context.Context, request policy.
 func (r *scriptRuntime) policyRequestValue(request policy.Request) map[string]any {
 	constraints := make([]map[string]any, 0, len(request.Constraints))
 	for _, constraint := range request.Constraints {
+		var thirdParty any
+		if constraint.ThirdParty != nil {
+			thirdParty = map[string]any{"location": constraint.ThirdParty.Location}
+		}
 		constraints = append(constraints, map[string]any{
 			"namespace":  constraint.Namespace,
 			"body":       cloneMap(constraint.Body),
-			"authorized": constraint.Authorized,
+			"thirdParty": thirdParty,
 		})
 	}
 	return map[string]any{

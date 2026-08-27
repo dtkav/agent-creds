@@ -43,7 +43,7 @@ value = "http://service.internal/graphql"
 
 [[env]]
 name = "SERVICE_TOKEN"
-value = "from-file:.support-token"
+value = "from-file:.session-token"
 `)
 
 	cfg, err := LoadProjectConfig(dir)
@@ -52,7 +52,7 @@ value = "from-file:.support-token"
 	}
 	want := []EnvConfig{
 		{Name: "SERVICE_URL", Value: "http://service.internal/graphql"},
-		{Name: "SERVICE_TOKEN", Value: "from-file:.support-token"},
+		{Name: "SERVICE_TOKEN", Value: "from-file:.session-token"},
 	}
 	if !reflect.DeepEqual(cfg.Env, want) {
 		t.Fatalf("Env = %#v, want %#v", cfg.Env, want)

@@ -75,7 +75,7 @@ func TestBufferedRequestBodySupportsLegacyStringField(t *testing.T) {
 
 func TestCredentialRouteRejectsUnconsumedApplicationConstraints(t *testing.T) {
 	server := &authServer{}
-	verified := &tfmac.VerifyResult{ApplicationConstraints: []*tfmac.ApplicationConstraint{{
+	verified := &tfmac.VerifyResult{ApplicationConstraints: []tfmac.VerifiedApplicationConstraint{{
 		Namespace:  "example",
 		Constraint: map[string]any{"services": []string{"records"}},
 	}}}
@@ -102,17 +102,20 @@ func TestConfiguredPolicyReceivesVerifiedConstraints(t *testing.T) {
 			if request.Credential != "records/prod" || request.CredentialType != "bearer" {
 				t.Fatalf("credential context = %#v", request)
 			}
-			if len(request.Constraints) != 1 || request.Constraints[0].Namespace != "example" || !request.Constraints[0].Authorized {
+			if len(request.Constraints) != 1 || request.Constraints[0].Namespace != "example" {
 				t.Fatalf("constraints = %#v", request.Constraints)
+			}
+			if request.Constraints[0].ThirdParty == nil || request.Constraints[0].ThirdParty.Location != "workflow-authorizer" {
+				t.Fatalf("third-party provenance = %#v", request.Constraints[0].ThirdParty)
 			}
 			return policy.Allow(), nil
 		}),
 	}}
 	verified := &tfmac.VerifyResult{
-		ApplicationConstraints: []*tfmac.ApplicationConstraint{{
+		ApplicationConstraints: []tfmac.VerifiedApplicationConstraint{{
 			Namespace:  "example",
 			Constraint: map[string]any{"services": []string{"records"}},
-			Authorized: true,
+			ThirdParty: &tfmac.ThirdPartyProvenance{Location: "workflow-authorizer"},
 		}},
 	}
 	decision, err := server.authorizePolicies(
@@ -157,7 +160,7 @@ func TestCredentialMacaroonConsumesItsNamespaceBeforeExplicitPolicy(t *testing.T
 			return policy.Allow(), nil
 		}),
 	}}
-	verified := &tfmac.VerifyResult{ApplicationConstraints: []*tfmac.ApplicationConstraint{
+	verified := &tfmac.VerifyResult{ApplicationConstraints: []tfmac.VerifiedApplicationConstraint{
 		{Namespace: "github", Constraint: map[string]any{"branches": []any{"agent/work"}}},
 		{Namespace: "deployment", Constraint: map[string]any{"environment": "prod"}},
 	}}
@@ -226,6 +229,69 @@ func TestRoutePolicyCannotBypassAuthenticationThroughPassthrough(t *testing.T) {
 	}
 	if response.GetStatus().GetCode() != int32(codes.PermissionDenied) {
 		t.Fatalf("status = %#v", response.GetStatus())
+	}
+}
+
+func TestPolicyOnlyRoutePreservesVerifiedBearerToken(t *testing.T) {
+	store := &tfmac.KeyStore{
+		SigningKey:  macaroon.NewSigningKey(),
+		KeyID:       []byte("policy-only-test"),
+		TokenPrefix: tfmac.DefaultTokenPrefix,
+	}
+	token, err := store.NewToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := token.Add(&tfmac.HostCaveat{Hosts: []string{"records.internal"}}); err != nil {
+		t.Fatal(err)
+	}
+	constraint, err := tfmac.NewApplicationConstraint("records", map[string]any{"subject": "operator@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := token.Add(constraint); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := tfmac.EncodeToken(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := &authServer{
+		verifier: tfmac.NewVerifier(store),
+		policies: map[string]policy.Authorizer{
+			"records/read": policyFunc(func(_ context.Context, request policy.Request) (policy.Decision, error) {
+				if request.Credential != "" || request.CredentialType != "" {
+					t.Fatalf("policy-only request selected a credential: %#v", request)
+				}
+				if len(request.Constraints) != 1 || request.Constraints[0].Namespace != "records" {
+					t.Fatalf("constraints = %#v", request.Constraints)
+				}
+				return policy.Allow(), nil
+			}),
+		},
+	}
+	response, err := server.Check(context.Background(), &authv3.CheckRequest{
+		Attributes: &authv3.AttributeContext{
+			Request: &authv3.AttributeContext_Request{Http: &authv3.AttributeContext_HttpRequest{
+				Method: "GET",
+				Path:   "/v1/items",
+				Headers: map[string]string{
+					"host":          "records.internal",
+					"authorization": "Bearer " + encoded,
+				},
+			}},
+			ContextExtensions: map[string]string{"policy": "/records/read"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.GetStatus().GetCode() != int32(codes.OK) {
+		t.Fatalf("status = %#v", response.GetStatus())
+	}
+	if headers := response.GetOkResponse().GetHeaders(); len(headers) != 0 {
+		t.Fatalf("policy-only route mutated headers: %#v", headers)
 	}
 }
 

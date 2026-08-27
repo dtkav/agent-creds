@@ -59,7 +59,7 @@ Usage:
   mint test-attestation        Test YubiKey attestation
 
 Examples:
-  # Create a support token carrying an application-owned constraint
+  # Create a token carrying an application-owned constraint
   mint create --constraint 'records={"scopes":["read"]}' --valid-for 8h
 
   # Create an .akey file for Gmail drafts (requires attestation)

@@ -20,14 +20,14 @@ type EndpointInfo struct {
 
 // CredentialInfo holds metadata returned by vault-ssh info command.
 type CredentialInfo struct {
-	Type          string                       `json:"type"`
-	EnvVars       []string                     `json:"env_vars,omitempty"`
-	Hosts         []string                     `json:"hosts,omitempty"`
-	Endpoints     []EndpointInfo               `json:"endpoints,omitempty"`
-	Authorization *CredentialAuthorizationInfo `json:"authorization,omitempty"`
+	Type      string                `json:"type"`
+	EnvVars   []string              `json:"env_vars,omitempty"`
+	Hosts     []string              `json:"hosts,omitempty"`
+	Endpoints []EndpointInfo        `json:"endpoints,omitempty"`
+	Caveat    *CredentialCaveatInfo `json:"caveat,omitempty"`
 }
 
-type CredentialAuthorizationInfo struct {
+type CredentialCaveatInfo struct {
 	Namespace string         `json:"namespace"`
 	Schema    map[string]any `json:"schema"`
 }
@@ -90,7 +90,11 @@ func vaultSSHRun(cfg VaultConfig, args ...string) (string, error) {
 	}
 	defer session.Close()
 
-	cmd := strings.Join(args, " ")
+	quoted := make([]string, len(args))
+	for i, arg := range args {
+		quoted[i] = shellQuote(arg)
+	}
+	cmd := strings.Join(quoted, " ")
 	output, err := session.CombinedOutput(cmd)
 	result := strings.TrimSpace(string(output))
 
@@ -101,14 +105,20 @@ func vaultSSHRun(cfg VaultConfig, args ...string) (string, error) {
 	return result, nil
 }
 
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
+}
+
 // vaultSSHMint mints an authorization token for the given host and includes
 // any default macaroon constraints derived from the selected credential.
-func vaultSSHMint(cfg VaultConfig, credential, host string, methods, paths []string, requireAuthorization, omitHostCaveat bool) (string, error) {
-	requirement := "--require-attestation"
-	if requireAuthorization {
-		requirement = "--require-authorization"
+func vaultSSHMint(cfg VaultConfig, credential, host string, methods, paths []string, attestationNamespace string, omitHostCaveat bool) (string, error) {
+	args := []string{"mint", host, "--require-attestation"}
+	if credential != "" {
+		args = append(args, "--credential", credential)
 	}
-	args := []string{"mint", host, requirement, "--credential", credential}
+	if attestationNamespace != "" {
+		args = append(args, "--require-application-attestation", attestationNamespace)
+	}
 	if omitHostCaveat {
 		args = append(args, "--no-host")
 	}
@@ -132,15 +142,16 @@ func vaultSSHMint(cfg VaultConfig, credential, host string, methods, paths []str
 	return output, nil
 }
 
-// vaultSSHDischarge gets a discharge token for an authorization token.
-func vaultSSHDischarge(cfg VaultConfig, authzToken string, constraint map[string]any) (string, error) {
+// vaultSSHDischarge gets a proof discharge and optionally adds one arbitrary
+// namespaced application attestation.
+func vaultSSHDischarge(cfg VaultConfig, authzToken, namespace string, body map[string]any) (string, error) {
 	args := []string{"discharge", authzToken}
-	if constraint != nil {
-		encoded, err := json.Marshal(constraint)
+	if namespace != "" {
+		encoded, err := json.Marshal(body)
 		if err != nil {
-			return "", fmt.Errorf("encoding authorization constraint: %w", err)
+			return "", fmt.Errorf("encoding application attestation: %w", err)
 		}
-		args = append(args, "--constraint", base64.RawURLEncoding.EncodeToString(encoded))
+		args = append(args, "--attestation", namespace+"="+base64.RawURLEncoding.EncodeToString(encoded))
 	}
 	output, err := vaultSSHRun(cfg, args...)
 	if err != nil {

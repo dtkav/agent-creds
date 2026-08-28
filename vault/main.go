@@ -677,14 +677,28 @@ func main() {
 	}
 	rpOrigin := os.Getenv("WEBAUTHN_RP_ORIGIN")
 	if rpOrigin == "" {
-		rpOrigin = "https://localhost:" + httpPort
+		rpOrigin = "http://localhost:" + httpPort
 	}
 	rpName := os.Getenv("WEBAUTHN_RP_NAME")
 	if rpName == "" {
 		rpName = "Agent Credentials"
 	}
+	userVerification := os.Getenv("WEBAUTHN_USER_VERIFICATION")
+	if userVerification == "" {
+		userVerification = "preferred"
+	}
 
-	apiServer, err := api.NewServer(database, keyStore, rpID, rpOrigin, rpName)
+	apiServer, err := api.NewServer(
+		database,
+		keyStore,
+		rpID,
+		rpOrigin,
+		rpName,
+		userVerification,
+		api.WithInventoryProvider(func(ctx context.Context) (api.InventoryResponse, error) {
+			return runtimeInventory(ctx, runtime)
+		}),
+	)
 	if err != nil {
 		log.Fatalf("Failed to create API server: %v", err)
 	}

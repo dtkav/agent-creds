@@ -15,6 +15,18 @@ type Config struct {
 	EncryptionKey string                       `yaml:"encryption_key,omitempty"`
 	Credentials   map[string]CredentialConfig  `yaml:"credentials"`
 	Policies      map[string]PolicyConfig      `yaml:"policies,omitempty"`
+
+	// CredentialSecretRefs preserves only the source pointers from the
+	// unresolved configuration. It deliberately never contains resolved secret
+	// material and is safe to use for operational inventory views.
+	CredentialSecretRefs map[string][]SecretReference `yaml:"-"`
+}
+
+// SecretReference identifies where a configured value is sourced without
+// retaining or exposing that value.
+type SecretReference struct {
+	Field     string
+	Reference string
 }
 
 // CredentialConfig defines how to inject credentials for a domain. Built-in
@@ -115,6 +127,7 @@ func LoadBytes(data []byte) (*Config, error) {
 	if err := yaml.Unmarshal(data, &doc); err != nil {
 		return nil, fmt.Errorf("failed to parse vault config: %w", err)
 	}
+	secretRefs := credentialSecretReferences(&doc)
 
 	if len(raw.Secrets) > 0 && len(doc.Content) > 0 {
 		resolveSecretRefs(doc.Content[0], raw.Secrets)
@@ -130,8 +143,62 @@ func LoadBytes(data []byte) (*Config, error) {
 	if err := yaml.Unmarshal(resolved, &cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse resolved config: %w", err)
 	}
+	cfg.CredentialSecretRefs = secretRefs
 
 	return &cfg, nil
+}
+
+// credentialSecretReferences extracts $secret pointers from credential
+// configuration before resolution. Values under the top-level secrets map are
+// intentionally never traversed.
+func credentialSecretReferences(doc *yaml.Node) map[string][]SecretReference {
+	result := make(map[string][]SecretReference)
+	if doc == nil || len(doc.Content) == 0 {
+		return result
+	}
+	root := doc.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return result
+	}
+	var credentials *yaml.Node
+	for i := 0; i < len(root.Content)-1; i += 2 {
+		if root.Content[i].Value == "credentials" {
+			credentials = root.Content[i+1]
+			break
+		}
+	}
+	if credentials == nil || credentials.Kind != yaml.MappingNode {
+		return result
+	}
+	for i := 0; i < len(credentials.Content)-1; i += 2 {
+		name := credentials.Content[i].Value
+		collectSecretReferences(credentials.Content[i+1], "", func(field, reference string) {
+			result[name] = append(result[name], SecretReference{Field: field, Reference: reference})
+		})
+	}
+	return result
+}
+
+func collectSecretReferences(node *yaml.Node, path string, add func(field, reference string)) {
+	if isSecretRef(node) {
+		add(path, node.Content[1].Value)
+		return
+	}
+	switch node.Kind {
+	case yaml.MappingNode:
+		for i := 0; i < len(node.Content)-1; i += 2 {
+			childPath := node.Content[i].Value
+			if path != "" {
+				childPath = path + "." + childPath
+			}
+			collectSecretReferences(node.Content[i+1], childPath, add)
+		}
+	case yaml.SequenceNode:
+		for i, child := range node.Content {
+			childPath := fmt.Sprintf("%s[%d]", path, i)
+			collectSecretReferences(child, childPath, add)
+		}
+	}
 }
 
 // resolveSecretRefs walks a YAML mapping node, replacing $secret nodes with

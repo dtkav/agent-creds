@@ -93,7 +93,7 @@ func handleCommand(sess ssh.Session, userID []byte, fingerprint, status string, 
 	case "whoami":
 		cmdWhoami(sess, fingerprint, status)
 	case "mint":
-		cmdMint(sess, status, cmdArgs)
+		cmdMint(sess, userID, fingerprint, status, cmdArgs)
 	case "keys":
 		cmdKeys(sess, userID, cmdArgs)
 	case "discharge":
@@ -145,7 +145,7 @@ func cmdWhoami(sess ssh.Session, fingerprint, status string) {
 	fmt.Fprintf(sess, "Status: %s\n", status)
 }
 
-func cmdMint(sess ssh.Session, status string, args []string) {
+func cmdMint(sess ssh.Session, userID []byte, fingerprint, status string, args []string) {
 	if status == UserStatusPending {
 		fmt.Fprintln(sess, "Error: Your account is pending approval.")
 		return
@@ -342,8 +342,43 @@ func cmdMint(sess ssh.Session, status string, args []string) {
 		fmt.Fprintf(sess, "Error encoding token: %v\n", err)
 		return
 	}
+	var expiresAt *time.Time
+	if !requireAttestation {
+		value := time.Now().Add(validFor)
+		expiresAt = &value
+	}
+	recordMint(userID, fingerprint, credentialPath, []string{host}, methods, paths, expiresAt, m.Nonce.UUID().String(), requireAttestation)
 
 	fmt.Fprintln(sess, token)
+}
+
+func recordMint(userID []byte, fingerprint, credential string, hosts, methods, paths []string, expiresAt *time.Time, tokenID string, attestation bool) {
+	if database == nil {
+		return
+	}
+	entry := &db.MintEntry{
+		Timestamp:   time.Now(),
+		Source:      "ssh",
+		UserID:      append([]byte(nil), userID...),
+		Hosts:       append([]string(nil), hosts...),
+		Methods:     append([]string(nil), methods...),
+		Paths:       append([]string(nil), paths...),
+		ExpiresAt:   expiresAt,
+		Attestation: attestation,
+	}
+	if fingerprint != "" {
+		entry.Fingerprint = &fingerprint
+	}
+	if credential != "" {
+		credential = "/" + strings.TrimPrefix(credential, "/")
+		entry.Credential = &credential
+	}
+	if tokenID != "" {
+		entry.TokenID = &tokenID
+	}
+	if err := database.InsertMintEntry(entry); err != nil {
+		log.Printf("Mint log error: %v", err)
+	}
 }
 
 func cmdDischarge(sess ssh.Session, status string, args []string) {
@@ -954,6 +989,8 @@ func (m model) approveUser(userID []byte, fingerprint string) tea.Cmd {
 }
 
 func (m model) mintToken(host string) tea.Cmd {
+	userID := append([]byte(nil), m.userID...)
+	fingerprint := m.fingerprint
 	return func() tea.Msg {
 		// Create token
 		mac, err := keyStore.NewToken()
@@ -980,6 +1017,8 @@ func (m model) mintToken(host string) tea.Cmd {
 		if err != nil {
 			return mintResultMsg{err: err}
 		}
+		expiresAt := now.Add(24 * time.Hour)
+		recordMint(userID, fingerprint, "", []string{host}, nil, nil, &expiresAt, mac.Nonce.UUID().String(), false)
 
 		return mintResultMsg{token: token}
 	}

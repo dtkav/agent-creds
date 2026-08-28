@@ -146,6 +146,17 @@ $ actl vault stop
 $ actl vault reload        # apply credential-only edits without a restart
 ```
 
+The read-only operational dashboard is available at
+`http://localhost:8033/`. Authenticate with an enrolled passkey to inspect the
+credential collection, non-secret `$secret` pointers, policies, recent
+capability mints, and authorization activity. Resolved credentials and minted
+capability values are never returned to the dashboard. New passkeys use
+discoverable credentials, so the username is optional at sign in; enter it only
+for an older security key or when enrolling another passkey. User verification
+defaults to `preferred`, which permits touch-only security keys. Set
+`WEBAUTHN_USER_VERIFICATION=required` before `actl vault start` to require an
+authenticator PIN or biometric instead.
+
 Do not invoke `docker compose up vault` directly: without the decrypted secret
 supplied by `actl`, Vault cannot load its signing keys or credentials.
 

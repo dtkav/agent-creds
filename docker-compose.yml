@@ -3,7 +3,7 @@ services:
     build: ./vault
     restart: unless-stopped
     ports:
-      - "8033:8033"
+      - "127.0.0.1:8033:8033"
       - "2222:2222"
     environment:
       # Env var fallback (used when vault.yaml is not configured)
@@ -13,6 +13,8 @@ services:
       - WEBAUTHN_RP_ID=${WEBAUTHN_RP_ID:-localhost}
       - WEBAUTHN_RP_ORIGIN=${WEBAUTHN_RP_ORIGIN:-http://localhost:8033}
       - WEBAUTHN_RP_NAME=${WEBAUTHN_RP_NAME:-Agent Credentials}
+      # preferred accepts touch-only security keys; required enforces PIN/biometric UV.
+      - WEBAUTHN_USER_VERIFICATION=${WEBAUTHN_USER_VERIFICATION:-preferred}
     volumes:
       - vault-data:/data
       # Bind mount keeps deployment-specific JavaScript extensions hot-reloadable.

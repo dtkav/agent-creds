@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -12,14 +13,29 @@ import (
 
 // Server is the HTTP API server
 type Server struct {
-	db       *db.DB
-	mux      *http.ServeMux
-	webauthn *WebAuthnHandler
-	keyStore *tfmac.KeyStore
+	db                *db.DB
+	mux               *http.ServeMux
+	webauthn          *WebAuthnHandler
+	keyStore          *tfmac.KeyStore
+	inventoryProvider InventoryProvider
+}
+
+// Option configures optional API capabilities.
+type Option func(*Server)
+
+// InventoryProvider returns a redacted view of the active Vault runtime.
+type InventoryProvider func(context.Context) (InventoryResponse, error)
+
+// WithInventoryProvider exposes non-secret runtime configuration metadata to
+// authenticated dashboard clients.
+func WithInventoryProvider(provider InventoryProvider) Option {
+	return func(server *Server) {
+		server.inventoryProvider = provider
+	}
 }
 
 // NewServer creates a new API server
-func NewServer(database *db.DB, keyStore *tfmac.KeyStore, rpID, rpOrigin, rpName string) (*Server, error) {
+func NewServer(database *db.DB, keyStore *tfmac.KeyStore, rpID, rpOrigin, rpName, userVerification string, options ...Option) (*Server, error) {
 	s := &Server{
 		db:       database,
 		mux:      http.NewServeMux(),
@@ -27,11 +43,14 @@ func NewServer(database *db.DB, keyStore *tfmac.KeyStore, rpID, rpOrigin, rpName
 	}
 
 	// Initialize WebAuthn handler
-	wah, err := NewWebAuthnHandler(database, rpID, rpOrigin, rpName)
+	wah, err := NewWebAuthnHandler(database, rpID, rpOrigin, rpName, userVerification)
 	if err != nil {
 		return nil, err
 	}
 	s.webauthn = wah
+	for _, option := range options {
+		option(s)
+	}
 
 	s.registerRoutes()
 	return s, nil
@@ -51,18 +70,27 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/auth/challenge", s.handleAuthChallenge)
 	s.mux.HandleFunc("/api/auth/verify", s.handleAuthVerify)
 
+	// Browser passkey authentication (discoverable and username-assisted)
+	s.mux.HandleFunc("/api/passkeys/authenticate/begin", s.handlePasskeyAuthenticationBegin)
+	s.mux.HandleFunc("/api/passkeys/authenticate/finish", s.handlePasskeyAuthenticationFinish)
+
 	// Token management
 	s.mux.HandleFunc("/api/tokens", s.handleTokens)
 	s.mux.HandleFunc("/api/tokens/", s.handleTokenByID)
 
 	// Audit log
 	s.mux.HandleFunc("/api/audit", s.handleAudit)
+	s.mux.HandleFunc("/api/mints", s.handleMints)
+	s.mux.HandleFunc("/api/inventory", s.handleInventory)
 
 	// Recent denials (unauthenticated, for adev polling)
 	s.mux.HandleFunc("/api/denials", s.handleDenials)
 
 	// Enrollment page
 	s.mux.HandleFunc("/enroll", s.handleEnrollPage)
+	s.mux.HandleFunc("/assets/vault.css", s.handleDashboardCSS)
+	s.mux.HandleFunc("/assets/vault.js", s.handleDashboardJS)
+	s.mux.HandleFunc("/", s.handleDashboard)
 
 	// Health check
 	s.mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {

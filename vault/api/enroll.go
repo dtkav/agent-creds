@@ -2,13 +2,23 @@ package api
 
 import (
 	"net/http"
+	"net/url"
 )
 
 // handleEnrollPage serves the enrollment page
 func (s *Server) handleEnrollPage(w http.ResponseWriter, r *http.Request) {
 	username := r.URL.Query().Get("user")
 	if username == "" {
-		http.Error(w, "Missing user parameter", http.StatusBadRequest)
+		users, err := s.db.ListActiveUsers()
+		if err != nil {
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
+		if len(users) != 1 {
+			http.Error(w, "Enrollment requires an explicit user when Vault has zero or multiple active users", http.StatusBadRequest)
+			return
+		}
+		http.Redirect(w, r, "/enroll?user="+url.QueryEscape(users[0].Name), http.StatusSeeOther)
 		return
 	}
 
@@ -36,7 +46,7 @@ const enrollmentHTML = `<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Enroll Security Key - Agent Credentials</title>
+    <title>Enroll Passkey - Agent Credentials</title>
     <style>
         * {
             margin: 0;
@@ -176,22 +186,22 @@ const enrollmentHTML = `<!DOCTYPE html>
     <div class="container">
         <div class="card">
             <div class="icon">🔐</div>
-            <h1>Enroll Security Key</h1>
-            <p class="subtitle">Register a FIDO2 security key for <span class="username" id="username"></span></p>
+            <h1>Enroll a Passkey</h1>
+            <p class="subtitle">Create a passkey for <span class="username" id="username"></span></p>
 
             <div id="status" class="status"></div>
 
             <button id="enrollBtn" onclick="startEnrollment()">
-                Register Security Key
+                Create Passkey
             </button>
 
             <div class="instructions">
                 <h3>Instructions</h3>
                 <ol>
-                    <li>Insert your YubiKey or other FIDO2 security key</li>
-                    <li>Click "Register Security Key"</li>
-                    <li>Touch your security key when it blinks</li>
-                    <li>Done! Your key is now registered</li>
+                    <li>Use this device’s passkey provider or insert a security key</li>
+                    <li>Click "Create Passkey"</li>
+                    <li>Follow the browser’s biometric, PIN, or security-key prompt</li>
+                    <li>Done! The passkey can now authenticate to Vault</li>
                 </ol>
             </div>
 
@@ -252,7 +262,7 @@ const enrollmentHTML = `<!DOCTYPE html>
                     }));
                 }
 
-                setStatus('waiting', 'Touch your security key...');
+                setStatus('waiting', 'Complete the passkey prompt...');
 
                 // Create credential
                 const credential = await navigator.credentials.create(options);
@@ -266,9 +276,12 @@ const enrollmentHTML = `<!DOCTYPE html>
                         id: credential.id,
                         rawId: bufferToBase64url(credential.rawId),
                         type: credential.type,
+						authenticatorAttachment: credential.authenticatorAttachment || undefined,
+						clientExtensionResults: credential.getClientExtensionResults(),
                         response: {
                             clientDataJSON: bufferToBase64url(credential.response.clientDataJSON),
-                            attestationObject: bufferToBase64url(credential.response.attestationObject)
+							attestationObject: bufferToBase64url(credential.response.attestationObject),
+							transports: credential.response.getTransports ? credential.response.getTransports() : []
                         }
                     }
                 };
@@ -285,8 +298,8 @@ const enrollmentHTML = `<!DOCTYPE html>
                     throw new Error(err.error || 'Failed to complete registration');
                 }
 
-                setStatus('success', 'Security key registered successfully!');
-                setButtonState(false, 'Register Another Key');
+                setStatus('success', 'Passkey registered successfully!');
+                setButtonState(false, 'Create Another Passkey');
 
             } catch (err) {
                 console.error('Enrollment error:', err);

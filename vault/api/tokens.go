@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/hex"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -171,6 +172,28 @@ func (s *Server) createToken(w http.ResponseWriter, r *http.Request, userID []by
 	// Auto-grant access to creator
 	if err := s.db.GrantTokenAccess(req.ID, userID, userID); err != nil {
 		// Log but don't fail
+	}
+
+	name := req.ID
+	expiresAt := time.Now().Add(validFor)
+	var tokenID *string
+	if decoded, decodeErr := tfmac.DecodeToken(tokenStr); decodeErr == nil {
+		value := decoded.Nonce.UUID().String()
+		tokenID = &value
+	}
+	if err := s.db.InsertMintEntry(&db.MintEntry{
+		Timestamp:   time.Now(),
+		Source:      "web",
+		UserID:      append([]byte(nil), userID...),
+		Name:        &name,
+		Hosts:       append([]string(nil), req.Hosts...),
+		Methods:     append([]string(nil), req.Methods...),
+		Paths:       append([]string(nil), req.Paths...),
+		ExpiresAt:   &expiresAt,
+		TokenID:     tokenID,
+		Attestation: req.RequireAttestation,
+	}); err != nil {
+		log.Printf("Mint log error: %v", err)
 	}
 
 	writeJSON(w, http.StatusCreated, TokenResponse{

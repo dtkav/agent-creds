@@ -62,7 +62,7 @@ type AuthChallengeRequest struct {
 // AuthChallengeResponse contains the challenge for CLI authentication
 type AuthChallengeResponse struct {
 	SessionID     string   `json:"sessionId"`
-	Challenge     string   `json:"challenge"`     // base64url encoded
+	Challenge     string   `json:"challenge"` // base64url encoded
 	RPID          string   `json:"rpId"`
 	CredentialIDs []string `json:"credentialIds"` // base64url encoded credential IDs
 	UserID        string   `json:"userId"`        // hex encoded
@@ -118,12 +118,12 @@ func (s *Server) handleAuthChallenge(w http.ResponseWriter, r *http.Request) {
 
 // AuthVerifyRequest is the assertion verification request from CLI
 type AuthVerifyRequest struct {
-	SessionID       string `json:"sessionId"`
-	CredentialID    string `json:"credentialId"`    // base64url
-	AuthenticatorData string `json:"authenticatorData"` // base64url
-	ClientDataJSON  string `json:"clientDataJSON"`  // base64url
-	Signature       string `json:"signature"`       // base64url
-	UserHandle      string `json:"userHandle,omitempty"` // base64url
+	SessionID         string `json:"sessionId"`
+	CredentialID      string `json:"credentialId"`         // base64url
+	AuthenticatorData string `json:"authenticatorData"`    // base64url
+	ClientDataJSON    string `json:"clientDataJSON"`       // base64url
+	Signature         string `json:"signature"`            // base64url
+	UserHandle        string `json:"userHandle,omitempty"` // base64url
 }
 
 // handleAuthVerify handles POST /api/auth/verify
@@ -241,6 +241,42 @@ func (s *Server) handleAuthVerify(w http.ResponseWriter, r *http.Request) {
 
 	// Ignore userHandle for now - it's optional
 	_ = userHandle
+}
+
+func (s *Server) handlePasskeyAuthenticationBegin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req BeginAuthenticationRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	response, err := s.webauthn.BeginPasskeyAuthentication(req.Username)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) handlePasskeyAuthenticationFinish(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req FinishAuthenticationRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	response, err := s.webauthn.FinishPasskeyAuthentication(&req)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 // bytesEqual compares two byte slices for equality

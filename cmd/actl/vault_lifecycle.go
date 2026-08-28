@@ -11,6 +11,7 @@ import (
 )
 
 const localVaultHealthURL = "http://127.0.0.1:8033/health"
+const localVaultDashboardURL = "http://localhost:8033/"
 
 func runVaultLifecycle(args []string) bool {
 	if len(args) == 0 {
@@ -39,7 +40,7 @@ func secretsStart(args []string, restart bool) {
 		os.Exit(1)
 	}
 	if !restart && localVaultHealthy() {
-		fmt.Println("Vault is already running and healthy.")
+		fmt.Printf("Vault is already running and healthy.\nDashboard: %s\n", localVaultDashboardURL)
 		return
 	}
 
@@ -60,9 +61,9 @@ func secretsStart(args []string, restart bool) {
 		os.Exit(1)
 	}
 	if restart {
-		fmt.Println("Vault restarted and healthy.")
+		fmt.Printf("Vault restarted and healthy.\nDashboard: %s\n", localVaultDashboardURL)
 	} else {
-		fmt.Println("Vault started and healthy.")
+		fmt.Printf("Vault started and healthy.\nDashboard: %s\n", localVaultDashboardURL)
 	}
 }
 

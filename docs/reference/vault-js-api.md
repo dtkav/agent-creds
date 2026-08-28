@@ -169,6 +169,14 @@ selected upstream policy. Changing a configured credential type's macaroon
 namespace requires a Vault configuration reload; provider-only hot reloads
 that change it are rejected.
 
+A pass-through credential can supply an immutable authority ceiling for a
+capability that crosses an API-composition service. Its provider returns the
+already verified authorization header. When that result leaves `stop` false
+and a distinct credential is configured under the concrete target host,
+Vault continues through the host credential. The host credential evaluates
+the same caveat namespace against the concrete request before replacing the
+bearer with its own authorization material.
+
 `constraintSchema` is public provider metadata. A named authorization uses its
 namespace when asking the SSH discharger to place the configured JSON body in
 a proof macaroon. During request authorization, Vault validates each trusted
@@ -263,13 +271,19 @@ extractors.
 | --- | --- | --- |
 | `headers` | yes | Object whose names and values are strings. The combined provider result must contain at least one header. |
 | `expiresAt` | no | Positive Unix timestamp in seconds. Required for caching. |
-| `stop` | no | When truthy, prevents later matching providers from running. |
+| `stop` | no | When truthy, prevents later matching providers from running. When false on a route-selected credential, Vault may continue through a distinct credential configured under the target host. |
 
 Vault rejects invalid header names and multiline values. When registrations
 are layered, later providers overwrite earlier values with the same
 case-insensitive header name. The earliest positive expiry becomes the
 combined expiry. If any matching provider omits an expiry, the combined result
 is not cacheable.
+
+Host continuation happens only after the route-selected credential's macaroon
+authorizer and provider succeed. The host credential independently evaluates
+the verified caveats before its provider runs. If application constraints are
+present and the host credential has no macaroon authorizer or policy that
+consumes them, the request fails closed.
 
 ### Credential caching
 

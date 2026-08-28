@@ -520,8 +520,19 @@ may still carry transport settings, but
 `credential`, `env`, `credential_file`, `host_caveat`, `methods`, and `paths`
 belong in the named authorization when this form is used. `host_caveat`
 defaults to `true`; set it to `false` only when the same capability must be
-reverified across multiple routed hosts and the Envoy allowlist is the domain
-boundary.
+reverified across multiple routed hosts and an application caveat binds every
+permitted host and operation. Every routed credential or policy must consume
+that caveat; the network allowlist alone is not a cryptographic host ceiling.
+
+A JavaScript credential can preserve the verified bearer at an
+API-composition service by returning the incoming authorization header and
+leaving its provider chain open. Its default application caveat can describe
+an authority ceiling across several downstream routes. When the service
+forwards the capability, Vault continues through the credential configured
+under the concrete target host; that credential independently evaluates the
+same caveat namespace before replacing the bearer with its own authorization
+material. No upstream secret is stored in the macaroon or exposed to the
+composition service.
 
 A named authorization can also protect a policy-only route when the upstream
 consumes the macaroon itself. In that form there is no credential provider:

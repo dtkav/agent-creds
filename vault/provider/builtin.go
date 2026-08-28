@@ -41,7 +41,7 @@ func (p *staticProvider) Resolve(context.Context, Request) (Result, error) {
 	for name, value := range p.headers {
 		headers[name] = value
 	}
-	return Result{Headers: headers}, nil
+	return Result{Headers: headers, Stop: true}, nil
 }
 
 func newBearerProvider(config map[string]any) (CredentialProvider, error) {
@@ -156,7 +156,7 @@ func (p *oauth2Provider) Resolve(_ context.Context, request Request) (Result, er
 	}
 	return Result{Headers: map[string]string{
 		"authorization": "Bearer " + token,
-	}}, nil
+	}, Stop: true}, nil
 }
 
 func newSigV4Provider(config map[string]any) (CredentialProvider, error) {
@@ -195,7 +195,7 @@ func (p *sigV4Provider) Resolve(_ context.Context, request Request) (Result, err
 	if err != nil {
 		return Result{}, err
 	}
-	return Result{Headers: headers}, nil
+	return Result{Headers: headers, Stop: true}, nil
 }
 
 func requiredString(config map[string]any, key string) (string, error) {

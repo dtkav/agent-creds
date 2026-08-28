@@ -129,9 +129,11 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 	}
 	hasRequestToken := requestToken != ""
 
-	// Routes with an explicit policy are authentication boundaries even when
-	// global strict mode is disabled. Never allow passthrough to bypass them.
-	requiresMacaroon := s.strictMode || routePolicy != ""
+	// Routes with an explicit policy or credential macaroon evaluator are
+	// authentication boundaries even when global strict mode is disabled.
+	// Never allow passthrough to bypass them.
+	requiresMacaroon := s.strictMode || routePolicy != "" ||
+		(hasConfiguredCredential && cred.macaroon != nil)
 
 	// Passthrough: unrecognized token format (unless this route requires auth)
 	if !hasRequestToken {
@@ -297,28 +299,69 @@ func (s *authServer) Check(ctx context.Context, req *authv3.CheckRequest) (*auth
 	if err != nil {
 		log.Printf("Credential resolution failed for %s: %v", host, err)
 		s.logAudit("deny", access.Method, host, access.Path, fmt.Sprintf("credential resolution failed: %v", err), tokenID)
-		return &authv3.CheckResponse{
-			Status: &status.Status{Code: int32(codes.Internal)},
-			HttpResponse: &authv3.CheckResponse_DeniedResponse{
-				DeniedResponse: &authv3.DeniedHttpResponse{
-					Status: &typev3.HttpStatus{Code: typev3.StatusCode_InternalServerError},
-					Body:   "Failed to resolve credentials",
-				},
-			},
-		}, nil
+		return credentialResolutionErrorResponse(), nil
 	}
 	if err := provider.ValidateHeaders(providerResult.Headers); err != nil {
 		log.Printf("Credential resolution failed for %s: %v", host, err)
 		s.logAudit("deny", access.Method, host, access.Path, fmt.Sprintf("credential resolution failed: %v", err), tokenID)
-		return &authv3.CheckResponse{
-			Status: &status.Status{Code: int32(codes.Internal)},
-			HttpResponse: &authv3.CheckResponse_DeniedResponse{
-				DeniedResponse: &authv3.DeniedHttpResponse{
-					Status: &typev3.HttpStatus{Code: typev3.StatusCode_InternalServerError},
-					Body:   "Failed to resolve credentials",
-				},
-			},
-		}, nil
+		return credentialResolutionErrorResponse(), nil
+	}
+
+	// A provider may leave its chain open with stop=false. When the route names
+	// a credential other than the target host, continue through the host-bound
+	// credential. This lets one sandbox capability credential preserve the
+	// verified bearer at a composition-service ingress, while downstream
+	// credential handlers independently evaluate the same caveats and replace
+	// it with their own authorization material.
+	if !providerResult.Stop && credentialKey != host {
+		if hostCredential, ok := runtime.credentials[host]; ok {
+			decision, policyErr := s.authorizePoliciesWithRuntime(
+				runtime,
+				ctx,
+				result,
+				access,
+				body,
+				bodyPartial,
+				&hostCredential,
+				true,
+				hostCredential.policy,
+			)
+			if policyErr != nil {
+				reason := fmt.Sprintf("host credential policy failed: %v", policyErr)
+				log.Printf("%s", reason)
+				s.logAudit("deny", access.Method, host, access.Path, reason, tokenID)
+				return policyErrorResponse(), nil
+			}
+			if !decision.Allow {
+				log.Printf("Host credential policy denied %s %s: %s", access.Method, host, decision.Reason)
+				s.logAudit("deny", access.Method, host, access.Path, decision.Reason, tokenID)
+				return policyDeniedResponse(decision.Reason), nil
+			}
+
+			hostResult, resolveErr := hostCredential.provider.Resolve(ctx, provider.Request{
+				Credential:     host,
+				CredentialType: hostCredential.credentialType,
+				Host:           host,
+				Method:         httpReq.GetMethod(),
+				Path:           httpReq.GetPath(),
+				Headers:        headers,
+				Body:           body,
+				BodyPartial:    bodyPartial,
+			})
+			if resolveErr != nil {
+				log.Printf("Host credential resolution failed for %s: %v", host, resolveErr)
+				s.logAudit("deny", access.Method, host, access.Path, fmt.Sprintf("host credential resolution failed: %v", resolveErr), tokenID)
+				return credentialResolutionErrorResponse(), nil
+			}
+			if err := provider.ValidateHeaders(hostResult.Headers); err != nil {
+				log.Printf("Host credential resolution failed for %s: %v", host, err)
+				s.logAudit("deny", access.Method, host, access.Path, fmt.Sprintf("host credential resolution failed: %v", err), tokenID)
+				return credentialResolutionErrorResponse(), nil
+			}
+			for name, value := range hostResult.Headers {
+				providerResult.Headers[strings.ToLower(name)] = value
+			}
+		}
 	}
 
 	log.Printf("Auth successful for %s %s %s", access.Method, host, access.Path)
@@ -467,6 +510,18 @@ func policyErrorResponse() *authv3.CheckResponse {
 			DeniedResponse: &authv3.DeniedHttpResponse{
 				Status: &typev3.HttpStatus{Code: typev3.StatusCode_InternalServerError},
 				Body:   "Upstream policy failed",
+			},
+		},
+	}
+}
+
+func credentialResolutionErrorResponse() *authv3.CheckResponse {
+	return &authv3.CheckResponse{
+		Status: &status.Status{Code: int32(codes.Internal)},
+		HttpResponse: &authv3.CheckResponse_DeniedResponse{
+			DeniedResponse: &authv3.DeniedHttpResponse{
+				Status: &typev3.HttpStatus{Code: typev3.StatusCode_InternalServerError},
+				Body:   "Failed to resolve credentials",
 			},
 		},
 	}

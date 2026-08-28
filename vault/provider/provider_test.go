@@ -152,4 +152,7 @@ func TestBearerProviderUsesStaticHeaderPreset(t *testing.T) {
 	if got := result.Headers["authorization"]; got != "Bearer secret" {
 		t.Fatalf("authorization = %q, want %q", got, "Bearer secret")
 	}
+	if !result.Stop {
+		t.Fatal("built-in bearer provider left the credential chain open")
+	}
 }

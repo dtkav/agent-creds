@@ -170,12 +170,15 @@ namespace requires a Vault configuration reload; provider-only hot reloads
 that change it are rejected.
 
 A pass-through credential can supply an immutable authority ceiling for a
-capability that crosses an API-composition service. Its provider returns the
-already verified authorization header. When that result leaves `stop` false
-and a distinct credential is configured under the concrete target host,
-Vault continues through the host credential. The host credential evaluates
-the same caveat namespace against the concrete request before replacing the
-bearer with its own authorization material.
+platform capability that crosses one or more first-party composition services.
+Its provider returns the already verified authorization header. When that
+result leaves `stop` false and a distinct credential is configured under the
+concrete target host, Vault continues through the host credential. The host
+credential evaluates the shared caveat namespace against the concrete request
+before replacing the bearer with its own authorization material. Credential
+types may accept ordinary direct macaroons when those application constraints
+are absent; if the constraints are present, every one must be consumed and
+enforced.
 
 `constraintSchema` is public provider metadata. A named authorization uses its
 namespace when asking the SSH discharger to place the configured JSON body in

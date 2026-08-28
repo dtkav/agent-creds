@@ -482,9 +482,11 @@ macaroon caveats provide request-time enforcement.
 
 ### Scope access
 
-For credentialed routes, `adev` derives host, method, and path caveats from
-the project configuration. The agent receives only the resulting capability,
-not a copy of the root key or upstream credential.
+When a credentialed route requests delivery through `env` or
+`credential_file`, `adev` derives host, method, and path caveats from the
+project configuration. The agent receives only the resulting capability, not
+a copy of the root key or upstream credential. A route with only `credential`
+selects the Vault handler without delivering another capability.
 
 Macaroons can also carry:
 
@@ -530,15 +532,23 @@ reverified across multiple routed hosts and an application caveat binds every
 permitted host and operation. Every routed credential or policy must consume
 that caveat; the network allowlist alone is not a cryptographic host ceiling.
 
-A JavaScript credential can preserve the verified bearer at an
-API-composition service by returning the incoming authorization header and
-leaving its provider chain open. Its default application caveat can describe
-an authority ceiling across several downstream routes. When the service
-forwards the capability, Vault continues through the credential configured
-under the concrete target host; that credential independently evaluates the
-same caveat namespace before replacing the bearer with its own authorization
-material. No upstream secret is stored in the macaroon or exposed to the
-composition service.
+A JavaScript credential can represent a platform capability accepted at one or
+more first-party composition services. Its default application caveat describes
+an authority ceiling across downstream routes, while construction can fill an
+attested subject hole. At an ingress service, its provider preserves the
+verified bearer and leaves the provider chain open. When the service forwards
+the capability, Vault continues through the credential configured under the
+concrete target host; that credential independently evaluates the shared
+caveat contract before replacing the bearer with its own authorization
+material.
+
+Host credentials implement the caveat semantics, not an allowlist of
+composition-service names. A service credential can continue accepting its
+ordinary direct macaroons when the shared application constraints are absent;
+when they are present, it must consume and enforce all of them. Adding another
+platform ingress therefore does not require another branch in each downstream
+credential. No upstream secret is stored in the macaroon or exposed to an
+intermediate service.
 
 A named authorization can also protect a policy-only route when the upstream
 consumes the macaroon itself. In that form there is no credential provider:

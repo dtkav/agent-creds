@@ -111,7 +111,11 @@ type UpstreamConfig struct {
 }
 
 func (u UpstreamConfig) MintsToken() bool {
-	return u.Credential != "" || u.Authorization != ""
+	// Credential selects Vault's route handler. Delivery is a separate,
+	// explicit choice: without env or credential_file, the sandbox must supply
+	// a request-local capability (or rely on a credential type that needs no
+	// caller token), and adev has nothing to mint into the workload.
+	return (u.Env != "" || u.CredentialFile != "") && (u.Credential != "" || u.Authorization != "")
 }
 
 func (u UpstreamConfig) AddressValue(host string) string {
@@ -363,12 +367,12 @@ func MatchGlob(pattern, value string) bool {
 func ValidateUpstreams(upstreams map[string]UpstreamConfig) error {
 	credentialFiles := make(map[string]string)
 	for host, u := range upstreams {
+		if (u.Env != "" || u.CredentialFile != "") && u.Credential == "" && u.Authorization == "" {
+			return fmt.Errorf("upstream %q: env or credential_file requires a credential or named authorization", host)
+		}
 		if u.CredentialFile != "" {
 			if u.Env != "" {
 				return fmt.Errorf("upstream %q: env and credential_file are mutually exclusive", host)
-			}
-			if !u.MintsToken() {
-				return fmt.Errorf("upstream %q: credential_file requires a minted credential", host)
 			}
 			if !validCredentialFilename(u.CredentialFile) {
 				return fmt.Errorf("upstream %q: credential_file %q must be a safe basename", host, u.CredentialFile)

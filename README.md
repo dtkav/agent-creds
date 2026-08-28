@@ -363,17 +363,23 @@ The main upstream fields are:
 
 | Field | Meaning |
 | --- | --- |
-| `credential` | Vault credential path, such as `/service/read` |
-| `env` | Override the legacy environment variable used to deliver the minted capability |
-| `credential_file` | Deliver a one-hour hot capability at `/run/credentials/<basename>`; mutually exclusive with `env` |
+| `credential` | Select the Vault credential for the route, such as `/service/read`; does not by itself deliver a capability into the sandbox |
+| `env` | Mint and deliver a capability in this environment variable |
+| `credential_file` | Mint and deliver a one-hour hot capability at `/run/credentials/<basename>`; mutually exclusive with `env` |
 | `policy` | Trusted Vault policy path; selecting one requires a valid macaroon |
 | `methods` | Allowed HTTP methods; empty means all |
 | `paths` | Allowed path patterns; `*` matches one segment and `**` matches many |
 | `scheme`, `port` | Upstream transport; defaults to HTTPS on 443 |
 | `address`, `network` | Fixed origin and Envoy-only Docker network for private services |
 
-Changes to upstreams are watched. Envoy configuration and credential tokens
-are refreshed without rebuilding the entire environment when possible.
+Changes to upstreams are watched. Envoy configuration and explicitly delivered
+credential tokens are refreshed without rebuilding the entire environment
+when possible.
+
+Credential selection and capability delivery are independent. A route with
+only `credential` lets Vault select and run that credential handler but asks
+`adev` to inject nothing into the workload. Add `env` or `credential_file`
+only when the sandbox itself needs a separately minted capability.
 
 Service wrappers should prefer file delivery when they can reread a credential
 for each operation:
@@ -549,8 +555,12 @@ namespace = "records-context"
 credential_file = "records-context"
 methods = ["POST"]
 paths = ["/graphql"]
-subject = "user:usr_123"
 ```
+
+Reusable sandbox definitions should not contain session identity. The sandbox
+constructor adds application-owned fields such as `subject` to the completed
+runtime authorization; those fields become the attestation body interpreted
+by the selected policy.
 
 GitHub also accepts a repository map when one workflow owns distinct branches
 in a product and a private overlay:

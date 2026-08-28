@@ -208,3 +208,19 @@ func TestValidateUpstreamsAcceptsCredentialFileDelivery(t *testing.T) {
 		t.Fatal("duplicate credential file delivery was accepted")
 	}
 }
+
+func TestValidateUpstreamsSeparatesCredentialSelectionFromDelivery(t *testing.T) {
+	selectionOnly := map[string]UpstreamConfig{
+		"api.example.test": {Credential: "/example/session"},
+	}
+	if err := ValidateUpstreams(selectionOnly); err != nil {
+		t.Fatalf("credential selection without delivery: %v", err)
+	}
+
+	deliveryWithoutAuthority := map[string]UpstreamConfig{
+		"api.example.test": {Env: "EXAMPLE_TOKEN"},
+	}
+	if err := ValidateUpstreams(deliveryWithoutAuthority); err == nil {
+		t.Fatal("credential delivery without a credential or named authorization was accepted")
+	}
+}

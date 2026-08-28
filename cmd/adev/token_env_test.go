@@ -24,3 +24,24 @@ func TestUpstreamEnvChangeRequiresRemint(t *testing.T) {
 		t.Fatal("env override change did not invalidate the minted token environment")
 	}
 }
+
+func TestUpstreamMintsOnlyForExplicitDelivery(t *testing.T) {
+	tests := []struct {
+		name     string
+		upstream UpstreamConfig
+		want     bool
+	}{
+		{name: "route credential only", upstream: UpstreamConfig{Credential: "/service/session"}},
+		{name: "credential environment", upstream: UpstreamConfig{Credential: "/service/session", Env: "SERVICE_TOKEN"}, want: true},
+		{name: "credential file", upstream: UpstreamConfig{Credential: "/service/session", CredentialFile: "service"}, want: true},
+		{name: "named policy environment", upstream: UpstreamConfig{Authorization: "context", Env: "SERVICE_TOKEN"}, want: true},
+		{name: "named credential without delivery", upstream: UpstreamConfig{Credential: "/service/session", Authorization: "context"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.upstream.MintsToken(); got != test.want {
+				t.Fatalf("MintsToken() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}

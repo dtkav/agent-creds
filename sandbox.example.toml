@@ -26,7 +26,7 @@ name = "myproject"
 # Only these domains are reachable from the sandbox. All other traffic is blocked.
 
 [upstream."api.stripe.com"]
-# credential = "/stripe/prod"
+# credential = "/stripe/prod"       # selects Vault's route handler; does not inject by itself
 # credential_file = "stripe"       # projected at /run/credentials/stripe; mutually exclusive with env
 # policy = "/stripe/write"
 # methods = ["GET", "POST"]       # restrict to specific HTTP methods
@@ -50,9 +50,10 @@ name = "myproject"
 # branches = ["queue/example"]
 
 # Pi supports OpenRouter via OPENROUTER_API_KEY. Set credential to the path of
-# a bearer credential configured with that environment variable.
+# a bearer credential and opt into delivery with env.
 [upstream."openrouter.ai"]
 # credential = "/openrouter"
+# env = "OPENROUTER_API_KEY"
 
 # Claude Code requires these endpoints for API and OAuth
 [upstream."api.anthropic.com"]

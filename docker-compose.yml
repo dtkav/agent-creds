@@ -18,7 +18,7 @@ services:
     volumes:
       - vault-data:/data
       # Bind mount keeps deployment-specific JavaScript extensions hot-reloadable.
-      - ./vault/providers.d:/app/providers.d:ro
+      - ${VAULT_PROVIDERS_DIR:-./vault/providers.d}:/app/providers.d:ro
     secrets:
       - vault_config
     healthcheck:
